@@ -69,48 +69,6 @@ fn set(who: u8, on: bool) {
     SAMPLING.with(|s| s.set(if on { s.get() | who } else { s.get() & !who }));
 }
 
-/// Who samples on this thread: what a helper thread running part of its mob loop samples for.
-#[cfg(any(test, feature = "upstream-parallel-mobs"))]
-pub(super) fn sampling() -> u8 {
-    SAMPLING.with(Cell::get)
-}
-
-/// A helper thread's sums, for the thread whose mob loop it ran part of ([`merge`]).
-#[cfg(any(test, feature = "upstream-parallel-mobs"))]
-pub(super) struct Sums([Totals; 1]);
-
-/// This helper thread samples for `who` ([`sampling`] of the thread it helps), from empty sums.
-#[cfg(any(test, feature = "upstream-parallel-mobs"))]
-pub(super) fn begin_helper(who: u8) {
-    SAMPLING.with(|s| s.set(who));
-    COSTS.with(|c| *c.borrow_mut() = Default::default());
-}
-
-/// What this helper thread sampled since [`begin_helper`]; it samples nothing more.
-#[cfg(any(test, feature = "upstream-parallel-mobs"))]
-pub(super) fn end_helper() -> Sums {
-    SAMPLING.with(|s| s.set(0));
-    Sums(COSTS.with(|c| std::mem::take(&mut *c.borrow_mut())))
-}
-
-/// Add a helper thread's sums to this thread's.
-#[cfg(any(test, feature = "upstream-parallel-mobs"))]
-pub(super) fn merge(sums: Sums) {
-    COSTS.with(|c| {
-        let mut costs = c.borrow_mut();
-        for (into, from) in costs.iter_mut().zip(sums.0) {
-            for (dim, kinds) in from {
-                let into = into.entry(dim).or_default();
-                for (kind, cost) in kinds {
-                    let sum = into.entry(kind).or_default();
-                    sum.nanos += cost.nanos;
-                    sum.mob_ticks += cost.mob_ticks;
-                }
-            }
-        }
-    });
-}
-
 /// When this tick is sampled, the start of a mob's tick.
 #[inline]
 pub(super) fn start() -> Option<Instant> {
@@ -246,82 +204,6 @@ mod tests {
             ("minecraft:zombie", 1)
         );
         assert!(take().is_empty());
-    }
-
-    /// A helper thread running part of the mob loop samples for whoever samples on the thread
-    /// it helps, and its sums join that thread's.
-    #[test]
-    fn a_helper_threads_samples_join_the_server_threads() {
-        let zombie = "minecraft:zombie";
-        set_sampling(true);
-        add("minecraft:overworld", zombie, Instant::now());
-        let who = sampling();
-        let helped = std::thread::spawn(move || {
-            begin_helper(who);
-            for _ in 0..2 {
-                add("minecraft:overworld", zombie, start().expect("sampled"));
-            }
-            let sums = end_helper();
-            assert!(start().is_none(), "the helper stops sampling");
-            sums
-        })
-        .join()
-        .unwrap();
-        merge(helped);
-        set_sampling(false);
-        let costs = take();
-        assert_eq!(costs.len(), 1, "{costs:?}");
-        assert_eq!(costs[0].mob_ticks, 3);
-    }
-
-    /// Many mobs of one type over several ticks, some ticked on helper threads and merged back,
-    /// make one row for the type in each level, with every tick counted.
-    #[test]
-    fn one_row_per_type_however_many_mobs_and_threads() {
-        let who = {
-            set_sampling(true);
-            sampling()
-        };
-        let chicken = "minecraft:chicken";
-        let mut helpers = Vec::new();
-        for _ in 0..4 {
-            // A sampled server tick: mobs on this thread, mobs on two helpers.
-            for _ in 0..5 {
-                add("minecraft:overworld", chicken, start().unwrap());
-            }
-            add("minecraft:the_nether", chicken, Instant::now());
-            add("minecraft:overworld", "minecraft:bee", Instant::now());
-            for _ in 0..2 {
-                helpers.push(
-                    std::thread::spawn(move || {
-                        begin_helper(who);
-                        for _ in 0..3 {
-                            add("minecraft:overworld", chicken, start().unwrap());
-                        }
-                        end_helper()
-                    })
-                    .join()
-                    .unwrap(),
-                );
-            }
-            for sums in helpers.drain(..) {
-                merge(sums);
-            }
-        }
-        set_sampling(false);
-        let costs = take();
-        let ticks = |dim: &str, kind: &str| {
-            let rows: Vec<_> = costs
-                .iter()
-                .filter(|c| c.dimension == dim && c.kind == kind)
-                .collect();
-            assert_eq!(rows.len(), 1, "{costs:?}");
-            rows[0].mob_ticks
-        };
-        assert_eq!(ticks("minecraft:overworld", chicken), 4 * (5 + 2 * 3));
-        assert_eq!(ticks("minecraft:the_nether", chicken), 4);
-        assert_eq!(ticks("minecraft:overworld", "minecraft:bee"), 4);
-        assert_eq!(costs.len(), 3, "{costs:?}");
     }
 
     /// Spans stay on while anyone wants them.

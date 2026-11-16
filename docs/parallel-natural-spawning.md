@@ -41,8 +41,7 @@ places, and the commit takes the first in the pass's order, as the serial pass w
 ## What differs from vanilla, and what does not
 
 The result has vanilla's odds and rules but not its draws: each chunk draws from its own random, not the level's, so a
-seed does not give the mobs a vanilla level would (the same departure as the villagers' own random,
-[mob-islands.md](mob-islands.md#villagers-draw-their-own-random)). The level's random is drawn from for the shuffle only,
+seed does not give the mobs a vanilla level would. The level's random is drawn from for the shuffle only,
 so it is advanced differently than by the serial pass. The result is the same for any number of lanes: a chunk's random
 and the state it proposes against do not depend on the lane that takes it, and the commit is in the shuffled order.
 
@@ -51,7 +50,7 @@ and the state it proposes against do not depend on the lane that takes it, and t
 - the parallel tick is off, or there is one lane (one core);
 - fewer than 512 candidate chunks (about two players' worth, a player's square is 289): a pass over fewer costs about
   half a millisecond, which handing out the work and building a level for each part is close to;
-- a native mod listens to spawns (its hooks run on the server thread only; the mob islands do the same);
+- a native mod listens to spawns (its hooks run on the server thread only);
 - `SUNRISE_TEST_SEEDS` replays a seed sequence per thread (`random_source::repeating_per_thread`).
 
 `verify` (`SUNRISE_PARALLEL_TICK=verify`) cannot check this phase against the serial one: the draws differ by design.

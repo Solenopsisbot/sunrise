@@ -13447,18 +13447,6 @@ mod breeding_heart_tests {
     }
 }
 
-#[cfg(feature = "upstream-parallel-mobs")]
-#[path = "../../creatures/mob_group.rs"]
-mod mob_group;
-
-#[cfg(feature = "upstream-parallel-mobs")]
-#[path = "../../creatures/mob_islands.rs"]
-mod mob_islands;
-
-#[cfg(feature = "upstream-parallel-mobs")]
-#[path = "../../creatures/prep.rs"]
-mod prep;
-
 #[cfg(test)]
 #[path = "frame_projectile_tests.rs"]
 mod frame_projectile_tests;
