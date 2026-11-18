@@ -8,7 +8,7 @@
 //! `SUNRISE_RESOURCES` selects the prepared resources (default:
 //! `.local/sunrise-client/<version>`), the same as the parity probes.
 
-use std::{collections::HashMap, path::PathBuf, time::Instant};
+use std::{cell::Cell, path::PathBuf, time::Instant};
 use sunrise_core::{
     geometry::{BlockHit, Direction, Vec3},
     position::BlockPos,
@@ -22,28 +22,75 @@ use sunrise_world::{
 };
 
 const LENGTH: i32 = 128;
+const PLATE: i32 = 16;
 const LINES: i32 = 4;
 const TOGGLES: i32 = 40;
+/// Rounds of `TOGGLES`; the run reports each and the best, because this
+/// machine's timings drift by tens of percent between runs.
+const ROUNDS: usize = 5;
 
+/// A dense box of block states: the benchmark's world is a 130-cell line, so
+/// an array read is what the game's chunk read costs. A `HashMap` here would
+/// make the run measure hash overhead instead of redstone.
 struct Cells {
-    cells: HashMap<BlockPos, BlockStateId>,
+    states: Vec<BlockStateId>,
+    origin: (i32, i32, i32),
+    size: (i32, i32, i32),
     air: BlockStateId,
     random: LegacyRandom,
     time: i64,
+    /// Level traffic, so the run can say what the cascade costs in reads and
+    /// writes rather than only in time.
+    reads: Cell<u64>,
+    writes: Cell<u64>,
+}
+
+/// Room for the lines, their stone, and the probes redstone makes around them.
+const BOX: (i32, i32, i32) = (160, 24, 32);
+
+impl Cells {
+    fn new(air: BlockStateId) -> Self {
+        let (sx, sy, sz) = BOX;
+        Self {
+            states: vec![air; (sx * sy * sz) as usize],
+            origin: (-16, 54, -8),
+            size: BOX,
+            air,
+            random: LegacyRandom::new(0),
+            time: 0,
+            reads: Cell::new(0),
+            writes: Cell::new(0),
+        }
+    }
+
+    fn slot(&self, pos: BlockPos) -> Option<usize> {
+        let (ox, oy, oz) = self.origin;
+        let (sx, sy, sz) = self.size;
+        let (x, y, z) = (pos.x - ox, pos.y - oy, pos.z - oz);
+        ((0..sx).contains(&x) && (0..sy).contains(&y) && (0..sz).contains(&z))
+            .then(|| ((y * sz + z) * sx + x) as usize)
+    }
+
+    fn set(&mut self, pos: BlockPos, state: BlockStateId) {
+        let slot = self
+            .slot(pos)
+            .unwrap_or_else(|| panic!("write outside the benchmark box at {pos:?}"));
+        self.states[slot] = state;
+    }
 }
 
 impl BlockEntityNeighbors for Cells {}
 impl LevelAccess for Cells {
     fn block_state(&self, pos: BlockPos) -> BlockStateId {
-        self.cells.get(&pos).copied().unwrap_or(self.air)
+        self.reads.set(self.reads.get() + 1);
+        self.slot(pos).map_or(self.air, |slot| self.states[slot])
     }
     fn set_raw(&mut self, pos: BlockPos, state: BlockStateId) -> Option<BlockStateId> {
-        let old = if state == self.air {
-            self.cells.remove(&pos)
-        } else {
-            self.cells.insert(pos, state)
-        };
-        Some(old.unwrap_or(self.air))
+        self.writes.set(self.writes.get() + 1);
+        let slot = self.slot(pos)?;
+        let old = self.states[slot];
+        self.states[slot] = state;
+        Some(old)
     }
     fn is_loaded(&self, _pos: BlockPos) -> bool {
         true
@@ -105,6 +152,44 @@ fn run(behaviours: &Behaviours, level: &mut Cells, ticks: &mut Ticks) -> u32 {
     t
 }
 
+/// Toggle every lever `TOGGLES` times, round by round, and report the best
+/// round plus the level traffic per toggle.
+fn measure(
+    name: &str,
+    behaviours: &Behaviours,
+    level: &mut Cells,
+    ticks: &mut Ticks,
+    levers: &[BlockPos],
+) {
+    let mut rounds = Vec::new();
+    let mut reads = 0u64;
+    let mut writes = 0u64;
+    let per_round = TOGGLES as usize * levers.len();
+    for _ in 0..ROUNDS {
+        level.reads.set(0);
+        level.writes.set(0);
+        let started = Instant::now();
+        for _ in 0..TOGGLES {
+            for &at in levers {
+                flip(behaviours, level, ticks, at);
+                run(behaviours, level, ticks);
+            }
+        }
+        rounds.push(started.elapsed());
+        reads += level.reads.get();
+        writes += level.writes.get();
+    }
+    let best = rounds.iter().min().copied().unwrap_or_default();
+    let per_toggle = best.as_secs_f64() * 1e6 / per_round as f64;
+    println!(
+        "{name}: best round {best:.3?} ({per_toggle:.1} us/toggle), {:.0} reads, \
+         {:.1} writes per toggle",
+        reads as f64 / (per_round * ROUNDS) as f64,
+        writes as f64 / (per_round * ROUNDS) as f64,
+    );
+    println!("  rounds: {rounds:.3?}");
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resources = std::env::var_os("SUNRISE_RESOURCES")
         .map(PathBuf::from)
@@ -127,48 +212,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state("minecraft:lever"),
     );
 
-    let mut level = Cells {
-        cells: HashMap::new(),
-        air,
-        random: LegacyRandom::new(0),
-        time: 0,
-    };
+    // A line: two sources per wire, the shape `getBestNeighborSignal` and
+    // `getIncomingSignal` handle most cheaply.
+    let mut level = Cells::new(air);
     let mut ticks = Ticks::new(0);
     let mut levers = Vec::new();
     for line in 0..LINES {
         let z = line * 2;
         let lever_pos = BlockPos::new(-1, 64, z);
-        level.cells.insert(lever_pos, lever);
+        level.set(lever_pos, lever);
         levers.push(lever_pos);
         for x in 0..LENGTH {
-            level.cells.insert(BlockPos::new(x, 63, z), stone);
-            level.cells.insert(BlockPos::new(x, 64, z), wire);
+            level.set(BlockPos::new(x, 63, z), stone);
+            level.set(BlockPos::new(x, 64, z), wire);
         }
     }
-
     // Warm up: the first toggle also gives every wire its connection shape.
     for &at in &levers {
         flip(&behaviours, &mut level, &mut ticks, at);
-    }
-    for _ in &levers {
         run(&behaviours, &mut level, &mut ticks);
     }
-    let warmup = level.time;
+    measure(
+        &format!("{LINES} lines x {LENGTH} wire"),
+        &behaviours,
+        &mut level,
+        &mut ticks,
+        &levers,
+    );
 
-    let started = Instant::now();
-    let mut ticks_run = 0u32;
-    for _ in 0..TOGGLES {
-        for &at in &levers {
-            flip(&behaviours, &mut level, &mut ticks, at);
-            ticks_run += run(&behaviours, &mut level, &mut ticks);
+    // A field: up to eight sources per wire, and every one of them probed from
+    // every direction. This is the shape a redstone computer's memory is, and
+    // the one the per-wire walks are quadratic in.
+    let mut level = Cells::new(air);
+    let mut ticks = Ticks::new(0);
+    let lever_pos = BlockPos::new(-1, 64, 0);
+    level.set(lever_pos, lever);
+    for x in 0..PLATE {
+        for z in 0..PLATE {
+            level.set(BlockPos::new(x, 63, z), stone);
+            level.set(BlockPos::new(x, 64, z), wire);
         }
     }
-    let elapsed = started.elapsed();
-    let toggles = TOGGLES * levers.len() as i32;
-    println!(
-        "{LINES} lines x {LENGTH} wire: {toggles} toggles in {elapsed:.3?} ({:.1} us/toggle), \
-         {ticks_run} follow-up ticks (wire cascades run inline; warmup {warmup})",
-        elapsed.as_secs_f64() * 1e6 / f64::from(toggles),
+    let levers = [lever_pos];
+    for &at in &levers {
+        flip(&behaviours, &mut level, &mut ticks, at);
+        run(&behaviours, &mut level, &mut ticks);
+    }
+    measure(
+        &format!("{PLATE} x {PLATE} wire field"),
+        &behaviours,
+        &mut level,
+        &mut ticks,
+        &levers,
     );
     Ok(())
 }
