@@ -370,6 +370,17 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if old == state {
             return None;
         }
+        // A wire's own power and shape feed neither cached wire input, so a
+        // cascade's own writes keep its cache; any other write can change one.
+        let wire = self.b.named.redstone_wire;
+        let (old_wire, new_wire) = (self.b.is_block(old, wire), self.b.is_block(state, wire));
+        if !old_wire || !new_wire {
+            self.ticks.wire_graph.invalidate();
+        } else {
+            // Keep the node's copy of the power in step with the level.
+            let power = self.b.table.int(state, self.b.props.power) as u8;
+            self.ticks.wire_graph.set_power(pos, power);
+        }
         self.level.observe_block_changed(pos, old, state);
         let new_block = self.block_of(state);
         let block_changed = self.block_of(old) != new_block;
@@ -675,7 +686,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             }
         }
         if !running {
+            // One run is one cascade; the wire cache lives exactly as long.
+            self.ticks.wire_graph.begin();
             self.run_updates();
+            self.ticks.wire_graph.end();
         }
     }
     fn run_updates(&mut self) {

@@ -31,6 +31,9 @@ pub struct Ticks {
     /// Memoized wire connection states for one `Signals` view; see
     /// [`super::redstone::WireConnections`].
     pub(crate) wire_connections: super::redstone::WireConnections,
+    /// Cached wire inputs for the cascade in flight; see
+    /// [`super::redstone::WireGraph`].
+    pub(crate) wire_graph: super::redstone::WireGraph,
     /// Moving-piston block entities in ticker order (render and collide
     /// moving blocks from these; see `piston_shape`).
     pub moving_pistons: Vec<(BlockPos, super::pistons::MovingPiston)>,
@@ -81,6 +84,7 @@ impl Ticks {
             comparator_outputs: Default::default(),
             torch_toggles: std::collections::VecDeque::new(),
             wire_connections: Default::default(),
+            wire_graph: Default::default(),
             moving_pistons: Vec::new(),
             moving_piston_ids: FxHashMap::default(),
             piston_pushes: Vec::new(),

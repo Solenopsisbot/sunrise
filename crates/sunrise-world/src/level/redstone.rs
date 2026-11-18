@@ -19,8 +19,10 @@ use sunrise_core::{
 
 mod experimental;
 mod wire_cache;
+mod wire_graph;
 
 pub(crate) use wire_cache::WireConnections;
+pub(crate) use wire_graph::WireGraph;
 
 const SIGNAL_ORDER: [Direction; 6] = [
     Direction::Down,
@@ -167,20 +169,101 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     }
     fn wire_incoming_signal(&self, pos: BlockPos) -> i32 {
         let mut signal = 0;
+        let above_pos = above(pos);
+        let above_is_conductor = self.is_redstone_conductor(self.state(above_pos), above_pos);
         for direction in HORIZONTAL {
             let neighbour_pos = rel(pos, direction);
             let neighbour = self.state(neighbour_pos);
             signal = signal.max(self.wire_power_of(neighbour));
-            let above_pos = above(pos);
-            if self.is_redstone_conductor(neighbour, neighbour_pos)
-                && !self.is_redstone_conductor(self.state(above_pos), above_pos)
-            {
+            let conductor = self.is_redstone_conductor(neighbour, neighbour_pos);
+            if conductor && !above_is_conductor {
                 signal = signal.max(self.wire_power_of(self.state(above(neighbour_pos))));
-            } else if !self.is_redstone_conductor(neighbour, neighbour_pos) {
+            } else if !conductor {
                 signal = signal.max(self.wire_power_of(self.state(below(neighbour_pos))));
             }
         }
         (signal - 1).max(0)
+    }
+    /// The offsets around `pos` that [`Self::wire_incoming_signal`] reads a
+    /// wire's power from, as a bitmask over
+    /// [`SOURCE_OFFSETS`](wire_graph::SOURCE_OFFSETS).
+    ///
+    /// This is that walk with the position of each `powerOf` argument kept
+    /// instead of its value. A debug build holds the two against each other on
+    /// every identification ([`Self::wire_node`]).
+    fn wire_source_mask(&self, pos: BlockPos) -> u16 {
+        let wire = self.b.named.redstone_wire;
+        let mut mask = 0;
+        let above_pos = above(pos);
+        let above_is_conductor = self.is_redstone_conductor(self.state(above_pos), above_pos);
+        let mut record = |at: BlockPos| {
+            mask |= 1 << wire_graph::source_index(at.x - pos.x, at.z - pos.z, at.y - pos.y);
+        };
+        for direction in HORIZONTAL {
+            let neighbour_pos = rel(pos, direction);
+            let neighbour = self.state(neighbour_pos);
+            if self.b.is_block(neighbour, wire) {
+                record(neighbour_pos);
+            }
+            let conductor = self.is_redstone_conductor(neighbour, neighbour_pos);
+            if conductor && !above_is_conductor {
+                let step = above(neighbour_pos);
+                if self.b.is_block(self.state(step), wire) {
+                    record(step);
+                }
+            } else if !conductor {
+                let step = below(neighbour_pos);
+                if self.b.is_block(self.state(step), wire) {
+                    record(step);
+                }
+            }
+        }
+        mask
+    }
+    /// The incoming signal for a cached source mask: the walk of
+    /// [`Self::wire_incoming_signal`] narrowed to the offsets the mask holds,
+    /// and reading the powers from the run's cache.
+    fn wire_incoming_from(&self, pos: BlockPos, sources: u16) -> i32 {
+        let mut signal = 0;
+        let mut mask = sources;
+        while mask != 0 {
+            let index = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            let (dx, dy, dz) = wire_graph::SOURCE_OFFSETS[index];
+            let at = BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz);
+            signal = signal.max(self.cached_wire_power(at));
+        }
+        (signal - 1).max(0)
+    }
+    /// A wire's power, from the run's cache when it has the wire and from the
+    /// level otherwise (a source the cascade has not needed yet).
+    fn cached_wire_power(&self, pos: BlockPos) -> i32 {
+        match self.ticks.wire_graph.get(pos) {
+            Some(node) => i32::from(node.power),
+            None => self.wire_power_of(self.state(pos)),
+        }
+    }
+    /// The cached inputs for `pos`, walking the level once if this run has not
+    /// needed them yet.
+    fn wire_node(&mut self, pos: BlockPos) -> wire_graph::WireNode {
+        if let Some(node) = self.ticks.wire_graph.get(pos) {
+            return node;
+        }
+        let node = wire_graph::WireNode {
+            block_signal: self.wire_block_signal(pos) as u8,
+            sources: self.wire_source_mask(pos),
+            power: self.wire_power_of(self.state(pos)) as u8,
+        };
+        // The two walks are the same walk: one keeps the positions, the other
+        // sums the powers at them. Check the transcription on every
+        // identification a debug build makes, which includes every parity case
+        // the crate's own tests run.
+        debug_assert!(
+            self.wire_incoming_from(pos, node.sources) == self.wire_incoming_signal(pos),
+            "the cached wire sources at {pos:?} do not match the walk",
+        );
+        self.ticks.wire_graph.insert(pos, node);
+        node
     }
     /// `DefaultRedstoneWireEvaluator.updatePowerStrength`.
     pub(crate) fn wire_update_power(
@@ -194,13 +277,25 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             self.experimental_wire_update(pos, orientation, update_shape);
             return;
         }
-        let block_signal = self.wire_block_signal(pos);
+        let node = self.ticks.wire_graph.active().then(|| self.wire_node(pos));
+        let (block_signal, incoming, power) = match node {
+            Some(node) => (
+                i32::from(node.block_signal),
+                self.wire_incoming_from(pos, node.sources),
+                i32::from(node.power),
+            ),
+            None => (
+                self.wire_block_signal(pos),
+                self.wire_incoming_signal(pos),
+                self.b.table.int(state, self.b.props.power),
+            ),
+        };
         let target = if block_signal == 15 {
             15
         } else {
-            block_signal.max(self.wire_incoming_signal(pos))
+            block_signal.max(incoming)
         };
-        if self.b.table.int(state, self.b.props.power) != target {
+        if power != target {
             if self.state(pos) == state {
                 let next = self.b.table.set_int(state, self.b.props.power, target);
                 self.set_block(pos, next, 2);
