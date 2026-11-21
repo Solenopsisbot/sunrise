@@ -1668,6 +1668,8 @@ struct Game<'a> {
     hoppers: HashMap<(i32, i32, i32), machines::HopperState>,
     /// The open `host.transaction`s, innermost last (`transactions.rs`).
     transactions: transactions::OpenTransactions,
+    /// Open mod menus whose `menu_slot_changed` dispatch is currently on the call stack.
+    slot_changed_active: Vec<slot_changes::SlotChangedTarget>,
     /// Backing blocks whose contents notice is on the call stack, innermost last.
     contents_changing: Vec<(mod_api::LevelRef, BlockPos)>,
     /// The mod screen of a menu open on this client (`native_screen`).
@@ -11304,6 +11306,7 @@ impl<'a> Game<'a> {
             tnts: Default::default(),
             hoppers: HashMap::new(),
             transactions: Default::default(),
+            slot_changed_active: Vec::new(),
             block_entity_tick_key: None,
             block_entity_tick_items: None,
             contents_changing: Vec::new(),

@@ -140,8 +140,8 @@ impl Game<'_> {
         let id = mod_api::__private::menu_key_id(menu).ok_or(OpenMenuError::NotModMenu)?;
         let kind =
             sunrise_client::containers::mod_menu_type(&id).ok_or(OpenMenuError::NotModMenu)?;
-        if kind.owned_slots.is_some() && (!kind.results.is_empty() || kind.crafting.is_some()) {
-            return Err(OpenMenuError::OwnedSlotsWithResults);
+        if kind.owned_slots.is_some() && kind.crafting.is_some() {
+            return Err(OpenMenuError::OwnedSlotsWithCrafting);
         }
         if extra.len() > menu_extra::MAX_DATA {
             return Err(OpenMenuError::TooLarge);

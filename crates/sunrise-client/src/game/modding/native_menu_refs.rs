@@ -520,7 +520,12 @@ impl Game<'_> {
             let world = self.native_level_world(self.level(&guest.dimension)?)?;
             let limits = open.slots.stack_limits(world, open.size);
             rules.set_container_limits(limits);
-            rules.set_block_pos(open.pos.map(|(x, y, z)| [x, y, z]));
+            rules.set_block_pos(
+                (open.slots != Slots::Native)
+                    .then_some(open.pos)
+                    .flatten()
+                    .map(|(x, y, z)| [x, y, z]),
+            );
             if open.owned_slots().is_some() {
                 rules.load_container(&env, &guest.native_menu);
             }

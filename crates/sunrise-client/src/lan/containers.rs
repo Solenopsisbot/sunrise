@@ -415,6 +415,11 @@ impl Hub {
                 title,
             }));
             let mod_type = crate::containers::mod_menu_type(menu_kind);
+            let slot_changed_seen = mod_type.map(|t| {
+                let mut seen = items.clone();
+                seen.resize(t.slots, None);
+                seen
+            });
             g.menu = Some(Menu {
                 window,
                 kind,
@@ -433,6 +438,7 @@ impl Hub {
                 links: Vec::new(),
                 asks_still_valid: super::menu::asks_still_valid(mod_type, menu_kind),
                 opening_item: None,
+                slot_changed_seen,
             });
             window
         });
@@ -497,6 +503,7 @@ impl Hub {
                 links: Vec::new(),
                 asks_still_valid: false,
                 opening_item: None,
+                slot_changed_seen: None,
             });
             window
         });
@@ -1301,51 +1308,62 @@ impl Hub {
         });
     }
 
+    /// Sync one guest's open container immediately (`AbstractContainerMenu.broadcastChanges`).
+    pub fn sync_container(&mut self, conn: u32, world: &World) {
+        if let Some(i) = self.guests.connection_index(conn) {
+            self.sync_container_at(i, world);
+        }
+    }
+
+    fn sync_container_at(&mut self, i: usize, world: &World) {
+        let Some(menu) = self.guests[i]
+            .menu
+            .as_ref()
+            .filter(|_| self.here(&self.guests[i]))
+        else {
+            return;
+        };
+        let (total, window, slots) = (menu.slot_count(), menu.window, menu.slots);
+        if !slots.valid(world) {
+            self.close_container_at(i);
+            return;
+        }
+        for slot in 0..total {
+            let now = self.view_slot(i, world, slot);
+            let sent = self.guests[i]
+                .menu
+                .as_ref()
+                .and_then(|m| m.sent.get(slot).cloned());
+            if sent.as_ref() == Some(&now) {
+                continue;
+            }
+            let net = self.stack(&now);
+            self.guests.update(i, |g| {
+                if let Some(m) = g.menu.as_mut() {
+                    m.state = (m.state + 1) & 0x7FFF;
+                    let state = m.state;
+                    if m.sent.len() <= slot {
+                        m.sent.resize(slot + 1, None);
+                    }
+                    m.sent[slot] = now;
+                    g.send(&C::ContainerSetSlot(play::ContainerSetSlot {
+                        container: window,
+                        state,
+                        slot: slot as i16,
+                        item: net,
+                    }));
+                }
+            });
+        }
+        self.sync_carried(i, None);
+        // Then the data slots, as broadcastChanges does.
+        self.sync_container_data(i, world);
+    }
+
     /// Slot changes of open containers (AbstractContainerMenu.broadcastChanges).
     pub fn sync_containers(&mut self, world: &World) {
         for i in 0..self.guests.len() {
-            let Some(menu) = self.guests[i]
-                .menu
-                .as_ref()
-                .filter(|_| self.here(&self.guests[i]))
-            else {
-                continue;
-            };
-            let (total, window, slots) = (menu.slot_count(), menu.window, menu.slots);
-            if !slots.valid(world) {
-                self.close_container_at(i);
-                continue;
-            }
-            for slot in 0..total {
-                let now = self.view_slot(i, world, slot);
-                let sent = self.guests[i]
-                    .menu
-                    .as_ref()
-                    .and_then(|m| m.sent.get(slot).cloned());
-                if sent.as_ref() == Some(&now) {
-                    continue;
-                }
-                let net = self.stack(&now);
-                self.guests.update(i, |g| {
-                    if let Some(m) = g.menu.as_mut() {
-                        m.state = (m.state + 1) & 0x7FFF;
-                        let state = m.state;
-                        if m.sent.len() <= slot {
-                            m.sent.resize(slot + 1, None);
-                        }
-                        m.sent[slot] = now;
-                        g.send(&C::ContainerSetSlot(play::ContainerSetSlot {
-                            container: window,
-                            state,
-                            slot: slot as i16,
-                            item: net,
-                        }));
-                    }
-                });
-            }
-            self.sync_carried(i, None);
-            // Then the data slots, as broadcastChanges does.
-            self.sync_container_data(i, world);
+            self.sync_container_at(i, world);
         }
     }
 }

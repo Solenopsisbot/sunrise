@@ -99,6 +99,8 @@ pub struct Menu {
     pub asks_still_valid: bool,
     /// The hand the opener supplied and its stack at open. Neither travels to the client.
     pub opening_item: Option<(Hand, Option<ItemStack>)>,
+    /// Last container snapshot reconciled with `menu_slot_changed` for this open mod menu.
+    pub slot_changed_seen: Option<Vec<Option<ItemStack>>>,
 }
 
 /// What a mod menu type's crafting grid makes (`ResultContainer`), and the
@@ -2162,6 +2164,7 @@ pub(crate) mod tests {
             links: Vec::new(),
             asks_still_valid: false,
             opening_item: None,
+            slot_changed_seen: None,
         });
         // Nothing made yet: nothing shown.
         assert_eq!(slots.get(&world, &g, 0), None);
@@ -2291,6 +2294,7 @@ pub(crate) mod tests {
             links: Vec::new(),
             asks_still_valid: false,
             opening_item: None,
+            slot_changed_seen: None,
         });
         // Nothing linked yet: the linked slots are empty and all left out.
         let read = slots.read(&world, &g).unwrap();
@@ -3453,6 +3457,7 @@ pub(crate) mod tests {
             links: Vec::new(),
             asks_still_valid: false,
             opening_item: None,
+            slot_changed_seen: None,
         });
         g.inventory[9] = Some(ItemStack::new("minecraft:stone", 1));
         let mut chest = vec![Some(ItemStack::new("minecraft:stone", 1))];

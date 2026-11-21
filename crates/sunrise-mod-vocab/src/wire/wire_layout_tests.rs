@@ -46,6 +46,19 @@ fn checked_records_have_declared_field_bytes() {
     stack.set_damage(11);
     fields(stack.clone(), (key, 7u32, Some(11u32), None::<Components>));
     fields(
+        MenuSlotChange::new(MenuContainer::Main, 1, Some(stack.clone()), None),
+        (
+            MenuContainer::Main,
+            1usize,
+            Some(stack.clone()),
+            None::<ItemStack>,
+        ),
+    );
+    fields(
+        MenuSlotWrite::new(MenuContainer::Main, 2, Some(stack.clone())),
+        (MenuContainer::Main, 2usize, Some(stack.clone())),
+    );
+    fields(
         ItemResource::of(&stack),
         (ItemStack::new(key, 1)
             .map(|mut s| {

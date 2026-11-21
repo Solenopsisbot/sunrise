@@ -1258,8 +1258,8 @@ impl ProfileProperty {
 pub enum OpenMenuError {
     /// The menu type is not a content mod's (`data/<id>/sunrise/menu/`).
     NotModMenu,
-    /// A menu with `owned_slots` also declares a take-only or crafting result.
-    OwnedSlotsWithResults,
+    /// A menu with `owned_slots` also declares a crafting grid.
+    OwnedSlotsWithCrafting,
     /// Opening a new window is not possible during the active menu click action.
     ClickInProgress,
     /// The player is stale, dead, disconnecting, has no supported client, or their turn

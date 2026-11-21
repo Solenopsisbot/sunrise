@@ -1549,6 +1549,21 @@ impl Menu {
         self.state.containers[s.container][s.index].as_ref()
     }
 
+    /// The menu's own containers (`MAIN`, `GRID`, `RESULT`), in [`mod_api::MenuContainer`] order.
+    pub fn slot_containers(
+        &self,
+    ) -> (
+        &[Option<ItemStack>],
+        &[Option<ItemStack>],
+        &[Option<ItemStack>],
+    ) {
+        (
+            &self.state.containers[MAIN],
+            &self.state.containers[GRID],
+            &self.state.containers[RESULT],
+        )
+    }
+
     /// Load an existing container slot without applying insertion limits.
     pub fn load_slot(&mut self, i: usize, stack: Option<ItemStack>) {
         self.touch();
@@ -4533,6 +4548,7 @@ pub(crate) mod tests {
                 links: Vec::new(),
                 asks_still_valid: crate::lan::menu::asks_still_valid(mod_type, registry_id),
                 opening_item: None,
+                slot_changed_seen: None,
             };
             menu.still_valid(context, &world, &guest)
         };
@@ -4602,6 +4618,7 @@ pub(crate) mod tests {
                 links: Vec::new(),
                 asks_still_valid: crate::lan::menu::asks_still_valid(Some(mod_type), "test:rules"),
                 opening_item: None,
+                slot_changed_seen: None,
             };
             menu.still_valid(context, &world, &guest)
         };

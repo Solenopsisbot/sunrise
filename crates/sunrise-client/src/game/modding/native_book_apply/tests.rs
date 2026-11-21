@@ -65,6 +65,7 @@ fn open_mod_menu(game: &mut Game<'_>) -> ((i32, i32, i32), MenuSnapshot, sync::S
             links: vec![],
             asks_still_valid: false,
             opening_item: None,
+            slot_changed_seen: None,
         });
     });
     let before = game.mod_book_menu_snapshot(12, 1, "review:menu").unwrap();

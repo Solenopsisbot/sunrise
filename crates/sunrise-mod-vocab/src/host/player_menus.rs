@@ -43,13 +43,14 @@ pub trait PlayerMenusBackendMut {
     /// mod can change them with [`MenuRef::set_data_slot`]. Pass `opening_hand` for an item
     /// opener regardless of slot backing, or `None` for another opener. The server remembers that
     /// hand's stack for `menu_still_valid`. A type declaring `owned_slots` uses ordinary clicks
-    /// and accepts writes through `ItemPlace::MenuSlot`; it may not declare results or crafting.
+    /// and accepts writes through `ItemPlace::MenuSlot`; it may declare take-only `results` but
+    /// not a `crafting` grid.
     /// The old menu closes on the server as a close does (its
     /// `removed`, `player_container_close`, the cursor stack and crafting grids back to the
     /// inventory) before the new one is built; `replace` says whether the client is first sent
     /// a close for it, as for `open_menu`. `MenuReplace::InPlace` sends none: the client keeps
     /// its screen and mouse until the new screen replaces it. The window id, or Ok(None) when
-    /// a mod cancelled the open. Errors: `NotModMenu`, `OwnedSlotsWithResults`,
+    /// a mod cancelled the open. Errors: `NotModMenu`, `OwnedSlotsWithCrafting`,
     /// `ClickInProgress` (a speculative click cannot open a new screen), `PlayerUnavailable`
     /// (including a disconnect in progress or a turn unavailable for the veto), `TooLarge`,
     /// `DataCountMismatch`, `Title` or `TitleNotEncodable`. A cancelled or refused open

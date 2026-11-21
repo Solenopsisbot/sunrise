@@ -162,6 +162,62 @@ The take and the listeners are one action: what a listener writes through the `H
 panics or traps its writes are undone and so is the take, the slot and the cursor going back as they were. The block
 entity is out of the world during the call, as in `menu_button`. Nothing is asked when no mod listens.
 
+## Reacting to slot changes
+
+`MenuPart::menu_slot_changed` is the server-side counterpart to vanilla's `Container.setItem` →
+`AbstractContainerMenu.slotsChanged` for mod menu types. It runs for every authoritative non-result
+input change on an open mod menu:
+
+- **Clicks**: default clicks on blockless `owned_slots` or block-backed mod menus, `menu_quick_move`
+  handlers, and `menu_clicked` overrides returning `Flow::Cancel`, as well as after a `menu_slot_take`
+  listener edits inputs on a block-backed menu. Runs inside the click savepoint before commit.
+- **Host writes**: committed transactional writes through `ItemPlace::MenuSlot`,
+  `ItemPlace::BlockEntity`, `BlockEntityRef::set_item_slot`, and transactional
+  `BlockEntityRef::merge_data` / `replace_data`, deduplicated to one call per outermost committed
+  transaction (never firing on abort).
+- **External container writes**: non-transactional writes to a block-backed mod menu such as hoppers,
+  `/item replace block`, or non-transactional `merge_data`, delivered immediately with all open
+  viewers synced.
+
+Multiple non-result slot changes within one click step (such as a multi-slot drag) or one committed
+transaction are batched into a single `menu_slot_changed` call with `event.changed` sorted in
+ascending menu slot order (`MenuSlotChange { container, slot, before, after }`). `event.context`
+gives a read-only `MenuSlotContext` of the menu's own slots (with `pos: None` for blockless menus),
+and `event.outputs` accepts authoritative `MenuSlotWrite { container, slot, stack }` updates that
+the server applies atomically before viewers sync:
+
+```rust,ignore
+use mod_api::{MenuContainer, MenuSlotWrite};
+
+struct Combiner;
+#[mod_api::sunrise_part]
+impl mod_api::MenuPart for Combiner {
+    fn menu_slot_changed(
+        &self,
+        _host: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::MenuSlotChangedEvent<'_>,
+    ) {
+        let a = event.context.slot(MenuContainer::Main, 0);
+        let b = event.context.slot(MenuContainer::Main, 1);
+        let result = match (a, b) {
+            (Some(a), Some(_)) => Some(a.clone()),
+            _ => None,
+        };
+        event
+            .outputs
+            .push(MenuSlotWrite::new(MenuContainer::Main, 2, result));
+    }
+}
+```
+
+Result slots, hidden slots, linked slots and player inventory slots never trigger `menu_slot_changed`, and applying
+`event.outputs` never re-fires it. On a blockless `owned_slots` menu, `outputs` may target any declared non-hidden
+owned `MenuContainer::Main` slot up to its declared slot limit and item limit; on a block-backed menu, `outputs` may
+target declared non-hidden `results` slots in `MenuContainer::Main`. A listener panic or an invalid output write
+(wrong container, undeclared/hidden/linked slot, unknown item, or count over the slot or item cap) aborts the entire
+click transaction and resends the menu during a click, or rolls back the listener's own writes without corrupting the
+committed container outside a click. Nothing runs when no part subscribes.
+
 ## Crafted-by processing for held stacks
 
 After delivering an item into a menu slot or onto the cursor, server-side code can use the
@@ -356,12 +412,14 @@ one's place and the mouse stays where it is. Opening from the player's inventory
 
 ## Menu-owned slots
 
-A blockless mod menu can own transient storage, like the container holding a crafting grid or a
-stonecutter's input. A type with `owned_slots` can only open without a block and cannot declare
-`results` or a `crafting` grid. Declare one stack limit (1–99) per container slot:
+A blockless mod menu can own transient storage, like the container holding a crafting grid, a
+combiner's inputs, or a stonecutter's input. A type with `owned_slots` can only open without a
+block and cannot declare a `crafting` grid. It may declare `results` for take-only output slots
+(for example a crafting-table-like or combiner-like processing menu). Declare one stack limit
+(1–99) per container slot:
 
 ```json
-{ "slots": 2, "player_inventory": false, "owned_slots": [1, 4] }
+{ "slots": 3, "owned_slots": [64, 64, 64], "inputs": [0, 1], "results": [2] }
 ```
 
 Each window starts with empty slots. Read them with `MenuRef::slot` and edit them through
@@ -369,7 +427,8 @@ Each window starts with empty slots. Read them with `MenuRef::slot` and edit the
 Insertion respects the smaller of the slot limit and the item's limit. Neither `back_mod_menu_slots`
 nor `menu_set_items` replaces this storage. The client gets normal slot updates, with no new packet.
 
-Ordinary clicks move items up to the slot cap on both sides. To make a filter slot, handle `menu_clicked`:
+Ordinary clicks move items up to the slot cap on both sides, while declared `results` slots refuse
+placement and shift-click insertion into them. To make a filter slot, handle `menu_clicked`:
 read the cursor, insert a copy without extracting from it, and return `Flow::Cancel`. The server sends the
 committed menu and cursor regardless of whether their item IDs and counts match the prediction.
 

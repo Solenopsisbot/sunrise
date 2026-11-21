@@ -406,6 +406,14 @@ impl Game<'_> {
                 && matches!(self.world.block_entities.get(&pos), Some(BlockEntity::Mod(entity))
                     if mod_api::__private::block_entity_type_listens(mod_api::HookId::MenuSlotTake, entity.id()))
         });
+        let changed_menu = menu_type.filter(|menu| {
+            matches!(
+                self.world.block_entities.get(&pos),
+                Some(BlockEntity::Mod(_))
+            ) && mod_api::__private::menu_listens(mod_api::HookId::MenuSlotChanged, menu.id)
+        });
+        let changed_ctx =
+            changed_menu.map(|layout| (layout, admitted.generation, admitted.hidden.clone()));
         let decide = |game: &mut Self| {
             game.decided_action(
                 "menu_quick_move",
@@ -431,18 +439,45 @@ impl Game<'_> {
                 },
                 move |game| {
                     if let Some(fired) = taken.take() {
-                        result.set(Some(
-                            game.as_guest(conn, |g| {
-                                g.mod_menu_quick_move_apply(pos, take_menu, fired)
-                            })
-                            .unwrap_or(false),
-                        ));
+                        let items_before = changed_ctx.as_ref().map(|_| fired.items.clone());
+                        let ok = game
+                            .as_guest(conn, |g| g.mod_menu_quick_move_apply(pos, take_menu, fired))
+                            .unwrap_or(false);
+                        let ok = if ok
+                            && let Some((layout, generation, hidden)) = changed_ctx.as_ref()
+                            && let Some(before) = items_before
+                            && let Some(uuid) = game
+                                .lan
+                                .as_ref()
+                                .and_then(|host| host.hub.guest(conn))
+                                .map(|guest| guest.uuid)
+                            && let Some(BlockEntity::Mod(entity)) =
+                                game.world.block_entities.get(&pos)
+                        {
+                            let after = entity.items.clone();
+                            game.mod_menu_slot_changed_block(
+                                conn,
+                                uuid,
+                                pos,
+                                *generation,
+                                window,
+                                layout,
+                                hidden,
+                                None,
+                                &before,
+                                &after,
+                            )
+                        } else {
+                            ok
+                        };
+                        result.set(Some(ok));
                     }
                 },
             )
         };
-        let applied = if take_menu.is_some() {
+        let applied = if take_menu.is_some() || changed_menu.is_some() {
             mod_api::run_transaction(self, |game, _| {
+                game.transactions.last_mut().unwrap().menu_click_active = Some(conn);
                 // `decided_action` closes its own savepoint into this one. If the apply was
                 // entered but the notice failed, also abort the earlier quick-move writes.
                 let applied = decide(game);

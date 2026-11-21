@@ -232,6 +232,7 @@ fn a_mod_menu_part_decides_whether_its_menu_stays_open() {
                 links: Vec::new(),
                 asks_still_valid: asks_still_valid(Some(shell), "test:shell"),
                 opening_item: None,
+                slot_changed_seen: None,
             };
             assert!(menu.asks_still_valid);
             let before = asked();

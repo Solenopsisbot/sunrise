@@ -879,6 +879,9 @@ impl Game<'_> {
                 b.container_changed(level, ticks, BlockPos::new(pos.0, pos.1, pos.2))
             });
         }
+        if self.transactions.is_empty() && !self.transactions.is_closing() {
+            self.notify_block_menu_slot_changed(pos, None, None);
+        }
     }
     /// `HopperBlockEntity.tryMoveInItem`.
     fn try_move_in_item(

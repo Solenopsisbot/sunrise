@@ -6,8 +6,9 @@ use crate::game::{
 };
 use mod_api::{
     Flow, Hand, Hooks, HostTransaction, ItemPlace, ItemResource, MenuClickedEvent, MenuClosedEvent,
-    MenuItemsRefusal, MenuKey, MenuPart, MenuRef, MenuReplace, MenuSlotBackRefusal,
-    MenuSlotBacking, MenuSlotPlace, MenuStillValidEvent, ModEntry, Mods, Registrar, ServerHost,
+    MenuContainer, MenuItemsRefusal, MenuKey, MenuPart, MenuRef, MenuReplace, MenuSlotBackRefusal,
+    MenuSlotBacking, MenuSlotChangedEvent, MenuSlotPlace, MenuSlotWrite, MenuStillValidEvent,
+    ModEntry, Mods, Registrar, ServerHost,
 };
 use std::sync::mpsc;
 use sunrise_client::{items::ItemStack, lan::Out};
@@ -273,20 +274,25 @@ fn an_item_opened_menu_has_two_empty_owned_slots_with_individual_caps() {
 
 #[test]
 #[ignore = "daily"]
-fn opening_an_owned_menu_with_a_result_keeps_the_old_window() {
+fn opening_an_owned_menu_with_crafting_keeps_the_old_window() {
     with_owned_menu(false, |game, rx, key| {
         let (_, menu) = open(game, key);
         sent(&rx);
-        // Bypass package validation to exercise the binding boundary itself.
+        // Bypass package validation to exercise the binding boundary itself: owned_slots + crafting
+        // is still refused, while owned_slots + results opens cleanly.
         sunrise_client::containers::with_mod_menu_types(
             [(
                 MOD_MENU.into(),
                 "listen".into(),
                 2,
                 0,
-                vec![1],
                 vec![],
-                None,
+                vec![],
+                Some(sunrise_client::containers::ModCrafting {
+                    grid: 0,
+                    size: 1,
+                    result: 1,
+                }),
                 None,
                 false,
                 Some(vec![1, 4]),
@@ -296,12 +302,37 @@ fn opening_an_owned_menu_with_a_result_keeps_the_old_window() {
                 assert_eq!(
                     player.open_mod_menu(
                         game,
-                        mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Invalid result")),
+                        mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Invalid crafting")),
                     ),
-                    Err(mod_api::OpenMenuError::OwnedSlotsWithResults)
+                    Err(mod_api::OpenMenuError::OwnedSlotsWithCrafting)
                 );
                 assert_eq!(game.player_container_menu(player), Some(menu));
                 assert!(sent(&rx).is_empty());
+            },
+        );
+        sunrise_client::containers::with_mod_menu_types(
+            [(
+                MOD_MENU.into(),
+                "listen".into(),
+                2,
+                0,
+                vec![1],
+                vec![0],
+                None,
+                None,
+                true,
+                Some(vec![16, 4]),
+            )],
+            || {
+                let player = game.player(123).unwrap();
+                let opened = player
+                    .open_mod_menu(
+                        game,
+                        mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Valid results")),
+                    )
+                    .unwrap();
+                assert!(opened.is_some());
+                assert_ne!(game.player_container_menu(player), Some(menu));
             },
         );
     });
@@ -976,5 +1007,1070 @@ fn owned_slot_queries_use_the_rule_a_click_will_apply() {
         let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
         assert_eq!(guest.native_menu[0], Some(stored));
         assert!(guest.carried.is_none());
+    });
+}
+
+#[derive(Clone, Copy)]
+enum ChangeMode {
+    Normal,
+    OverCap,
+    PlayerContainer,
+    OutOfRange,
+    Panic,
+    WriteItemPlaceThenInvalid,
+    WriteItemPlaceThenPanic,
+}
+
+#[derive(Clone, Copy)]
+enum CancelClickMode {
+    Continue,
+    InsertSlot0Stick,
+}
+
+thread_local! {
+    static CHANGE_MODE: std::cell::Cell<ChangeMode> = const { std::cell::Cell::new(ChangeMode::Normal) };
+    static CANCEL_CLICK_MODE: std::cell::Cell<CancelClickMode> = const { std::cell::Cell::new(CancelClickMode::Continue) };
+    static CHANGE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LAST_CHANGED_SLOTS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    static CLOSED_OWNED_LEN: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+struct ProcessingPart;
+#[mod_api::sunrise_part]
+impl MenuPart for ProcessingPart {
+    fn screen(
+        &self,
+        _: &dyn mod_api::Host,
+        _: &mut mod_api::ScreenEvent<'_>,
+    ) -> Option<mod_api::Screen> {
+        Some(mod_api::Screen {
+            slots: vec![Some(mod_api::ScreenSlot::default()); 3],
+            ..Default::default()
+        })
+    }
+
+    fn menu_clicked(&self, host: &mut dyn ServerHost, event: &mut MenuClickedEvent<'_>) -> Flow {
+        match CANCEL_CLICK_MODE.get() {
+            CancelClickMode::Continue => Flow::Continue,
+            CancelClickMode::InsertSlot0Stick => {
+                let tx = host.transaction_current().expect("click transaction");
+                let player = host.player(event.uuid).unwrap();
+                let menu = player.container_menu(host).unwrap();
+                let stick = mod_api::ItemStack::new(
+                    mod_api::__private::item_key("minecraft:stick").unwrap(),
+                    1,
+                )
+                .unwrap();
+                let inserted = ItemPlace::MenuSlot { menu, slot: 0 }.insert(
+                    host,
+                    &tx,
+                    &ItemResource::of(&stick),
+                    1,
+                );
+                assert_eq!(inserted, 1);
+                Flow::Cancel
+            }
+        }
+    }
+
+    fn menu_slot_changed(&self, host: &mut dyn ServerHost, event: &mut MenuSlotChangedEvent<'_>) {
+        assert_eq!(event.menu, MOD_MENU);
+        assert_eq!(event.context.player, Some(123));
+        assert_eq!(event.context.pos, None);
+        CHANGE_CALLS.set(CHANGE_CALLS.get() + 1);
+        LAST_CHANGED_SLOTS.with(|slots| {
+            *slots.borrow_mut() = event.changed.iter().map(|c| c.slot).collect();
+        });
+        let stone = |count| {
+            mod_api::ItemStack::new(
+                mod_api::__private::item_key("minecraft:stone").unwrap(),
+                count,
+            )
+            .unwrap()
+        };
+        let write_side_effects = |host: &mut dyn ServerHost| {
+            let tx = host.transaction_current().expect("active click tx");
+            let player = host.player(123).unwrap();
+            let reward = mod_api::ItemStack::new(
+                mod_api::__private::item_key("minecraft:apple").unwrap(),
+                1,
+            )
+            .unwrap();
+            assert_eq!(
+                ItemPlace::PlayerSlot {
+                    player: 123,
+                    slot: 0,
+                }
+                .insert(host, &tx, &ItemResource::of(&reward), 1),
+                1
+            );
+            let menu = player.container_menu(host).unwrap();
+            assert_eq!(
+                ItemPlace::MenuSlot { menu, slot: 1 }.insert(
+                    host,
+                    &tx,
+                    &ItemResource::of(&reward),
+                    1
+                ),
+                1
+            );
+        };
+        match CHANGE_MODE.get() {
+            ChangeMode::Normal => {
+                let a = event.context.slot(MenuContainer::Main, 0);
+                let b = event.context.slot(MenuContainer::Main, 1);
+                let out = match (a, b) {
+                    (Some(_), Some(_)) => Some(stone(2)),
+                    _ => None,
+                };
+                event
+                    .outputs
+                    .push(MenuSlotWrite::new(MenuContainer::Main, 2, out));
+            }
+            ChangeMode::OverCap => {
+                // Result slot 2 has cap 4.
+                event
+                    .outputs
+                    .push(MenuSlotWrite::new(MenuContainer::Main, 2, Some(stone(5))));
+            }
+            ChangeMode::PlayerContainer => {
+                event
+                    .outputs
+                    .push(MenuSlotWrite::new(MenuContainer::Player, 0, Some(stone(1))));
+            }
+            ChangeMode::OutOfRange => {
+                event
+                    .outputs
+                    .push(MenuSlotWrite::new(MenuContainer::Main, 3, Some(stone(1))));
+            }
+            ChangeMode::Panic => panic!("menu_slot_changed failed"),
+            ChangeMode::WriteItemPlaceThenInvalid => {
+                write_side_effects(host);
+                event
+                    .outputs
+                    .push(MenuSlotWrite::new(MenuContainer::Main, 2, Some(stone(5))));
+            }
+            ChangeMode::WriteItemPlaceThenPanic => {
+                write_side_effects(host);
+                panic!("menu_slot_changed failed after ItemPlace writes");
+            }
+        }
+    }
+}
+
+struct ProcessingMod;
+#[mod_api::__subscriptions]
+impl Hooks for ProcessingMod {
+    fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+        r.menu_part(MOD_MENU, ProcessingPart);
+    }
+
+    fn menu_closed(&self, _: &mut dyn ServerHost, event: &mut MenuClosedEvent<'_>) {
+        CLOSED_OWNED_LEN.set(Some(event.owned_slots.len()));
+    }
+}
+
+fn with_processing_owned_menu(test: impl FnOnce(&mut Game<'_>, mpsc::Receiver<Out>, MenuKey)) {
+    let mods: Mods = vec![ModEntry::new("listen", Box::new(ProcessingMod))].into();
+    mod_platform::testing::with_mods(mods.clone(), || {
+        api_values::install_parts(&mods).unwrap();
+        sunrise_client::containers::with_mod_menu_types(
+            [(
+                MOD_MENU.into(),
+                "listen".into(),
+                3,
+                0,
+                vec![2],
+                vec![0, 1],
+                None,
+                None,
+                true,
+                Some(vec![64, 64, 4]),
+            )],
+            || {
+                with_game(|game| {
+                    let (rx, key) = mod_menu_guest(game);
+                    CHANGE_MODE.set(ChangeMode::Normal);
+                    CANCEL_CLICK_MODE.set(CancelClickMode::Continue);
+                    CHANGE_CALLS.set(0);
+                    LAST_CHANGED_SLOTS.with(|slots| slots.borrow_mut().clear());
+                    CLOSED_OWNED_LEN.set(None);
+                    test(game, rx, key);
+                });
+            },
+        );
+    });
+}
+
+fn raw_click(game: &mut Game<'_>, conn: u32, window: i32, slot: i16, button: i8, input: i32) {
+    let state = game
+        .lan
+        .as_ref()
+        .unwrap()
+        .hub
+        .guest(conn)
+        .unwrap()
+        .menu
+        .as_ref()
+        .unwrap()
+        .state;
+    game.lan_guest_packet(
+        conn,
+        S::ContainerClick(ContainerClick {
+            container: window,
+            state,
+            slot,
+            button,
+            input,
+            changed: Vec::new(),
+            carried: None,
+        }),
+    );
+}
+
+#[test]
+#[ignore = "daily"]
+fn processing_owned_menu_computes_results_via_slot_changed_and_rejects_invalid_writes() {
+    with_processing_owned_menu(|game, rx, key| {
+        let player = game.player(123).unwrap();
+        let window = game
+            .as_guest(1, |game| {
+                let mut req = mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Processor"));
+                req.pos = Some([5, 64, 5]);
+                player.open_mod_menu(game, req)
+            })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        sent(&rx);
+
+        let stick = |n| Some(ItemStack::new("minecraft:stick", n));
+        let dirt = |n| Some(ItemStack::new("minecraft:dirt", n));
+        let stone = |n| Some(ItemStack::new("minecraft:stone", n));
+
+        // Put stick in slot 0: fires once, slot 2 stays empty.
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update(0, |g| g.carried = stick(3));
+        click(game, window, 0);
+        assert_eq!(CHANGE_CALLS.get(), 1);
+        assert_eq!(
+            game.lan.as_ref().unwrap().hub.guest(1).unwrap().native_menu,
+            [stick(3), None, None]
+        );
+
+        // Placing directly into result slot 2 is refused (and does not fire menu_slot_changed).
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update(0, |g| g.carried = dirt(2));
+        click(game, window, 2);
+        assert_eq!(CHANGE_CALLS.get(), 1);
+        assert_eq!(
+            game.lan.as_ref().unwrap().hub.guest(1).unwrap().native_menu[2],
+            None
+        );
+
+        // Put dirt in slot 1: fires once (not re-fired by result output), populates result slot 2.
+        sent(&rx);
+        click(game, window, 1);
+        assert_eq!(
+            CHANGE_CALLS.get(),
+            2,
+            "writing result slot via outputs must not re-fire menu_slot_changed"
+        );
+        let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+        assert_eq!(guest.native_menu, [stick(3), dirt(2), stone(2)]);
+        assert_eq!(guest.carried, None);
+        let packets = sent(&rx);
+        assert!(packets.iter().any(|p| matches!(
+            p,
+            C::ContainerSetSlot(s) if s.container == window && s.slot == 2 && s.item.is_some()
+        ) || matches!(
+            p,
+            C::ContainerSetContent(c) if c.container == window && c.items.get(2).is_some_and(Option::is_some)
+        )));
+
+        // Removing slot 0 clears result slot 2.
+        click(game, window, 0);
+        assert_eq!(CHANGE_CALLS.get(), 3);
+        let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+        assert_eq!(guest.native_menu, [None, dirt(2), None]);
+        assert_eq!(guest.carried, stick(3));
+
+        // Invalid output writes and panics roll back the whole click and resend the menu.
+        for bad in [
+            ChangeMode::OverCap,
+            ChangeMode::PlayerContainer,
+            ChangeMode::OutOfRange,
+            ChangeMode::Panic,
+        ] {
+            CHANGE_MODE.set(bad);
+            sent(&rx);
+            click(game, window, 0);
+            let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+            assert_eq!(
+                guest.native_menu,
+                [None, dirt(2), None],
+                "failed menu_slot_changed must roll back transient slots"
+            );
+            assert_eq!(
+                guest.carried,
+                stick(3),
+                "failed menu_slot_changed must roll back cursor"
+            );
+            assert!(
+                sent(&rx)
+                    .iter()
+                    .any(|p| matches!(p, C::ContainerSetContent(c) if c.container == window)),
+                "aborted click must resend the menu"
+            );
+        }
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn owned_menu_slot_changed_fires_on_item_place_writes_and_deduplicates_per_transaction() {
+    with_processing_owned_menu(|game, rx, key| {
+        let player = game.player(123).unwrap();
+        let window = game
+            .as_guest(1, |game| {
+                player.open_mod_menu(
+                    game,
+                    mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Processor")),
+                )
+            })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let menu = game.player_container_menu(player).unwrap();
+        sent(&rx);
+
+        let stick_api = ItemStack::new("minecraft:stick", 1).try_into_api().unwrap();
+        let dirt_api = ItemStack::new("minecraft:dirt", 1).try_into_api().unwrap();
+        let stick = |n| Some(ItemStack::new("minecraft:stick", n));
+        let dirt = |n| Some(ItemStack::new("minecraft:dirt", n));
+        let stone = |n| Some(ItemStack::new("minecraft:stone", n));
+
+        // 1. Aborted transaction writing via ItemPlace::MenuSlot must never fire menu_slot_changed.
+        let _: Result<(), ()> = game.transaction(|host, tx| {
+            assert_eq!(
+                ItemPlace::MenuSlot { menu, slot: 0 }.insert(
+                    host,
+                    tx,
+                    &ItemResource::of(&stick_api),
+                    2
+                ),
+                2
+            );
+            Err(())
+        });
+        assert_eq!(CHANGE_CALLS.get(), 0);
+        assert!(sent(&rx).is_empty());
+
+        // 2. Single committed transaction writing both input slots (slot 1 then slot 0) delivers
+        // ONE deduplicated menu_slot_changed call with slots in ascending order [0, 1] and syncs
+        // the viewer immediately without duplicate next-tick packets.
+        game.transaction(|host, tx| {
+            assert_eq!(
+                ItemPlace::MenuSlot { menu, slot: 1 }.insert(
+                    host,
+                    tx,
+                    &ItemResource::of(&dirt_api),
+                    2
+                ),
+                2
+            );
+            assert_eq!(
+                ItemPlace::MenuSlot { menu, slot: 0 }.insert(
+                    host,
+                    tx,
+                    &ItemResource::of(&stick_api),
+                    3
+                ),
+                3
+            );
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert_eq!(CHANGE_CALLS.get(), 1);
+        assert_eq!(LAST_CHANGED_SLOTS.with(|s| s.borrow().clone()), vec![0, 1]);
+        let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+        assert_eq!(guest.native_menu, [stick(3), dirt(2), stone(2)]);
+        let immediate = sent(&rx);
+        assert!(
+            immediate
+                .iter()
+                .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == window && s.slot == 2 && s.item.is_some())),
+            "committed host write must sync result slot immediately"
+        );
+        game.lan.as_mut().unwrap().hub.sync_containers(&game.world);
+        assert!(
+            !sent(&rx)
+                .iter()
+                .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == window)),
+            "next tick sync must not duplicate already-synced slot updates"
+        );
+
+        // 3. Clearing slot 0 through a menu_clicked Flow::Cancel override -> first empty slot 0,
+        // then let menu_clicked insert stick into slot 0 and return Flow::Cancel.
+        game.transaction(|host, tx| {
+            assert_eq!(
+                ItemPlace::MenuSlot { menu, slot: 0 }.extract(
+                    host,
+                    tx,
+                    &ItemResource::of(&stick_api),
+                    3
+                ),
+                3
+            );
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert_eq!(CHANGE_CALLS.get(), 2);
+        assert_eq!(
+            game.lan.as_ref().unwrap().hub.guest(1).unwrap().native_menu,
+            [None, dirt(2), None]
+        );
+        sent(&rx);
+
+        CANCEL_CLICK_MODE.set(CancelClickMode::InsertSlot0Stick);
+        click(game, window, 0);
+        assert_eq!(
+            CHANGE_CALLS.get(),
+            3,
+            "Flow::Cancel menu_clicked edit must fire menu_slot_changed once"
+        );
+        assert_eq!(
+            game.lan.as_ref().unwrap().hub.guest(1).unwrap().native_menu,
+            [stick(1), dirt(2), stone(2)]
+        );
+
+        // 4. Invalid output write inside menu_slot_changed during Flow::Cancel rolls back
+        // menu_clicked's ItemPlace write too.
+        game.transaction(|host, tx| {
+            assert_eq!(
+                ItemPlace::MenuSlot { menu, slot: 0 }.extract(
+                    host,
+                    tx,
+                    &ItemResource::of(&stick_api),
+                    1
+                ),
+                1
+            );
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        CHANGE_MODE.set(ChangeMode::OverCap);
+        click(game, window, 0);
+        assert_eq!(
+            game.lan.as_ref().unwrap().hub.guest(1).unwrap().native_menu,
+            [None, dirt(2), None],
+            "failed menu_slot_changed must roll back Flow::Cancel menu_clicked edits"
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn owned_menu_slot_changed_batches_multi_slot_drag_and_covers_swap_throw_pickup_all() {
+    with_processing_owned_menu(|game, _rx, key| {
+        let player = game.player(123).unwrap();
+        let window = game
+            .as_guest(1, |game| {
+                player.open_mod_menu(
+                    game,
+                    mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Processor")),
+                )
+            })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let stick = |n| Some(ItemStack::new("minecraft:stick", n));
+        let dirt = |n| Some(ItemStack::new("minecraft:dirt", n));
+        let stone = |n| Some(ItemStack::new("minecraft:stone", n));
+
+        // 1. Multi-slot drag across slots 0 and 1 (left drag: mode 5, start=0, add=1, end=2):
+        // intermediate add steps do not fire; drag-end fires ONCE with [0, 1] in menu order.
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update(0, |g| g.carried = stick(4));
+        raw_click(game, 1, window, -999, 0, 5);
+        raw_click(game, 1, window, 1, 1, 5);
+        raw_click(game, 1, window, 0, 1, 5);
+        assert_eq!(CHANGE_CALLS.get(), 0);
+        raw_click(game, 1, window, -999, 2, 5);
+        assert_eq!(CHANGE_CALLS.get(), 1);
+        assert_eq!(LAST_CHANGED_SLOTS.with(|s| s.borrow().clone()), vec![0, 1]);
+        assert_eq!(
+            game.lan.as_ref().unwrap().hub.guest(1).unwrap().native_menu,
+            [stick(2), stick(2), stone(2)]
+        );
+
+        // 2. Number-key swap (mode 2, button 0 -> hotbar 0 into slot 0).
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update(0, |g| g.inventory[0] = dirt(3));
+        raw_click(game, 1, window, 0, 0, 2);
+        assert_eq!(CHANGE_CALLS.get(), 2);
+        assert_eq!(LAST_CHANGED_SLOTS.with(|s| s.borrow().clone()), vec![0]);
+        assert_eq!(
+            game.lan.as_ref().unwrap().hub.guest(1).unwrap().native_menu,
+            [dirt(3), stick(2), stone(2)]
+        );
+
+        // 3. Throw single item from slot 0 (mode 4, button 0).
+        raw_click(game, 1, window, 0, 0, 4);
+        assert_eq!(CHANGE_CALLS.get(), 3);
+        assert_eq!(
+            game.lan.as_ref().unwrap().hub.guest(1).unwrap().native_menu,
+            [dirt(2), stick(2), stone(2)]
+        );
+
+        // 4. Pickup-all (mode 6) collecting dirt from slot 0 onto matching cursor -> clears slot 0
+        // and clears result slot 2.
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update(0, |g| g.carried = dirt(1));
+        raw_click(game, 1, window, 0, 0, 6);
+        assert_eq!(CHANGE_CALLS.get(), 4);
+        assert_eq!(
+            game.lan.as_ref().unwrap().hub.guest(1).unwrap().native_menu,
+            [None, stick(2), None]
+        );
+        assert_eq!(
+            game.lan.as_ref().unwrap().hub.guest(1).unwrap().carried,
+            dirt(3)
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn owned_menu_slot_changed_rolls_back_listener_item_place_writes_on_invalid_output_or_panic() {
+    with_processing_owned_menu(|game, rx, key| {
+        let player = game.player(123).unwrap();
+        let window = game
+            .as_guest(1, |game| {
+                player.open_mod_menu(
+                    game,
+                    mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Processor")),
+                )
+            })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let stick = |n| Some(ItemStack::new("minecraft:stick", n));
+        for bad in [
+            ChangeMode::WriteItemPlaceThenInvalid,
+            ChangeMode::WriteItemPlaceThenPanic,
+        ] {
+            game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+                g.inventory.fill(None);
+                g.carried = stick(3);
+            });
+            CHANGE_MODE.set(bad);
+            sent(&rx);
+            click(game, window, 0);
+            let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+            assert_eq!(
+                guest.native_menu,
+                [None, None, None],
+                "listener MenuSlot writes must roll back with the click"
+            );
+            assert!(
+                guest.inventory.iter().all(Option::is_none),
+                "listener PlayerInventory writes must roll back with the click"
+            );
+            assert_eq!(guest.carried, stick(3));
+        }
+    });
+}
+
+const BLOCK_PROC_MENU: &str = "minecraft:generic_9x3";
+const BLOCK_PROC_POS: (i32, i32, i32) = (1, 64, 1);
+
+thread_local! {
+    static BLOCK_CHANGE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BLOCK_LAST_SLOTS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct BlockProcessingPart;
+#[mod_api::sunrise_part]
+impl MenuPart for BlockProcessingPart {
+    fn menu_slot_changed(&self, _: &mut dyn ServerHost, event: &mut MenuSlotChangedEvent<'_>) {
+        assert_eq!(event.menu, BLOCK_PROC_MENU);
+        assert_eq!(
+            event.context.pos,
+            Some([BLOCK_PROC_POS.0, BLOCK_PROC_POS.1, BLOCK_PROC_POS.2])
+        );
+        BLOCK_CHANGE_CALLS.set(BLOCK_CHANGE_CALLS.get() + 1);
+        BLOCK_LAST_SLOTS.with(|s| {
+            *s.borrow_mut() = event.changed.iter().map(|c| c.slot).collect();
+        });
+        let a = event.context.slot(MenuContainer::Main, 0);
+        let b = event.context.slot(MenuContainer::Main, 1);
+        let out = match (a, b) {
+            (Some(a), Some(_)) => Some(
+                mod_api::ItemStack::new(
+                    mod_api::__private::item_key("minecraft:stone").unwrap(),
+                    a.count().min(64),
+                )
+                .unwrap(),
+            ),
+            _ => None,
+        };
+        event
+            .outputs
+            .push(MenuSlotWrite::new(MenuContainer::Main, 2, out));
+    }
+}
+
+struct BlockProcessingMod;
+#[mod_api::__subscriptions]
+impl Hooks for BlockProcessingMod {
+    fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+        r.menu_part(BLOCK_PROC_MENU, BlockProcessingPart);
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn block_menu_slot_changed_fires_on_external_container_writes_and_syncs_lan_viewers() {
+    use std::sync::{Arc, atomic::AtomicUsize};
+    use sunrise_client::{
+        chunk::Chunk,
+        containers::{BlockEntity, ModBlockEntity, ModBlockEntityFields, ModContainer},
+        lan::{PlayerSender, menu::Slots},
+    };
+    let mods: Mods = vec![ModEntry::new("listen", Box::new(BlockProcessingMod))].into();
+    mod_platform::testing::with_mods(mods.clone(), || {
+        api_values::install_parts(&mods).unwrap();
+        sunrise_client::containers::with_mod_menu_types(
+            [(
+                BLOCK_PROC_MENU.into(),
+                "listen".into(),
+                3,
+                0,
+                vec![2],
+                vec![0, 1],
+                None,
+                None,
+                true,
+                None,
+            )],
+            || {
+                crate::game::native_guest_turn_tests::with_guests(|game| {
+                    BLOCK_CHANGE_CALLS.set(0);
+                    BLOCK_LAST_SLOTS.with(|s| s.borrow_mut().clear());
+
+                    game.world
+                        .chunks
+                        .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                    let stone_state = game
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:stone")
+                        .unwrap();
+                    game.world
+                        .set(
+                            BLOCK_PROC_POS.0,
+                            BLOCK_PROC_POS.1,
+                            BLOCK_PROC_POS.2,
+                            stone_state,
+                        )
+                        .unwrap();
+                    let container = Arc::new(ModContainer {
+                        slots: 3,
+                        inputs: vec![0, 1],
+                        ..Default::default()
+                    });
+                    game.world
+                        .block_entities
+                        .set_mod_containers([(stone_state.0, container)].into_iter().collect());
+                    game.world.block_entities.insert(
+                        BLOCK_PROC_POS,
+                        BlockEntity::Mod(Box::new(ModBlockEntity::new(
+                            "listen:proc".into(),
+                            ModBlockEntityFields {
+                                items: vec![None; 3],
+                                ..Default::default()
+                            },
+                        ))),
+                    );
+
+                    // Attach observable packet channels to both LAN guests (12 and 13) and open
+                    // the block-backed mod menu for both viewers.
+                    let (tx12, rx12) = mpsc::channel();
+                    let (tx13, rx13) = mpsc::channel();
+                    let host = game.lan.as_mut().unwrap();
+                    host.hub.guests.update(0, |g| {
+                        g.sender = PlayerSender::new(tx12, Arc::new(AtomicUsize::new(0)));
+                    });
+                    host.hub.guests.update(1, |g| {
+                        g.sender = PlayerSender::new(tx13, Arc::new(AtomicUsize::new(0)));
+                    });
+                    let title = sunrise_core::nbt::Tag::String("proc".into());
+                    host.hub.open_container(
+                        12,
+                        BLOCK_PROC_MENU,
+                        title.clone(),
+                        BLOCK_PROC_POS,
+                        Slots::Block(BLOCK_PROC_POS),
+                        vec![None; 3],
+                        None,
+                    );
+                    let w12 = host.hub.guest(12).unwrap().menu.as_ref().unwrap().window;
+                    host.hub.open_container(
+                        13,
+                        BLOCK_PROC_MENU,
+                        title,
+                        BLOCK_PROC_POS,
+                        Slots::Block(BLOCK_PROC_POS),
+                        vec![None; 3],
+                        None,
+                    );
+                    let w13 = host.hub.guest(13).unwrap().menu.as_ref().unwrap().window;
+                    sent(&rx12);
+                    sent(&rx13);
+
+                    let level = game.level("minecraft:overworld").unwrap();
+                    let entity = game
+                        .block_entity(
+                            level,
+                            [BLOCK_PROC_POS.0, BLOCK_PROC_POS.1, BLOCK_PROC_POS.2],
+                        )
+                        .unwrap();
+                    let stick_api = ItemStack::new("minecraft:stick", 1).try_into_api().unwrap();
+                    let dirt_api = ItemStack::new("minecraft:dirt", 1).try_into_api().unwrap();
+
+                    // 1. BlockEntityRef::set_item_slot on slot 0 -> fires once across both viewers,
+                    // syncs both immediately, no duplicate packets on next tick.
+                    game.transaction(|host, tx| {
+                        assert_eq!(
+                            entity.set_item_slot(host, tx, 0, Some(stick_api.clone())),
+                            Ok(true)
+                        );
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                    assert_eq!(BLOCK_CHANGE_CALLS.get(), 1);
+                    assert_eq!(BLOCK_LAST_SLOTS.with(|s| s.borrow().clone()), vec![0]);
+                    assert!(
+                        sent(&rx12)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w12 && s.slot == 0 && s.item.is_some()))
+                    );
+                    assert!(
+                        sent(&rx13)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w13 && s.slot == 0 && s.item.is_some()))
+                    );
+                    game.lan.as_mut().unwrap().hub.sync_containers(&game.world);
+                    assert!(
+                        !sent(&rx12)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w12))
+                    );
+                    assert!(
+                        !sent(&rx13)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w13))
+                    );
+
+                    // 2. ItemPlace::BlockEntity on slot 1 -> fires once, computes result slot 2 =
+                    // stone(1), syncs result slot 2 to BOTH viewers immediately with no tick dupes.
+                    game.transaction(|host, tx| {
+                        assert_eq!(
+                            ItemPlace::BlockEntity {
+                                level,
+                                pos: [BLOCK_PROC_POS.0, BLOCK_PROC_POS.1, BLOCK_PROC_POS.2],
+                                side: None,
+                                slot: 1,
+                            }
+                            .insert(
+                                host,
+                                tx,
+                                &ItemResource::of(&dirt_api),
+                                1
+                            ),
+                            1
+                        );
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                    assert_eq!(BLOCK_CHANGE_CALLS.get(), 2);
+                    let BlockEntity::Mod(be) =
+                        game.world.block_entities.get(&BLOCK_PROC_POS).unwrap()
+                    else {
+                        panic!("expected mod block entity");
+                    };
+                    assert_eq!(be.items[2], Some(ItemStack::new("minecraft:stone", 1)));
+                    assert!(
+                        sent(&rx12)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w12 && s.slot == 2 && s.item.is_some()))
+                    );
+                    assert!(
+                        sent(&rx13)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w13 && s.slot == 2 && s.item.is_some()))
+                    );
+                    game.lan.as_mut().unwrap().hub.sync_containers(&game.world);
+                    assert!(
+                        !sent(&rx12)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w12))
+                    );
+                    assert!(
+                        !sent(&rx13)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w13))
+                    );
+
+                    // 3. Hopper ejecting another stick into slot 0 (non-transactional external
+                    // write) -> fires once, updates result slot 2 = stone(2), syncs both viewers
+                    // immediately with no tick dupes.
+                    let hopper_pos = (BLOCK_PROC_POS.0, BLOCK_PROC_POS.1 + 1, BLOCK_PROC_POS.2);
+                    let hopper_state = game
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:hopper")
+                        .unwrap();
+                    game.world
+                        .set(hopper_pos.0, hopper_pos.1, hopper_pos.2, hopper_state)
+                        .unwrap();
+                    game.world.block_entities.insert(
+                        hopper_pos,
+                        BlockEntity::Chest(vec![
+                            Some(ItemStack::new("minecraft:stick", 1)),
+                            None,
+                            None,
+                            None,
+                            None,
+                        ]),
+                    );
+                    game.hopper_try_move_items(hopper_pos);
+                    assert_eq!(BLOCK_CHANGE_CALLS.get(), 3);
+                    let BlockEntity::Mod(be) =
+                        game.world.block_entities.get(&BLOCK_PROC_POS).unwrap()
+                    else {
+                        panic!("expected mod block entity");
+                    };
+                    assert_eq!(be.items[0], Some(ItemStack::new("minecraft:stick", 2)));
+                    assert_eq!(be.items[2], Some(ItemStack::new("minecraft:stone", 2)));
+                    assert!(
+                        sent(&rx12)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w12 && s.slot == 2 && s.item.is_some()))
+                    );
+                    assert!(
+                        sent(&rx13)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w13 && s.slot == 2 && s.item.is_some()))
+                    );
+                    game.lan.as_mut().unwrap().hub.sync_containers(&game.world);
+                    assert!(
+                        !sent(&rx12)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w12))
+                    );
+                    assert!(
+                        !sent(&rx13)
+                            .iter()
+                            .any(|p| matches!(p, C::ContainerSetSlot(s) if s.container == w13))
+                    );
+                });
+            },
+        );
+    });
+}
+
+const BLOCK_CRAFT_MENU: &str = "minecraft:generic_3x3";
+const BLOCK_CRAFT_POS: (i32, i32, i32) = (2, 64, 2);
+
+thread_local! {
+    static CRAFT_CONTEXT_LOG: std::cell::RefCell<
+        Vec<(Vec<mod_api::MenuSlotChange>, mod_api::MenuSlotContext)>,
+    > = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct BlockCraftObserverPart;
+#[mod_api::sunrise_part]
+impl MenuPart for BlockCraftObserverPart {
+    fn menu_slot_changed(&self, _: &mut dyn ServerHost, event: &mut MenuSlotChangedEvent<'_>) {
+        assert_eq!(event.menu, BLOCK_CRAFT_MENU);
+        CRAFT_CONTEXT_LOG.with(|log| {
+            log.borrow_mut()
+                .push((event.changed.to_vec(), event.context.clone()));
+        });
+    }
+}
+
+struct BlockCraftObserverMod;
+#[mod_api::__subscriptions]
+impl Hooks for BlockCraftObserverMod {
+    fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+        r.menu_part(BLOCK_CRAFT_MENU, BlockCraftObserverPart);
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn block_menu_slot_changed_gives_identical_context_for_click_and_hopper_writes() {
+    use std::sync::Arc;
+    use sunrise_client::{
+        chunk::Chunk,
+        containers::{
+            BlockEntity, ModBlockEntity, ModBlockEntityFields, ModContainer, ModCrafting,
+        },
+        lan::menu::Slots,
+    };
+    let mods: Mods = vec![ModEntry::new("listen", Box::new(BlockCraftObserverMod))].into();
+    mod_platform::testing::with_mods(mods.clone(), || {
+        api_values::install_parts(&mods).unwrap();
+        sunrise_client::containers::with_mod_menu_types(
+            [(
+                BLOCK_CRAFT_MENU.into(),
+                "listen".into(),
+                6,
+                0,
+                Vec::new(),
+                vec![5],
+                Some(ModCrafting {
+                    grid: 0,
+                    size: 2,
+                    result: 4,
+                }),
+                None,
+                true,
+                None,
+            )],
+            || {
+                crate::game::native_guest_turn_tests::with_guests(|game| {
+                    CRAFT_CONTEXT_LOG.with(|log| log.borrow_mut().clear());
+                    game.world
+                        .chunks
+                        .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                    let stone_state = game
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:stone")
+                        .unwrap();
+                    game.world
+                        .set(
+                            BLOCK_CRAFT_POS.0,
+                            BLOCK_CRAFT_POS.1,
+                            BLOCK_CRAFT_POS.2,
+                            stone_state,
+                        )
+                        .unwrap();
+                    let container = Arc::new(ModContainer {
+                        slots: 6,
+                        inputs: vec![0, 1, 2, 3, 5],
+                        ..Default::default()
+                    });
+                    game.world
+                        .block_entities
+                        .set_mod_containers([(stone_state.0, container)].into_iter().collect());
+                    game.world.block_entities.insert(
+                        BLOCK_CRAFT_POS,
+                        BlockEntity::Mod(Box::new(ModBlockEntity::new(
+                            "listen:crafter".into(),
+                            ModBlockEntityFields {
+                                items: vec![None; 6],
+                                ..Default::default()
+                            },
+                        ))),
+                    );
+                    let host = game.lan.as_mut().unwrap();
+                    host.hub.open_container(
+                        12,
+                        BLOCK_CRAFT_MENU,
+                        sunrise_core::nbt::Tag::String("crafter".into()),
+                        BLOCK_CRAFT_POS,
+                        Slots::Block(BLOCK_CRAFT_POS),
+                        vec![None; 6],
+                        None,
+                    );
+                    let window = host.hub.guest(12).unwrap().menu.as_ref().unwrap().window;
+                    let oak_log = ItemStack::new("minecraft:oak_log", 1);
+                    let expected_log = oak_log.try_into_api().unwrap();
+                    let expected_planks = ItemStack::new("minecraft:oak_planks", 4)
+                        .try_into_api()
+                        .unwrap();
+
+                    // 1. Click places oak_log into crafting grid slot 0.
+                    game.lan
+                        .as_mut()
+                        .unwrap()
+                        .hub
+                        .guests
+                        .update(0, |g| g.carried = Some(oak_log.clone()));
+                    raw_click(game, 12, window, 0, 0, 0);
+                    let (click_changed, click_context) =
+                        CRAFT_CONTEXT_LOG.with(|log| log.borrow_mut().pop().unwrap());
+                    assert_eq!(click_changed.len(), 1);
+                    assert_eq!(click_changed[0].container, MenuContainer::Grid);
+                    assert_eq!(click_changed[0].slot, 0);
+                    assert_eq!(
+                        click_context.slot(MenuContainer::Grid, 0),
+                        Some(&expected_log)
+                    );
+                    assert_eq!(
+                        click_context.slot(MenuContainer::Result, 0),
+                        Some(&expected_planks),
+                        "click path exposes the live crafting result"
+                    );
+
+                    // 2. Click removes oak_log back out so the grid is empty again.
+                    raw_click(game, 12, window, 0, 0, 0);
+                    CRAFT_CONTEXT_LOG.with(|log| log.borrow_mut().clear());
+
+                    // 3. Hopper ejects oak_log into slot 0 -> must produce the exact same
+                    // changed list and live MenuSlotContext (including Result = 4 oak planks).
+                    let hopper_pos = (BLOCK_CRAFT_POS.0, BLOCK_CRAFT_POS.1 + 1, BLOCK_CRAFT_POS.2);
+                    let hopper_state = game
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:hopper")
+                        .unwrap();
+                    game.world
+                        .set(hopper_pos.0, hopper_pos.1, hopper_pos.2, hopper_state)
+                        .unwrap();
+                    game.world.block_entities.insert(
+                        hopper_pos,
+                        BlockEntity::Chest(vec![Some(oak_log), None, None, None, None]),
+                    );
+                    game.hopper_try_move_items(hopper_pos);
+                    let (hopper_changed, hopper_context) =
+                        CRAFT_CONTEXT_LOG.with(|log| log.borrow_mut().pop().unwrap());
+                    assert_eq!(hopper_changed, click_changed);
+                    assert_eq!(
+                        hopper_context, click_context,
+                        "hopper write must present the exact same live MenuSlotContext as a click"
+                    );
+                });
+            },
+        );
     });
 }

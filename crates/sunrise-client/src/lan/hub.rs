@@ -6255,6 +6255,7 @@ mod tests {
                     links: Vec::new(),
                     asks_still_valid: true,
                     opening_item: None,
+                    slot_changed_seen: None,
                 });
             });
         };

@@ -344,7 +344,9 @@ impl Game<'_> {
                 }
             },
         );
-        let applied = decided && default_ok.get();
+        let applied = decided
+            && default_ok.get()
+            && (!handled.get() || self.reconcile_click_slot_changes(conn));
         self.transaction_close(&seal, applied);
         if !applied || handled.get() {
             // The client predicted the unmodified click. Compare neither IDs nor component

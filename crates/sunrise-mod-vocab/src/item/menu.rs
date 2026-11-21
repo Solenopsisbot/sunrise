@@ -352,3 +352,92 @@ impl MenuSlotContext {
         self.slots.get(container as usize)?.get(index)?.as_ref()
     }
 }
+
+/// One non-result container slot that changed during a menu action, reported to
+/// `menu_slot_changed`.
+#[derive(Clone, Debug, PartialEq, sunrise_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct MenuSlotChange {
+    /// Which container the slot belongs to ([`MenuContainer`]).
+    pub container: MenuContainer,
+    /// The slot's index inside `container`.
+    pub slot: usize,
+    /// The stack held before the change (`None` when empty).
+    pub before: Option<ItemStack>,
+    /// The stack held after the change (`None` when empty).
+    pub after: Option<ItemStack>,
+}
+
+impl MenuSlotChange {
+    /// Creates a slot-change record for `container`'s slot `slot`.
+    pub fn new(
+        container: MenuContainer,
+        slot: usize,
+        before: Option<ItemStack>,
+        after: Option<ItemStack>,
+    ) -> Self {
+        Self {
+            container,
+            slot,
+            before,
+            after,
+        }
+    }
+}
+
+/// An authoritative container slot write requested by a `menu_slot_changed` listener.
+#[derive(Clone, Debug, PartialEq, sunrise_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct MenuSlotWrite {
+    /// Which container the slot belongs to ([`MenuContainer`]).
+    pub container: MenuContainer,
+    /// The slot's index inside `container`.
+    pub slot: usize,
+    /// The stack to place in the slot (`None` clears it).
+    pub stack: Option<ItemStack>,
+}
+
+impl MenuSlotWrite {
+    /// Creates an authoritative slot write for `container`'s slot `slot`.
+    pub fn new(container: MenuContainer, slot: usize, stack: Option<ItemStack>) -> Self {
+        Self {
+            container,
+            slot,
+            stack,
+        }
+    }
+}
+
+#[cfg(test)]
+mod menu_slot_change_wire_tests {
+    use super::{MenuContainer, MenuSlotChange, MenuSlotWrite};
+    use crate::wire::{Reader, Writer};
+    use crate::{ItemKey, ItemStack};
+
+    #[test]
+    fn menu_slot_change_and_write_round_trip_on_wire() {
+        let mut requests = sunrise_mod_runtime::registry_keys::Requests::default();
+        requests.items.request("example", "example:gear").unwrap();
+        let previous = crate::parts::REGISTERING_KEYS
+            .with(|keys| keys.replace(Some(std::rc::Rc::new(std::cell::RefCell::new(requests)))));
+        let key = ItemKey::from_slot(0).unwrap();
+        let before = Some(ItemStack::new(key, 3).unwrap());
+        let after = Some(ItemStack::new(key, 1).unwrap());
+        let change = MenuSlotChange::new(MenuContainer::Main, 1, before.clone(), after.clone());
+        let mut writer = Writer::new();
+        writer.put(&change);
+        let decoded = Reader::decode::<MenuSlotChange>(writer.bytes()).unwrap();
+        assert_eq!(decoded, change);
+
+        for write in [
+            MenuSlotWrite::new(MenuContainer::Main, 2, after),
+            MenuSlotWrite::new(MenuContainer::Main, 2, None),
+        ] {
+            let mut writer = Writer::new();
+            writer.put(&write);
+            let decoded = Reader::decode::<MenuSlotWrite>(writer.bytes()).unwrap();
+            assert_eq!(decoded, write);
+        }
+        crate::parts::REGISTERING_KEYS.with(|keys| keys.replace(previous));
+    }
+}
