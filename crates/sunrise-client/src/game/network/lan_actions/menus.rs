@@ -481,11 +481,26 @@ impl Game<'_> {
 
     fn guest_remove_menus(&mut self, conn: u32, removal: MenuRemoval) -> Option<i32> {
         let gi = self.guest_index(conn)?;
+        let dead = self
+            .lan
+            .as_ref()
+            .is_some_and(|host| host.hub.guests[gi].dead);
         if removal == MenuRemoval::Disconnected {
             self.guest_drop_carried(gi);
         } else if let Some(host) = self.lan.as_mut() {
             let returned = host.hub.take_closed_menu_cursors(conn).collect();
+            let (mut to_return, mut to_drop) = host.hub.take_closed_processing_inputs(conn);
             self.lan_place_back(gi, returned);
+            if dead {
+                to_drop.append(&mut to_return);
+            } else {
+                self.lan_place_back(gi, to_return);
+            }
+            if !to_drop.is_empty()
+                && let Some(gi) = self.guest_index(conn)
+            {
+                self.drop_guest_items(gi, to_drop);
+            }
         }
         // Overflow listeners can open a menu. Remember the window we will
         // retire now, not the one that was open before returning cursors.
@@ -507,10 +522,26 @@ impl Game<'_> {
             // Returning queued cursors and closing a container can both call
             // listeners that remove another player, shifting the guest list.
             if let Some(gi) = self.guest_index(conn)
-                && let Some(carried) =
+                && let Some(closed) =
                     self.with_own_record(gi, |host, _| host.hub.container_closed(conn, window))
             {
-                self.lan_place_back(gi, vec![carried]);
+                let dead = self
+                    .lan
+                    .as_ref()
+                    .and_then(|host| host.hub.guests.get(gi))
+                    .is_some_and(|g| g.dead);
+                if let Some(carried) = closed.carried {
+                    self.lan_place_back(gi, vec![carried]);
+                }
+                if !closed.processing_inputs.is_empty()
+                    && let Some(gi) = self.guest_index(conn)
+                {
+                    if removal == MenuRemoval::Disconnected || dead {
+                        self.drop_guest_items(gi, closed.processing_inputs);
+                    } else {
+                        self.lan_place_back(gi, closed.processing_inputs);
+                    }
+                }
             }
         }
         self.lan_merchant_closed(conn, None);

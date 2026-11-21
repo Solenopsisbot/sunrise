@@ -1293,7 +1293,7 @@ stock client shows as a chest (`generic_9x1` to `generic_9x6`); nothing is insta
 - A display menu's default click moves nothing. `MenuPart::menu_clicked` v3 runs on parts registered for the
   menu type. It shares one transaction with the default click unless the part handles the click and returns
   `Flow::Cancel`. An override or refusal sends the committed menu, cursor and any omitted swap target.
-- `menu_closed` v2 names the player and window and passes any opening hand and detached owned slot values.
+- `menu_closed` v3 names the player and window and passes any opening hand and detached owned slot values (or an empty `owned_slots` slice for processing owned menus declaring `results`, whose non-result inputs the game returns or drops automatically).
 - A trade on these menus leaves the offered stacks in their owners' inventories until both sides are settled. Then,
   in one `host.transaction`, each offered inventory index is checked to still hold exactly what was offered, taken
   out of the player's [`ENTITY_ITEMS`](../concepts/capabilities/entity-items.md) handler and put into the other's with `insert`

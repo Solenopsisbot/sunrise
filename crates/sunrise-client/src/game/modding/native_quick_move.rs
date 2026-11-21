@@ -330,7 +330,7 @@ impl Game<'_> {
                 let mut moved = held.clone();
                 moved.count = count;
                 let take = (slot, moved, left.cloned());
-                if !self.api_menu_slot_take(&mut taken, player, menu.id, &take) {
+                if !self.api_menu_slot_take(Some((pos, &mut taken)), player, menu.id, &take) {
                     // The click's savepoint still owns both inventories, including everything
                     // the quick-move listener wrote before the notice failed.
                     return false;
@@ -403,8 +403,11 @@ impl Game<'_> {
         );
         let take_menu = menu_type.filter(|menu| {
             matches!(at, MenuSlot::Container(slot) if menu.owns_slot(slot))
-                && matches!(self.world.block_entities.get(&pos), Some(BlockEntity::Mod(entity))
-                    if mod_api::__private::block_entity_type_listens(mod_api::HookId::MenuSlotTake, entity.id()))
+                && matches!(
+                    self.world.block_entities.get(&pos),
+                    Some(BlockEntity::Mod(_))
+                )
+                && mod_api::__private::menu_listens(mod_api::HookId::MenuSlotTake, menu.id)
         });
         let changed_menu = menu_type.filter(|menu| {
             matches!(

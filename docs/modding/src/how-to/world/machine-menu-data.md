@@ -259,7 +259,9 @@ Pass `Some(hand)` from an item's use to let `menu_still_valid` compare that hand
 stack with the one at open. Other openers pass `None`. The menu's declared container slots,
 if any, start empty; [`owned_slots`](../../concepts/capabilities/menu-slots.md#menu-owned-slots)
 declares a temporary container that belongs to the window, and adding `results` makes it a
-blockless processing menu that computes outputs in `menu_slot_changed`. Opening returns the window id or
+blockless processing menu that computes outputs in `menu_slot_changed`, handles takes in
+`menu_slot_take`, and returns its non-result inputs to the player on close (dropping overflow, or
+dropping on disconnect or death, and discarding result slots). Opening returns the window id or
 `Ok(None)` when vetoed. Invalid type, connection or client support, opening bytes, data count or
 title returns `OpenMenuError`. Neither a refused nor a cancelled open closes the old menu.
 

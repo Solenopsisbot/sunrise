@@ -133,7 +133,9 @@ impl BlockEntityPart for Part {
         }
         Flow::Continue
     }
-
+}
+#[mod_api::sunrise_part]
+impl mod_api::MenuPart for Part {
     fn menu_slot_take(&self, host: &mut dyn ServerHost, event: &mut MenuSlotTakeEvent<'_>) {
         if !SCRIPT.with(|s| s.borrow().handle_cross) {
             return;
@@ -147,9 +149,7 @@ impl BlockEntityPart for Part {
             panic!("the take listener failed after the cross-block move");
         }
     }
-}
-#[mod_api::sunrise_part]
-impl mod_api::MenuPart for Part {
+
     fn menu_clicked(&self, host: &mut dyn ServerHost, event: &mut MenuClickedEvent<'_>) -> Flow {
         let s = SCRIPT.with(|s| s.borrow().clone());
         let Some(flow) = s.clicked else {
@@ -699,8 +699,8 @@ fn a_handled_cross_block_move_commits_only_if_its_take_returns() {
     with_mod(|| {
         with_guests(|game| {
             let kind = Box::leak(Box::new(ModMenuType {
-                id: "minecraft:generic_9x1",
-                owner: "minecraft",
+                id: DEPOT_MENU,
+                owner: "movemod",
                 slots: 9,
                 player_inventory: true,
                 data_slots: 0,
@@ -713,12 +713,11 @@ fn a_handled_cross_block_move_commits_only_if_its_take_returns() {
             for fail_take in [true, false] {
                 let window = open_depot(game);
                 second_block(game);
-                game.lan
-                    .as_mut()
-                    .unwrap()
-                    .hub
-                    .guests
-                    .update(0, |g| g.menu.as_mut().unwrap().mod_type = Some(kind));
+                game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+                    let menu = g.menu.as_mut().unwrap();
+                    menu.registry_id = DEPOT_MENU.into();
+                    menu.mod_type = Some(kind);
+                });
                 script(Script {
                     cross: true,
                     handle_cross: true,

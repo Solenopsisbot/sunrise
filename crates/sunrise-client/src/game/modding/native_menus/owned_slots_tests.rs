@@ -2074,3 +2074,218 @@ fn block_menu_slot_changed_gives_identical_context_for_click_and_hopper_writes()
         );
     });
 }
+
+#[test]
+#[ignore = "daily"]
+fn processing_owned_menu_returns_inputs_on_close_drops_overflow_and_discards_results() {
+    with_processing_owned_menu(|game, rx, key| {
+        let player = game.player(123).unwrap();
+        let stick = |n| Some(ItemStack::new("minecraft:stick", n));
+        let dirt = |n| Some(ItemStack::new("minecraft:dirt", n));
+        let stone = |n| Some(ItemStack::new("minecraft:stone", n));
+
+        // 1. Live close with room in inventory: returns non-result inputs, discards result slot 2,
+        // and delivers empty owned_slots to menu_closed so items cannot be duplicated.
+        let window = game
+            .as_guest(1, |game| {
+                player.open_mod_menu(
+                    game,
+                    mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Processor")),
+                )
+            })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.inventory.fill(None);
+            g.carried = None;
+            g.native_menu = vec![stick(3), dirt(2), stone(2)];
+        });
+        game.dropped.clear();
+        CLOSED_OWNED_LEN.set(None);
+        sent(&rx);
+        game.lan_guest_packet(
+            1,
+            S::ContainerClose(sunrise_protocol::packets::play::ContainerClose {
+                container: window,
+            }),
+        );
+        game.run_native_menu_events();
+        assert_eq!(CLOSED_OWNED_LEN.get(), Some(0));
+        let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+        let count_inv = |g: &sunrise_client::lan::guest::Guest, id: &str| -> u32 {
+            g.inventory
+                .iter()
+                .flatten()
+                .filter(|s| &*s.item == id)
+                .map(|s| s.count)
+                .sum()
+        };
+        assert_eq!(count_inv(guest, "minecraft:stick"), 3);
+        assert_eq!(count_inv(guest, "minecraft:dirt"), 2);
+        assert_eq!(
+            count_inv(guest, "minecraft:stone"),
+            0,
+            "result slot must be discarded, never returned"
+        );
+        assert!(game.dropped.is_empty());
+
+        // 2. Live close with full inventory: drops overflow inputs at player and discards results.
+        let window = game
+            .as_guest(1, |game| {
+                player.open_mod_menu(
+                    game,
+                    mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Processor")),
+                )
+            })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            for slot in g.inventory.iter_mut() {
+                *slot = Some(ItemStack::new("minecraft:cobblestone", 64));
+            }
+            g.carried = None;
+            g.native_menu = vec![stick(4), dirt(5), stone(4)];
+        });
+        game.dropped.clear();
+        CLOSED_OWNED_LEN.set(None);
+        game.lan_guest_packet(
+            1,
+            S::ContainerClose(sunrise_protocol::packets::play::ContainerClose {
+                container: window,
+            }),
+        );
+        game.run_native_menu_events();
+        assert_eq!(CLOSED_OWNED_LEN.get(), Some(0));
+        let dropped_count = |game: &Game<'_>, id: &str| -> u32 {
+            game.dropped
+                .iter()
+                .filter(|e| &*e.stack.item == id)
+                .map(|e| e.stack.count)
+                .sum()
+        };
+        assert_eq!(dropped_count(game, "minecraft:stick"), 4);
+        assert_eq!(dropped_count(game, "minecraft:dirt"), 5);
+        assert_eq!(dropped_count(game, "minecraft:stone"), 0);
+
+        // 3. Disconnect drops non-result inputs directly even when inventory has space.
+        let _window = game
+            .as_guest(1, |game| {
+                player.open_mod_menu(
+                    game,
+                    mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Processor")),
+                )
+            })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.inventory.fill(None);
+            g.carried = None;
+            g.native_menu = vec![stick(2), dirt(1), stone(1)];
+        });
+        game.dropped.clear();
+        game.guest_disconnected(1);
+        game.run_native_menu_events();
+        let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+        assert_eq!(count_inv(guest, "minecraft:stick"), 0);
+        assert_eq!(count_inv(guest, "minecraft:dirt"), 0);
+        assert_eq!(dropped_count(game, "minecraft:stick"), 2);
+        assert_eq!(dropped_count(game, "minecraft:dirt"), 1);
+        assert_eq!(dropped_count(game, "minecraft:stone"), 0);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn processing_owned_menu_close_on_death_drops_inputs_unlike_live_close() {
+    with_processing_owned_menu(|game, _rx, key| {
+        let player = game.player(123).unwrap();
+        let stick = |n| Some(ItemStack::new("minecraft:stick", n));
+        let dirt = |n| Some(ItemStack::new("minecraft:dirt", n));
+        let stone = |n| Some(ItemStack::new("minecraft:stone", n));
+        let count_inv = |g: &sunrise_client::lan::guest::Guest, id: &str| -> u32 {
+            g.inventory
+                .iter()
+                .flatten()
+                .filter(|s| &*s.item == id)
+                .map(|s| s.count)
+                .sum()
+        };
+        let dropped_count = |game: &Game<'_>, id: &str| -> u32 {
+            game.dropped
+                .iter()
+                .filter(|e| &*e.stack.item == id)
+                .map(|e| e.stack.count)
+                .sum()
+        };
+
+        // 1. Client ContainerClose while player is dead drops non-result inputs instead of
+        // placing them into the dead player's inventory, and discards results.
+        let window = game
+            .as_guest(1, |game| {
+                player.open_mod_menu(
+                    game,
+                    mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Processor")),
+                )
+            })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.inventory.fill(None);
+            g.carried = None;
+            g.dead = true;
+            g.native_menu = vec![stick(3), dirt(2), stone(2)];
+        });
+        game.dropped.clear();
+        game.lan_guest_packet(
+            1,
+            S::ContainerClose(sunrise_protocol::packets::play::ContainerClose {
+                container: window,
+            }),
+        );
+        game.run_native_menu_events();
+        let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+        assert_eq!(count_inv(guest, "minecraft:stick"), 0);
+        assert_eq!(count_inv(guest, "minecraft:dirt"), 0);
+        assert_eq!(dropped_count(game, "minecraft:stick"), 3);
+        assert_eq!(dropped_count(game, "minecraft:dirt"), 2);
+        assert_eq!(dropped_count(game, "minecraft:stone"), 0);
+
+        // 2. Hub-side close_container while dead (e.g. respawn path before dead flag clears)
+        // records drop_instead = true so inputs still drop even if g.dead clears before
+        // run_native_menu_events runs.
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.dead = false;
+            g.inventory.fill(None);
+        });
+        let _window = game
+            .as_guest(1, |game| {
+                player.open_mod_menu(
+                    game,
+                    mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Processor")),
+                )
+            })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.dead = true;
+            g.native_menu = vec![stick(5), dirt(4), stone(4)];
+        });
+        game.dropped.clear();
+        game.lan.as_mut().unwrap().hub.close_container(1);
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.dead = false;
+        });
+        game.run_native_menu_events();
+        let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+        assert_eq!(count_inv(guest, "minecraft:stick"), 0);
+        assert_eq!(count_inv(guest, "minecraft:dirt"), 0);
+        assert_eq!(dropped_count(game, "minecraft:stick"), 5);
+        assert_eq!(dropped_count(game, "minecraft:dirt"), 4);
+        assert_eq!(dropped_count(game, "minecraft:stone"), 0);
+    });
+}

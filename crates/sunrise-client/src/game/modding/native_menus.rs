@@ -483,6 +483,23 @@ impl Game<'_> {
                         self.lan_place_back(gi, vec![item]);
                     }
                 }
+                NativeMenuEvent::ReturnProcessingInputs {
+                    conn,
+                    items,
+                    drop_instead,
+                } => {
+                    if let Some(gi) = self.guest_index(conn) {
+                        let dead = self
+                            .lan
+                            .as_ref()
+                            .is_some_and(|host| host.hub.guests[gi].dead);
+                        if drop_instead || dead {
+                            self.drop_guest_items(gi, items);
+                        } else {
+                            self.lan_place_back(gi, items);
+                        }
+                    }
+                }
                 NativeMenuEvent::Closed {
                     uuid,
                     window,

@@ -537,6 +537,8 @@ impl Game<'_> {
         let uuid = guest.uuid;
         let offhand_before = guest.offhand.clone();
         let items = guest.native_menu.clone();
+        let listens_take =
+            mod_api::__private::menu_listens(mod_api::HookId::MenuSlotTake, layout.id);
         let listens_changed =
             mod_api::__private::menu_listens(mod_api::HookId::MenuSlotChanged, layout.id);
         self.journal_menu_click(conn);
@@ -559,10 +561,22 @@ impl Game<'_> {
         let click = super::lan_pickup::click_of(p);
         let prepare = |menu: &mut Menu, env: &Env| menu.load_container(env, &items);
         let snapshot = menu.snapshot();
-        if listens_changed {
+        if listens_take || listens_changed {
             let before: Vec<_> = (0..menu.slot_count())
                 .map(|s| host.hub.view_slot(gi, &self.world, s))
                 .collect();
+            let refresh = |game: &Game<'_>, menu: &mut Menu| {
+                let Some(guest) = game.lan.as_ref().and_then(|host| host.hub.guest(conn)) else {
+                    return false;
+                };
+                if !live(guest) {
+                    return false;
+                }
+                for slot in 0..layout.slots {
+                    menu.load_slot(slot, guest.native_menu.get(slot).cloned().flatten());
+                }
+                true
+            };
             let applied = mod_api::run_transaction(self, |game, _| {
                 game.transactions.last_mut().unwrap().menu_click_active = Some(conn);
                 game.journal_guest_click(conn);
@@ -578,6 +592,7 @@ impl Game<'_> {
                         let (mut previous, (mut rest, mut answers)) =
                             game.guest_menu_edit(gi, menu, rules, stacked, |menu, env| {
                                 prepare(menu, env);
+                                menu.track_takes(listens_take);
                                 let before = menu.container_items();
                                 (
                                     before,
@@ -599,24 +614,55 @@ impl Game<'_> {
                             game.lan.as_mut()?.hub.guests.update(gi, |g| {
                                 g.native_menu = after.clone();
                             });
-                            if !game.mod_menu_slot_changed_owned(
-                                conn,
-                                uuid,
-                                generation,
-                                p.container,
-                                layout,
-                                &hidden,
-                                Some(menu),
-                                &previous,
-                                &after,
-                            ) {
+                            if listens_changed
+                                && !game.mod_menu_slot_changed_owned(
+                                    conn,
+                                    uuid,
+                                    generation,
+                                    p.container,
+                                    layout,
+                                    &hidden,
+                                    Some(menu),
+                                    &previous,
+                                    &after,
+                                )
+                            {
                                 return None;
                             }
-                            let menu_live = game
-                                .lan
-                                .as_ref()
-                                .and_then(|host| host.hub.guest(conn))
-                                .is_some_and(live);
+                            let menu_live = if let Some(take) = menu.take_notice() {
+                                let before_take = menu.container_items();
+                                if game.as_guest(conn, |game| {
+                                    game.mod_menu_slot_take_owned(uuid, layout.id, &take)
+                                }) != Some(true)
+                                {
+                                    return None;
+                                }
+                                let live_now = refresh(game, menu);
+                                if live_now && listens_changed {
+                                    let after_take = menu.container_items();
+                                    if !game.mod_menu_slot_changed_owned(
+                                        conn,
+                                        uuid,
+                                        generation,
+                                        p.container,
+                                        layout,
+                                        &hidden,
+                                        Some(menu),
+                                        &before_take,
+                                        &after_take,
+                                    ) {
+                                        return None;
+                                    }
+                                    refresh(game, menu)
+                                } else {
+                                    live_now
+                                }
+                            } else {
+                                game.lan
+                                    .as_ref()
+                                    .and_then(|host| host.hub.guest(conn))
+                                    .is_some_and(live)
+                            };
                             let Some(step) = rest.ok()? else {
                                 break;
                             };
@@ -770,8 +816,8 @@ impl Game<'_> {
         }
         let entity = self.world.block_entities.get(&pos)?;
         let (kind, mut items) = machine_menu(entity, mod_type)?;
-        let listens_take = matches!((kind, entity), (Kind::Mod(_), BlockEntity::Mod(entity))
-            if mod_api::__private::block_entity_type_listens(mod_api::HookId::MenuSlotTake, entity.id()));
+        let listens_take = matches!((kind, entity), (Kind::Mod(_), BlockEntity::Mod(_))
+            if mod_api::__private::menu_listens(mod_api::HookId::MenuSlotTake, &menu_id));
         let listens_changed = matches!((kind, entity), (Kind::Mod(_), BlockEntity::Mod(_))
             if mod_api::__private::menu_listens(mod_api::HookId::MenuSlotChanged, &menu_id));
         let heard = listens_take || listens_changed;
@@ -2183,6 +2229,12 @@ impl Game<'_> {
         // If the leaving level could not be opened for normal removal, put
         // its remaining cursors in the same fallback as the remaining inputs.
         let mut grid: Vec<_> = host.hub.take_closed_menu_cursors(g.conn).collect();
+        let (proc_ret, proc_drop) = host.hub.take_closed_processing_inputs(g.conn);
+        let mut dropped_processing = proc_ret;
+        dropped_processing.extend(proc_drop);
+        if let Some(menu) = g.menu.as_ref() {
+            dropped_processing.extend(menu.take_processing_inputs(&mut g.native_menu));
+        }
         grid.extend(g.take_menu_cursors());
         grid.extend(g.craft_grid.iter_mut().filter_map(Option::take));
         let play = host.menus.get_mut(&g.conn);
@@ -2195,6 +2247,9 @@ impl Game<'_> {
             if let Some(station) = play.station.take() {
                 grid.extend(super::lan_stations::station_inputs(&station));
             }
+        }
+        for stack in dropped_processing {
+            self.spawn_item(stack, g.position, [0.0, 0.1, 0.0], 40);
         }
         if grid.is_empty() {
             return;

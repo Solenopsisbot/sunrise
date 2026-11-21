@@ -2672,11 +2672,22 @@ impl Hub {
     pub(super) fn remove_guest(&mut self, i: usize, reason: &str) -> Guest {
         let mut g = self.guests.remove(i);
         super::chunk_watch::unwatch_all(&mut self.chunk_watches, &mut g);
-        let closed = g
-            .menu
-            .as_ref()
-            .and_then(|menu| menu.native_closed(g.uuid, g.menu_generation, &mut g.native_menu));
-        self.native_menu_events.extend(closed);
+        if let Some(menu) = g.menu.as_ref() {
+            let inputs = menu.take_processing_inputs(&mut g.native_menu);
+            if !inputs.is_empty() {
+                self.native_menu_events.push(
+                    super::menu::NativeMenuEvent::ReturnProcessingInputs {
+                        conn: g.conn,
+                        items: inputs,
+                        drop_instead: true,
+                    },
+                );
+            }
+            if let Some(closed) = menu.native_closed(g.uuid, g.menu_generation, &mut g.native_menu)
+            {
+                self.native_menu_events.push(closed);
+            }
+        }
         // A held player a proxy dropped keeps, in the log, how its connection really ended
         // (an unreadable packet, a reset): the drop says only that it was dropped.
         if g.held

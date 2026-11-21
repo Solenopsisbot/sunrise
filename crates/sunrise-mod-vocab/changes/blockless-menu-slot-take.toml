@@ -1,0 +1,12 @@
+ids = [
+    "hook:menu_slot_take",
+    "hook:menu_slot_take.pos",
+    "hook:menu_slot_take.entity",
+    "type:MenuSlotTakeEvent.pos",
+    "type:MenuSlotTakeEvent.entity",
+    "method:BlockEntityPart::menu_slot_take",
+    "method:MenuPart::menu_slot_take",
+    "hook:menu_closed",
+]
+why = "menu_slot_take moves to hook version 2 on MenuPart (mirroring menu_button v2) so both block-backed mod menus (pos = Some, entity = Some detached ModBlockEntity) and blockless owned_slots processing menus (pos = None, entity = None) can consume inputs, award XP, unlock recipes, or play transactional sounds on take inside the click savepoint, re-running menu_slot_changed after take edits before commit or shift-click continuation. Processing owned menus (declaring both owned_slots and results) also now automatically return non-result inputs to the player's inventory on close (dropping overflow, or dropping on disconnect or death), discard declared results, and pass an empty owned_slots slice to menu_closed (bumping menu_closed from version 2 to version 3)."
+migrate = "Rebuild against menu_slot_take hook version 2 and menu_closed hook version 3. Move menu_slot_take from BlockEntityPart to MenuPart registered for the menu type, and handle event.pos (Option<[i32; 3]>) and event.entity (Option<&mut ModBlockEntity>); for blockless owned menus, edit transient slots through ItemPlace::MenuSlot using host.transaction_current(). For menu_closed v3, processing owned menus (declaring both owned_slots and results) receive an empty event.owned_slots slice because the game now returns non-result inputs (or drops overflow / drops on disconnect or death) and discards declared results automatically; do not return them again in menu_closed (generic owned_slots menus without results still receive their final owned_slots snapshot unchanged)."

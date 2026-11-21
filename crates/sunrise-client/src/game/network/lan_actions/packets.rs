@@ -816,10 +816,26 @@ impl Game<'_> {
                 if let Some(key) = vehicle {
                     self.close_guest_vehicle_menu(conn, key);
                 }
-                if let Some(carried) =
+                if let Some(closed) =
                     self.with_own_record(gi, |host, _| host.hub.container_closed(conn, p.container))
                 {
-                    self.lan_place_back(gi, vec![carried]);
+                    let dead = self
+                        .lan
+                        .as_ref()
+                        .and_then(|host| host.hub.guests.get(gi))
+                        .is_some_and(|g| g.dead);
+                    if let Some(carried) = closed.carried {
+                        self.lan_place_back(gi, vec![carried]);
+                    }
+                    if !closed.processing_inputs.is_empty()
+                        && let Some(gi) = self.guest_index(conn)
+                    {
+                        if dead {
+                            self.drop_guest_items(gi, closed.processing_inputs);
+                        } else {
+                            self.lan_place_back(gi, closed.processing_inputs);
+                        }
+                    }
                 }
                 if closing {
                     self.player_menu_closing(conn);
