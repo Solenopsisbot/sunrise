@@ -153,20 +153,22 @@ fn valid_spawn_surface<L: SpawnLevel>(
     bit: u16,
     fire_immune: bool,
 ) -> bool {
-    if name(l, x, y, z) == "minecraft:magma_block" {
+    let state = l.state(x, y, z);
+    if &*l.facts().get(state).name == "minecraft:magma_block" {
         fire_immune
     } else {
-        flags(l, x, y, z) & bit != 0
+        l.mob_data().state(state).flags & bit != 0
     }
 }
 /// `NaturalSpawner.isValidEmptySpawnBlock` for an entity type.
 pub fn is_valid_empty_spawn<L: SpawnLevel>(s: Species, l: &L, x: i32, y: i32, z: i32) -> bool {
     // The exported flag is the zombie's answer; only blocks a zombie finds
     // dangerous can answer differently for another type.
-    if flags(l, x, y, z) & data::VALID_EMPTY_SPAWN != 0 {
+    let state = l.state(x, y, z);
+    if l.mob_data().state(state).flags & data::VALID_EMPTY_SPAWN != 0 {
         return true;
     }
-    let f = l.facts().get(l.state(x, y, z));
+    let f = l.facts().get(state);
     let block = &*f.name;
     let burning =
         data::vanilla_burning_block(block, f.emission > 0, l.block_tag("minecraft:fire", block));
