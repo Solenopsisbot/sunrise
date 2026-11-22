@@ -275,25 +275,33 @@ impl PerlinNoise {
                         continue;
                     }
                     let cell = cells[y];
-                    // Four Ys in four cells, as when the cells change often: side by side too,
-                    // each lane with the corners of its own cell.
+                    // Any four Ys in a tabulated column run side by side, reusing each cell's
+                    // gradient lookup across consecutive lanes in the same cell (including mixed
+                    // runs like [0, 0, 1, 1] that previously fell back to scalar).
                     if let Some(terms) = terms.as_ref().filter(|_| y + 4 <= size_y) {
                         let block = &cells[y..y + 4];
-                        if block.windows(2).all(|pair| pair[0] != pair[1]) {
-                            let indices: [[usize; 8]; 4] = std::array::from_fn(|lane| {
-                                self.gradient_indices_at(p, q, block[lane], cell_z)
-                            });
-                            add_four(
-                                &mut column[y..y + 4],
-                                &offsets[y..y + 4],
-                                &fades[y..y + 4],
-                                |i, lane| terms.get(i, indices[lane][i]),
-                                [fade_x, fade_z],
-                                amplitude,
-                            );
-                            y += 4;
-                            continue;
+                        let mut indices = [[0usize; 8]; 4];
+                        let mut prev_lane_cell = block[0];
+                        let mut cur = self.gradient_indices_at(p, q, prev_lane_cell, cell_z);
+                        indices[0] = cur;
+                        for lane in 1..4 {
+                            let c = block[lane];
+                            if c != prev_lane_cell {
+                                prev_lane_cell = c;
+                                cur = self.gradient_indices_at(p, q, c, cell_z);
+                            }
+                            indices[lane] = cur;
                         }
+                        add_four(
+                            &mut column[y..y + 4],
+                            &offsets[y..y + 4],
+                            &fades[y..y + 4],
+                            |i, lane| terms.get(i, indices[lane][i]),
+                            [fade_x, fade_z],
+                            amplitude,
+                        );
+                        y += 4;
+                        continue;
                     }
                     if previous_y != cell {
                         if let Some(terms) = &terms {
@@ -473,16 +481,29 @@ fn add_four(
     [fade_x, fade_z]: [f32; 2],
     amplitude: f32,
 ) {
+    #[inline(always)]
+    fn lerp_lanes(d: [f32; 4], s: [f32; 4], e: [f32; 4]) -> [f32; 4] {
+        std::array::from_fn(|l| s[l] + d[l] * (e[l] - s[l]))
+    }
     let dy: [f32; 4] = std::array::from_fn(|lane| offsets[lane]);
     let fy: [f32; 4] = std::array::from_fn(|lane| fades[lane]);
+    let fx = [fade_x; 4];
+    let fz = [fade_z; 4];
     let values: [[f32; 4]; 8] = std::array::from_fn(|i| {
         std::array::from_fn(|lane| {
             let [dot, gradient] = corner(i, lane);
             dot + gradient * (dy[lane] - ((i >> 1) & 1) as f32)
         })
     });
+    let x0 = lerp_lanes(fx, values[0], values[1]);
+    let x1 = lerp_lanes(fx, values[2], values[3]);
+    let x2 = lerp_lanes(fx, values[4], values[5]);
+    let x3 = lerp_lanes(fx, values[6], values[7]);
+    let y0 = lerp_lanes(fy, x0, x1);
+    let y1 = lerp_lanes(fy, x2, x3);
+    let val = lerp_lanes(fz, y0, y1);
     for lane in 0..4 {
-        out[lane] += amplitude * lerp3([fade_x, fy[lane], fade_z], values.map(|v| v[lane]));
+        out[lane] += amplitude * val[lane];
     }
 }
 

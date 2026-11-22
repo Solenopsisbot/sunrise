@@ -1,6 +1,5 @@
 use super::{NanRange, NoiseStack, PerlinNoise};
 use crate::random::{PositionalRandom, RandomSource};
-use std::sync::Arc;
 
 /// An allocation bound for the builder API (the vanilla data codec allows 32).
 const MAX_BUILDER_OCTAVES: i32 = 4096;
@@ -93,12 +92,8 @@ impl NormalNoise {
             let a = PerlinNoise::new(&mut first.from_hash_of(&name));
             let b = PerlinNoise::new(&mut second.from_hash_of(&name));
             let amplitude = (self.normalization_factor * octave.amplitude) as f32;
-            builder.add(Arc::new(a), octave.frequency, amplitude);
-            builder.add(
-                Arc::new(b),
-                octave.frequency * 1.018_126_888_217_522_7,
-                amplitude,
-            );
+            builder.add_perlin(a, octave.frequency, amplitude);
+            builder.add_perlin(b, octave.frequency * 1.018_126_888_217_522_7, amplitude);
         }
         Ok(builder.build()?)
     }
@@ -283,11 +278,7 @@ pub fn create_legacy_fbm(
     let mut builder = NoiseStack::builder();
     for (index, noise) in levels.into_iter().enumerate() {
         if let Some(noise) = noise {
-            builder.add(
-                Arc::new(noise),
-                frequency,
-                (amplitude * amplitudes[index]) as f32,
-            );
+            builder.add_perlin(noise, frequency, (amplitude * amplitudes[index]) as f32);
         }
         frequency *= 2.0;
         amplitude /= 2.0;

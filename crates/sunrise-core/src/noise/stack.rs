@@ -127,6 +127,91 @@ impl Noise for SimplexNoise {
 }
 
 #[derive(Clone, Debug)]
+enum DispatchNoise {
+    Perlin(Arc<PerlinNoise>),
+    SmearedPerlin(Arc<SmearedPerlinNoise>),
+    Simplex(Arc<SimplexNoise>),
+    Dynamic(Arc<dyn Noise>),
+}
+
+impl DispatchNoise {
+    #[inline]
+    fn get2(&self, x: f64, z: f64) -> f32 {
+        match self {
+            Self::Perlin(n) => n.get2(x, z),
+            Self::SmearedPerlin(n) => n.get2(x, z),
+            Self::Simplex(n) => n.get2(x, z),
+            Self::Dynamic(n) => n.get2(x, z),
+        }
+    }
+    #[inline]
+    fn get3(&self, x: f64, y: f64, z: f64) -> f32 {
+        match self {
+            Self::Perlin(n) => n.get3(x, y, z),
+            Self::SmearedPerlin(n) => n.get3(x, y, z),
+            Self::Simplex(n) => n.get3(x, y, z),
+            Self::Dynamic(n) => n.get3(x, y, z),
+        }
+    }
+    #[inline]
+    fn add_to_volume(
+        &self,
+        buffer: &mut [f32],
+        volume: DensityVolume,
+        xz_scale: f64,
+        y_scale: f64,
+        amplitude: f32,
+    ) -> Result<(), DensityError> {
+        match self {
+            Self::Perlin(n) => n.add_to_volume(buffer, volume, xz_scale, y_scale, amplitude),
+            Self::SmearedPerlin(n) => n.add_to_volume(buffer, volume, xz_scale, y_scale, amplitude),
+            Self::Simplex(n) => {
+                Noise::add_to_volume(n.as_ref(), buffer, volume, xz_scale, y_scale, amplitude)
+            }
+            Self::Dynamic(n) => n.add_to_volume(buffer, volume, xz_scale, y_scale, amplitude),
+        }
+    }
+    #[inline]
+    fn add_to_needed(
+        &self,
+        buffer: &mut [f32],
+        volume: DensityVolume,
+        xz_scale: f64,
+        y_scale: f64,
+        amplitude: f32,
+        needed: &[u64],
+    ) -> Result<(), DensityError> {
+        match self {
+            Self::Perlin(n) => {
+                n.add_to_needed(buffer, volume, xz_scale, y_scale, amplitude, needed)
+            }
+            Self::SmearedPerlin(n) => {
+                n.add_to_needed(buffer, volume, xz_scale, y_scale, amplitude, needed)
+            }
+            Self::Simplex(n) => Noise::add_to_needed(
+                n.as_ref(),
+                buffer,
+                volume,
+                xz_scale,
+                y_scale,
+                amplitude,
+                needed,
+            ),
+            Self::Dynamic(n) => {
+                n.add_to_needed(buffer, volume, xz_scale, y_scale, amplitude, needed)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DispatchLayer {
+    noise: DispatchNoise,
+    frequency: f64,
+    amplitude: f32,
+}
+
+#[derive(Clone, Debug)]
 pub struct NoiseLayer {
     pub noise: Arc<dyn Noise>,
     pub frequency: f64,
@@ -136,6 +221,7 @@ pub struct NoiseLayer {
 #[derive(Clone, Debug)]
 pub struct NoiseStack {
     layers: Vec<NoiseLayer>,
+    dispatch: Vec<DispatchLayer>,
     range: [f32; 2],
 }
 
@@ -156,14 +242,14 @@ impl Noise for NoiseStack {
     }
     fn get2(&self, x: f64, z: f64) -> f32 {
         let mut value = 0.0;
-        for layer in &self.layers {
+        for layer in &self.dispatch {
             value += layer.amplitude * layer.noise.get2(x * layer.frequency, z * layer.frequency);
         }
         value
     }
     fn get3(&self, x: f64, y: f64, z: f64) -> f32 {
         let mut value = 0.0;
-        for layer in &self.layers {
+        for layer in &self.dispatch {
             value += layer.amplitude
                 * layer.noise.get3(
                     x * layer.frequency,
@@ -207,7 +293,7 @@ impl NoiseStack {
         if buffer.len() < volume.size() {
             return Err(DensityError::BufferTooShort);
         }
-        for layer in &self.layers {
+        for layer in &self.dispatch {
             let (xz_scale, y_scale) = (xz_scale * layer.frequency, y_scale * layer.frequency);
             let amplitude = amplitude * layer.amplitude;
             match needed {
@@ -226,11 +312,69 @@ impl NoiseStack {
 #[derive(Clone, Debug, Default)]
 pub struct NoiseStackBuilder {
     layers: Vec<NoiseLayer>,
+    dispatch: Vec<DispatchLayer>,
 }
 impl NoiseStackBuilder {
     pub fn add(&mut self, noise: Arc<dyn Noise>, frequency: f64, amplitude: f32) -> &mut Self {
+        self.dispatch.push(DispatchLayer {
+            noise: DispatchNoise::Dynamic(Arc::clone(&noise)),
+            frequency,
+            amplitude,
+        });
         self.layers.push(NoiseLayer {
             noise,
+            frequency,
+            amplitude,
+        });
+        self
+    }
+    pub fn add_perlin(&mut self, noise: PerlinNoise, frequency: f64, amplitude: f32) -> &mut Self {
+        let arc = Arc::new(noise);
+        self.dispatch.push(DispatchLayer {
+            noise: DispatchNoise::Perlin(Arc::clone(&arc)),
+            frequency,
+            amplitude,
+        });
+        self.layers.push(NoiseLayer {
+            noise: arc,
+            frequency,
+            amplitude,
+        });
+        self
+    }
+    pub fn add_smeared_perlin(
+        &mut self,
+        noise: SmearedPerlinNoise,
+        frequency: f64,
+        amplitude: f32,
+    ) -> &mut Self {
+        let arc = Arc::new(noise);
+        self.dispatch.push(DispatchLayer {
+            noise: DispatchNoise::SmearedPerlin(Arc::clone(&arc)),
+            frequency,
+            amplitude,
+        });
+        self.layers.push(NoiseLayer {
+            noise: arc,
+            frequency,
+            amplitude,
+        });
+        self
+    }
+    pub fn add_simplex(
+        &mut self,
+        noise: SimplexNoise,
+        frequency: f64,
+        amplitude: f32,
+    ) -> &mut Self {
+        let arc = Arc::new(noise);
+        self.dispatch.push(DispatchLayer {
+            noise: DispatchNoise::Simplex(Arc::clone(&arc)),
+            frequency,
+            amplitude,
+        });
+        self.layers.push(NoiseLayer {
+            noise: arc,
             frequency,
             amplitude,
         });
@@ -241,6 +385,12 @@ impl NoiseStackBuilder {
         self.layers
             .extend(stack.layers.iter().map(|layer| NoiseLayer {
                 noise: Arc::clone(&layer.noise),
+                frequency: layer.frequency * frequency,
+                amplitude: layer.amplitude * amplitude,
+            }));
+        self.dispatch
+            .extend(stack.dispatch.iter().map(|layer| DispatchLayer {
+                noise: layer.noise.clone(),
                 frequency: layer.frequency * frequency,
                 amplitude: layer.amplitude * amplitude,
             }));
@@ -290,6 +440,7 @@ impl NoiseStackBuilder {
         }
         Ok(NoiseStack {
             layers: self.layers.clone(),
+            dispatch: self.dispatch.clone(),
             range,
         })
     }
