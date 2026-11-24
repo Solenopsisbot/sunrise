@@ -3,6 +3,12 @@
 //! `BlockItem` and `new BlockPlaceContext(...).canPlace()` is true, and
 //! `SUCCESS` otherwise — on both the server (`use_hand`) and client prediction
 //! (`remote_block_reacts` / `client_block_answer`).
+//!
+//! The server cases here are also compared against vanilla 26.3 itself by
+//! `tools/test_use_item_on_parity.py` (`redstone_ore_named_cases` and a random
+//! stream), which prints the hand that ended the click and whether it failed.
+//! This test keeps what that harness cannot reach: client prediction, and that
+//! the item's `placement_context` hook is never asked.
 
 use crate::game::native_entity_refs::tests::with_game;
 use crate::game::{GuestUse, Hit};

@@ -714,7 +714,7 @@ impl Game<'_> {
         };
         let ctx = self.block_place_context(hit, &stack.item, sneaking);
         // A player's context always resolves (only a directional one can be refused).
-        self.with_level(|b, level, ticks| b.can_place(level, ticks, &ctx)) == Ok(true)
+        self.preview_can_place(&ctx) == Ok(true)
     }
 }
 

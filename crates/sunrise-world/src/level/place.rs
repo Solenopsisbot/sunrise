@@ -2243,15 +2243,19 @@ impl Behaviours {
     /// `new BlockPlaceContext(...).canPlace()` for `input`, as `RedStoneOreBlock.useItemOn`
     /// asks it before letting a `BlockItem` through: the context resolves as `BlockItem.place`
     /// resolves it (the clicked block if it can be replaced, else the one beside the face),
-    /// with no `updatePlacementContext` rewrite. Reads the level only. A directional `input`
-    /// answers `DirectionalPlaceContext.canPlace()`; `Err` where vanilla throws for one.
+    /// with no `updatePlacementContext` rewrite. Reads the level only: `signal_reads` are the
+    /// live ticks, read and never scheduled into (as `state_for_resolved_placement` reads them),
+    /// so a placement preview level can answer it. A directional `input` answers
+    /// `DirectionalPlaceContext.canPlace()`; `Err` where vanilla throws for one.
     pub fn can_place<L: LevelAccess + ?Sized>(
         &self,
         level: &mut L,
-        ticks: &mut Ticks,
+        signal_reads: &Ticks,
         input: &PlaceContext,
     ) -> Result<bool, DirectionalRefusal> {
-        let sim = self.sim(level, ticks);
+        let mut ticks = Ticks::default();
+        let mut sim = self.sim(level, &mut ticks);
+        sim.signal_reads = Some(signal_reads);
         let ctx = sim.resolve_context(input)?;
         Ok(sim.can_place_context(&ctx))
     }
@@ -2351,9 +2355,9 @@ mod can_place_tests {
         let four_candles = with_prop("minecraft:white_candle", "candles", "4");
 
         let mut level = TestLevel::new(&b);
-        let mut ticks = Ticks::new(0);
-        let mut can_place = |level: &mut TestLevel, ctx: &PlaceContext| {
-            b.can_place(level, &mut ticks, ctx)
+        let ticks = Ticks::new(0);
+        let can_place = |level: &mut TestLevel, ctx: &PlaceContext| {
+            b.can_place(level, &ticks, ctx)
                 .expect("a player's BlockPlaceContext always resolves")
         };
         let clicked = BlockPos::new(4, 64, 4);
