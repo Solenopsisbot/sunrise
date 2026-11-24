@@ -16,7 +16,8 @@ pub trait Hooks {
     /// `render_tooltip_pre` nor `render_tooltip_texture` is asked.
     /// A panicking destructor of custom data published here disables this listener
     /// for the session without disabling other listeners.
-    /// Asked each frame the tooltip shows, never for one the stack hides.
+    /// Asked each frame the tooltip shows, never for one the stack hides. An input
+    /// conversion refusal skips Gather and preserves the unwrapped engine tooltip.
     /// Text is used in memory without serialized component limits. Client-side.
     #[hook(
         receiver = "read",
@@ -29,7 +30,7 @@ pub trait Hooks {
         version = 4
     )]
     fn render_tooltip_gather_components(
-        stack: &ItemStack,
+        stack: &mod_api::ItemStack,
         screen_width: i32,
         screen_height: i32,
         elements: &mut Vec<TooltipElement>,

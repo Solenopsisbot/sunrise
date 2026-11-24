@@ -330,12 +330,18 @@ impl Game<'_> {
             && level.dimension() == self.native_level_key())
         .then_some(&self.world)
     }
-    /// Find a loaded chunk in an open server level.
+    /// Find a loaded chunk in an open server level: `ServerChunkCache.getChunkNow`, which also
+    /// makes a FULL column one of the level's recent FULL lookups (`Streaming::note_full_read`).
     pub(super) fn chunk(&self, level: LevelRef, pos: [i32; 2]) -> Option<ChunkRef> {
-        self.native_level_world(level)?
-            .chunks
-            .contains_key(&(pos[0], pos[1]))
-            .then_some(mod_api::__private::game::chunk_ref(level, pos))
+        let world = self.native_level_world(level)?;
+        let key = (pos[0], pos[1]);
+        if !world.chunks.contains_key(&key) {
+            return None;
+        }
+        if let Some(streaming) = self.native_level_streaming(level) {
+            streaming.note_full_read(world, key);
+        }
+        Some(mod_api::__private::game::chunk_ref(level, pos))
     }
     /// Every loaded chunk of an open server level as handles, ordered by chunk x then z. None
     /// for a stale handle or on a client. Loads nothing.
@@ -372,11 +378,15 @@ impl Game<'_> {
     }
     /// `Level.getChunk(x, z)`: load or generate chunk `pos` to FULL, blocking the server tick
     /// until it is there, under a one-tick `UNKNOWN` ticket (`Game::load_full_chunk`).
-    /// False for a stale handle, on a client, for a chunk past `ChunkPos.isValid`, and when
-    /// the level's generation is paused or stopped.
-    pub(super) fn level_load_chunk(&mut self, level: LevelRef, pos: [i32; 2]) -> bool {
+    /// `Unloaded` for a stale handle, on a client, for a chunk past `ChunkPos.isValid`, and when
+    /// the level's generation is paused or stopped; `Failed` when a generation it needs panicked.
+    pub(super) fn level_load_chunk(
+        &mut self,
+        level: LevelRef,
+        pos: [i32; 2],
+    ) -> Result<(), mod_api::ChunkLoadError> {
         if self.native_level_streaming(level).is_none() {
-            return false;
+            return Err(mod_api::ChunkLoadError::Unloaded);
         }
         let parked = (level.dimension() != self.dim.key()).then_some(level);
         self.load_full_chunk(parked, (pos[0], pos[1]))
@@ -826,16 +836,16 @@ impl Game<'_> {
         Ok(light.emission(state.0))
     }
 
-    /// The stored light of one layer at `pos` (`BlockAndLightGetter.getBrightness`), 0 to 15,
-    /// of the server's level or the one a client shows. None as for `block_state`: a position
-    /// that isn't loaded has no light to read.
+    /// The stored light of one layer at `pos` (`BlockAndLightGetter.getBrightness`), 0 to 15.
+    /// As with `block_state`, a client reads the named level, shown or open for viewing.
+    /// Returns None if the level is unavailable or the position isn't loaded.
     pub(super) fn level_brightness(
         &self,
         level: LevelRef,
         layer: LightLayer,
         pos: [i32; 3],
     ) -> Option<i32> {
-        let world = self.native_level_read_world(level)?;
+        let world = self.native_level_view_world(level)?;
         world
             .is_loaded_at(pos[0], pos[1], pos[2])
             .then(|| world_brightness(world, layer, pos))
@@ -2240,8 +2250,8 @@ mod tests {
     }
 
     use mod_api::{
-        self, Hooks, ModEntry, Registrar, ServerHost, TicketController, ValidateTicketsEvent,
-        testing,
+        self, ChunkLoadError, Hooks, ModEntry, Registrar, ServerHost, TicketController,
+        ValidateTicketsEvent, testing,
     };
     use sunrise_client::mod_chunk_tickets::{ModTicket, TicketOwner};
 
@@ -2803,7 +2813,7 @@ mod tests {
                 let far = ChunkRef::new(level, [40, -7]);
                 assert!(!game.chunk_loaded(far));
                 let host: &mut dyn ServerHost = game;
-                assert!(level.load_chunk(host, [40, -7]));
+                assert_eq!(level.load_chunk(host, [40, -7]), Ok(()));
                 // Lit when the call returns: open sky at the top of the world, none in the
                 // deepslate under it.
                 let sky = |host: &dyn ServerHost, y| {
@@ -2819,7 +2829,7 @@ mod tests {
                 assert_eq!(game.chunk_forced(far), Some(false));
                 assert!(!game.streaming.forced.contains(&(40, -7)));
                 let host: &mut dyn ServerHost = game;
-                assert!(level.load_chunk(host, [40, -7]), "already full");
+                assert_eq!(level.load_chunk(host, [40, -7]), Ok(()), "already full");
                 // A changed loaded area sweeps at once: the next tick's sweep keeps the chunk.
                 game.streaming.radius = 1;
                 game.tick_server(false).unwrap();
@@ -2832,8 +2842,14 @@ mod tests {
                 assert!(!game.chunk_loaded(far), "unloaded once the ticket expired");
                 // The first chunks past `ChunkPos.isValid`, on x and on z.
                 let host: &mut dyn ServerHost = game;
-                assert!(!level.load_chunk(&mut *host, [2_097_062, 0]));
-                assert!(!level.load_chunk(&mut *host, [0, -2_097_062]));
+                assert_eq!(
+                    level.load_chunk(&mut *host, [2_097_062, 0]),
+                    Err(ChunkLoadError::Unloaded)
+                );
+                assert_eq!(
+                    level.load_chunk(&mut *host, [0, -2_097_062]),
+                    Err(ChunkLoadError::Unloaded)
+                );
                 // A level the server has not opened, then the same level opened and parked.
                 let other = if game.dim == Dim::Nether {
                     Dim::End
@@ -2842,13 +2858,16 @@ mod tests {
                 };
                 let parked = mod_api::LevelRef::new(level.epoch(), other.key());
                 let host: &mut dyn ServerHost = game;
-                assert!(!parked.load_chunk(host, [3, 3]));
+                assert_eq!(
+                    parked.load_chunk(host, [3, 3]),
+                    Err(ChunkLoadError::Unloaded)
+                );
                 let back = game.dim;
                 game.enter_level(other).unwrap();
                 game.enter_level(back).unwrap();
                 HEARD.with_borrow_mut(Vec::clear);
                 let host: &mut dyn ServerHost = game;
-                assert!(parked.load_chunk(host, [3, 3]));
+                assert_eq!(parked.load_chunk(host, [3, 3]), Ok(()));
                 assert_eq!(game.dim, back, "loading must not switch the acting level");
                 let parked_chunk =
                     &game.levels.parked_world_of(other.id()).unwrap().chunks[&(3, 3)];
@@ -2859,6 +2878,51 @@ mod tests {
                         && *chunk == [3, 3]
                         && *resident),
                     "the parked level's chunk_load came before the call returned: {heard:?}"
+                );
+            });
+        });
+    }
+
+    /// `ServerChunkCache.getChunkNow` (#4670): after the first purge, a resident read of the FULL
+    /// chunk makes it one of the level's recent FULL lookups, so a `load_chunk` that follows in
+    /// the same tick answers from them and leaves the `UNKNOWN` ticket as the first load placed
+    /// it: it expires at the second purge, whose sweep unloads the chunk. Without the read's entry
+    /// the second load would set the ticket again and the chunk would stay.
+    #[test]
+    #[ignore = "daily"]
+    fn a_resident_read_lets_load_chunk_answer_without_a_new_ticket() {
+        // The game fixture publishes process-wide worldgen tables: a child process of its own.
+        if run_fresh_cases(
+            concat!(
+                "game::native_level_refs::tests::",
+                "a_resident_read_lets_load_chunk_answer_without_a_new_ticket"
+            ),
+            "SUNRISE_LOAD_CHUNK_READ_CHILD",
+            &["resident_read"],
+        ) {
+            return;
+        }
+        mod_platform::testing::with_mods(Vec::new().into(), || {
+            with_chunk_streaming(|game| {
+                let level = game.level(game.dim.id()).unwrap();
+                let host: &mut dyn ServerHost = game;
+                assert_eq!(level.load_chunk(host, [40, -7]), Ok(()));
+                // A changed loaded area sweeps at once: the ticket, at 0 ticks left after this
+                // tick's purge, keeps the chunk, and the tick's end forgets the lookups.
+                game.streaming.radius = 1;
+                game.tick_server(false).unwrap();
+                assert!(
+                    game.world.chunks.contains_key(&(40, -7)),
+                    "kept by the ticket"
+                );
+                assert!(game.chunk(level, [40, -7]).is_some(), "the resident read");
+                let host: &mut dyn ServerHost = game;
+                assert_eq!(level.load_chunk(host, [40, -7]), Ok(()));
+                game.streaming.radius = 0;
+                game.tick_server(false).unwrap();
+                assert!(
+                    !game.world.chunks.contains_key(&(40, -7)),
+                    "the first load's ticket expired at the second purge"
                 );
             });
         });
@@ -3217,7 +3281,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod environment_read_tests {
+pub(in crate::game) mod environment_read_tests {
     use crate::game::{Dim, native_entity_refs::tests::with_game};
     use mod_api::{BiomeSearch, LevelRef, WorldEpoch};
     use std::sync::Arc;
@@ -3239,6 +3303,11 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn biome_reads_follow_live_cells_parked_levels_and_client_login_without_loading() {
+        run_biome_reads_follow_live_cells_parked_levels_and_client_login_without_loading();
+    }
+
+    pub(in crate::game) fn run_biome_reads_follow_live_cells_parked_levels_and_client_login_without_loading()
+     {
         use crate::game::execution_role::ExecutionRole;
         use sunrise_protocol::connection::Pipe;
 
@@ -3303,6 +3372,10 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn floor_reads_real_collision_shapes_and_refuses_unloaded_positions() {
+        run_floor_reads_real_collision_shapes_and_refuses_unloaded_positions();
+    }
+
+    pub(in crate::game) fn run_floor_reads_real_collision_shapes_and_refuses_unloaded_positions() {
         with_game(|game| {
             game.world
                 .chunks
@@ -3346,6 +3419,10 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn sky_and_logical_height_read_the_named_dimension_and_client_state() {
+        run_sky_and_logical_height_read_the_named_dimension_and_client_state();
+    }
+
+    pub(in crate::game) fn run_sky_and_logical_height_read_the_named_dimension_and_client_state() {
         use crate::game::execution_role::ExecutionRole;
         use sunrise_client::chunk::LevelShape;
         use sunrise_protocol::connection::Pipe;
@@ -3425,6 +3502,11 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn closest_biome_uses_the_named_generator_without_loading_resident_chunks() {
+        run_closest_biome_uses_the_named_generator_without_loading_resident_chunks();
+    }
+
+    pub(in crate::game) fn run_closest_biome_uses_the_named_generator_without_loading_resident_chunks()
+     {
         use sunrise_client::vanillagen::{TerrainResources, VanillaTerrain};
 
         with_game(|game| {
@@ -3534,6 +3616,11 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn nearest_structure_uses_the_named_generator_without_loading_resident_chunks() {
+        run_nearest_structure_uses_the_named_generator_without_loading_resident_chunks();
+    }
+
+    pub(in crate::game) fn run_nearest_structure_uses_the_named_generator_without_loading_resident_chunks()
+     {
         use mod_api::StructureSearch;
         use sunrise_client::vanillagen::{TerrainResources, VanillaTerrain};
 
@@ -3631,6 +3718,10 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn level_environment_reads_match_vanilla_vectors() {
+        run_level_environment_reads_match_vanilla_vectors();
+    }
+
+    pub(in crate::game) fn run_level_environment_reads_match_vanilla_vectors() {
         use serde_json::{Value, json};
         use std::collections::HashMap;
         use sunrise_client::vanillagen::{TerrainResources, VanillaTerrain};

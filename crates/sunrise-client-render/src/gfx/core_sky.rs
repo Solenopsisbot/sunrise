@@ -16,6 +16,7 @@ pub(crate) const GLUE: Glue = Glue {
     // 26.3's ProjMat already has wgpu's reversed 0 to 1 depth (Projection: zZeroToOne).
     finish: "",
     vertex_id: "int(gl_VertexIndex)",
+    interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
 };
 
 /// `SkyRenderer.buildSkyDisc(16)`: a fan around the point 16 above the camera, out to 512 every

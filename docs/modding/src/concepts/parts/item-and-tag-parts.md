@@ -391,3 +391,27 @@ failing slot placement/pickup rules, or panicking refuses the click and rolls ba
 Global `Hooks::item_stacked_on_other` listeners preserve their separate contract (stacks may only
 be set on `Flow::Cancel` + `handled = true`, result/potion slots cannot be edited directly, and
 `Flow::Cancel` with `handled = false` skips vanilla bundle overrides and runs plain pickup).
+
+For an authoritative mount-menu pickup, the saddle, body equipment and chest slots belong to
+the mount, but roll back together with the player's inventory and cursor if the click is refused
+or an enclosing transaction aborts. The server reconciles the open menu from settled storage.
+
+## Dropped item destruction
+
+`ItemPart::item_destroyed` is `IItemExtension.onDestroyed` (vanilla `ItemStack.onDestroyed`). It
+fires on the server inside a transaction whenever a dropped item entity reaches zero health from
+damage — fire (`minecraft:on_fire`, `minecraft:in_fire`), lava (`minecraft:lava`), cactus
+(`minecraft:cactus`), explosions, `/damage`, `EntityRef::hurt`, or block-contact damage — before
+built-in container components are cleared and before the entity is discarded (matching vanilla
+`ItemEntity.hurtServer` -> `ItemStack.onDestroyed` -> `discard()`). Lifetime despawn
+(`item_despawn`) and void removal do not fire it.
+
+The part receives the original intact `event.stack`, the still-live `event.item: ItemEntityRef`
+(whose `with_stack(host, ...)` also still holds the original un-emptied stack), the lethal
+`event.damage_type`, and `event.drops: &mut Vec<ItemStack>` (pre-populated with any vanilla
+`minecraft:bundle_contents` or `minecraft:container` spills). Push or edit stacks in `event.drops`
+to spawn them at the entity's position (`ItemUtils.onContainerDestroyed`) once the entity is
+discarded. Each part's drop edits are validated against the item registry (an invalid stack rolls
+that part's edit back); a panic or a refused commit rolls back the transaction's host writes and
+falls back to the vanilla drop baseline while still discarding the destroyed item entity. An item
+with no listening `ItemPart` pays one table lookup and opens no transaction.

@@ -127,7 +127,9 @@ A retained key keeps its identity across reloads; its members come from the curr
   damage type tags (`DamageSource.is(TagKey)`); it returns `None` for a damage type the bound
   registry doesn't have.
 - `item_tags(item)` lists the tag names an item belongs to; `item_tag_names()` lists all bound
-  item tags, including empty tags. Both return identifiers without resolving keys.
+  item tags, including empty tags. Both return identifiers without resolving keys. Each call
+  scans every bound item tag and builds a new list, so keep them out of per-tick and
+  per-entity hooks; for one known tag, `is_in_tag` is a single lookup.
 
 Neither callback can edit tags or access a mutable host. Evaluating a type without a
 registered codec does not copy a tag snapshot.

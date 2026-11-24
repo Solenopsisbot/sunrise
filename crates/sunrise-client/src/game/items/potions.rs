@@ -5058,7 +5058,7 @@ mod depleted_absorption_tests {
 }
 
 #[cfg(test)]
-mod arrow_contents {
+pub(in crate::game) mod arrow_contents {
     //! Actual in-memory Game potion paths. No run loop, world load or server startup.
     use super::*;
     use crate::game::{Audio, Options, Progress, Settings, execution_role, load_resources};
@@ -5119,6 +5119,10 @@ mod arrow_contents {
     #[test]
     #[ignore = "explicit SUNRISE_TEST_RESOURCES and isolated potion oracle input/output"]
     fn actual_arrow_contents_match_pinned_methods() {
+        run_actual_arrow_contents_match_pinned_methods();
+    }
+
+    pub(in crate::game) fn run_actual_arrow_contents_match_pinned_methods() {
         let root =
             PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").expect("explicit resources"));
         let input =

@@ -1717,6 +1717,91 @@ fn h149_oblique_local_offsets_are_grouped_before_the_origin() {
     );
 }
 
+/// `IntegerArgumentType.parse` before the mod's parser: a value out of range is refused with
+/// Brigadier's message (the bound, then the value found), and the parser sees only digits that fit.
+#[test]
+fn a_custom_integer_argument_is_bounded_before_its_parser() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let parsed = seen.clone();
+    let argument = ArgType::Custom(CustomArgument::new(
+        "example:stack",
+        CustomArgumentKind::Integer { min: 1, max: 64 },
+        move |input| {
+            parsed.lock().unwrap().push(input.to_owned());
+            Ok(format!("{input} items"))
+        },
+        |_, _| Vec::new(),
+    ));
+    let mut dispatcher = Dispatcher::new();
+    let command = dispatcher.literal(0, "stack");
+    let count = dispatcher.argument(command, "count", argument);
+    dispatcher.executes(count, "test");
+    let registries = reg();
+    let parsed = dispatcher.parse("stack 64", &registries);
+    let (context, _) = parsed.executable().unwrap();
+    assert_eq!(
+        context.get("count"),
+        Some(&Arg::Custom {
+            kind: "example:stack".into(),
+            value: "64 items".into(),
+        })
+    );
+    for (input, expected) in [
+        ("stack 65", Text::tr("argument.integer.big", &[&64, &65])),
+        ("stack 0", Text::tr("argument.integer.low", &[&1, &0])),
+        ("stack 7.5", Text::tr("parsing.int.invalid", &[&"7.5"])),
+    ] {
+        let error = dispatcher
+            .parse(input, &registries)
+            .executable()
+            .unwrap_err();
+        assert_eq!(error.message, expected, "{input}");
+        assert_eq!(error.cursor, "stack ".len(), "{input}");
+    }
+    assert_eq!(*seen.lock().unwrap(), ["64"]);
+}
+
+/// `LongArgumentType.longArg(min, max)`: an `i64` past `int`'s range, refused out of range with
+/// `argument.long.low` / `big`, and never a fraction.
+#[test]
+fn a_long_argument_reads_past_int_and_refuses_out_of_range() {
+    let mut dispatcher = Dispatcher::new();
+    let command = dispatcher.literal(0, "bank");
+    let total = dispatcher.argument(
+        command,
+        "total",
+        ArgType::Long {
+            min: -5,
+            max: 9_000_000_000,
+        },
+    );
+    dispatcher.executes(total, "test");
+    let registries = reg();
+    let parsed = dispatcher.parse("bank 9000000000", &registries);
+    let (context, _) = parsed.executable().unwrap();
+    assert_eq!(context.get("total"), Some(&Arg::Long(9_000_000_000)));
+    for (input, expected) in [
+        (
+            "bank 9000000001",
+            Text::tr(
+                "argument.long.big",
+                &[&9_000_000_000_i64, &9_000_000_001_i64],
+            ),
+        ),
+        (
+            "bank -6",
+            Text::tr("argument.long.low", &[&-5_i64, &-6_i64]),
+        ),
+        ("bank 1.5", Text::tr("parsing.long.invalid", &[&"1.5"])),
+    ] {
+        let error = dispatcher
+            .parse(input, &registries)
+            .executable()
+            .unwrap_err();
+        assert_eq!(error.message, expected, "{input}");
+    }
+}
+
 #[test]
 fn a_custom_argument_parses_completes_and_keeps_its_id() {
     let argument = ArgType::Custom(CustomArgument::new(

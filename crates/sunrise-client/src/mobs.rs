@@ -2922,17 +2922,20 @@ impl Mob {
     /// of every mob writes each one in its slot, not through a copy.
     #[inline]
     pub fn seen(&self, _player: Option<[i32; 4]>, items: &crate::items::Items) -> Seen {
-        let (m, villager) = (self, self.species() == Species::Villager);
+        let m = self;
+        let species = m.species();
+        let villager = species == Species::Villager;
+        let bounds = m.bounds();
         Seen {
             kind: Arc::clone(&m.kind),
             in_water: self.fluids.in_water,
             playing_dead: axolotl::is_playing_dead(self),
             last_damage: self.last_damage.map(|(d, _)| d),
             id: m.id,
-            species: m.species(),
+            species,
             position: m.position,
-            bounds: m.bounds(),
-            hitbox: m.hitbox(),
+            bounds,
+            hitbox: m.hitbox_from_bounds(bounds),
             eye_y: m.eye_y(),
             alive: m.alive(),
             removed: m.removed,
@@ -2974,7 +2977,7 @@ impl Mob {
             vehicle: m.extra.mount,
             pushable: m.pushable(),
             sleeping: villager::sleeping(m)
-                || (m.species() == Species::Fox && fox::flag(m, fox::SLEEPING)),
+                || (species == Species::Fox && fox::flag(m, fox::SLEEPING)),
             cold_strider: strider::suffocating(m),
             category: m.category(),
             potential_job: villager_brain::potential_job_site(m),
@@ -2992,10 +2995,10 @@ impl Mob {
             ],
             sitting: m.extra.sitting,
             silent: m.silent,
-            lying: m.species() == Species::Cat && (m.extra.flag || m.extra.relax_one),
+            lying: species == Species::Cat && (m.extra.flag || m.extra.relax_one),
             ridden: m.rider.is_some() || m.extra.rider.is_some() || m.extra.mount.is_some(),
             is_vehicle: equine::is_vehicle(m),
-            still: m.species() == Species::HappyGhast && happy_ghast::on_still_timeout(m),
+            still: species == Species::HappyGhast && happy_ghast::on_still_timeout(m),
             carrying: m.rider.is_some() || m.extra.rider.is_some(),
             knockback_resistance: m.attrs.knockback_resistance,
             effects: m
@@ -3576,6 +3579,8 @@ pub struct MobWorld<'a> {
     pub mob_griefing: bool,
     /// The `universal_anger` game rule (`NeutralMob.isAngryAtAllPlayers`).
     pub universal_anger: bool,
+    /// The `pvp` game rule (`ServerLevel.isPvpAllowed`).
+    pub pvp: bool,
     /// The `mob_drops` game rule (`shouldDropLoot`).
     pub mob_drops: bool,
     /// The `max_entity_cramming` game rule.
@@ -3771,6 +3776,8 @@ pub trait WhoLookup {
 pub struct Teams<'a> {
     pub player: Option<&'a crate::scoreboard::Team>,
     pub mobs: HashMap<u32, &'a crate::scoreboard::Team>,
+    /// Each real player of the level on a team, host and guests, by entity id.
+    pub players: HashMap<u32, &'a crate::scoreboard::Team>,
 }
 impl<'a> Teams<'a> {
     pub fn of(&self, who: Who) -> Option<&'a crate::scoreboard::Team> {
@@ -3778,6 +3785,10 @@ impl<'a> Teams<'a> {
             Who::Player => self.player,
             Who::Mob(id) => self.mobs.get(&id).copied(),
         }
+    }
+    /// The team of the real player with this entity id.
+    pub fn of_player(&self, id: u32) -> Option<&'a crate::scoreboard::Team> {
+        self.players.get(&id).copied()
     }
 }
 /// `InfestedMobEffect.onMobHurt`'s draws from the bearer's random
@@ -4014,14 +4025,17 @@ impl Mob {
     /// `LivingEntity.getHitbox`: a rider's box starts no lower than its seat
     /// (`vehicle.getPassengerRidingPosition(this).y`).
     pub fn hitbox(&self) -> Aabb {
-        let b = self.bounds();
+        self.hitbox_from_bounds(self.bounds())
+    }
+
+    fn hitbox_from_bounds(&self, bounds: Aabb) -> Aabb {
         match self.extra.seat.filter(|s| self.extra.mount == Some(s.0)) {
             Some((_, offset, _)) => {
-                let (lo, hi) = (b.min_position(), b.max_position());
+                let (lo, hi) = (bounds.min_position(), bounds.max_position());
                 let y = (self.position.y + offset).max(lo.y);
                 Aabb::new(Vec3::new(lo.x, y, lo.z), hi)
             }
-            None => b,
+            None => bounds,
         }
     }
     /// `Mob.getAttackBoundingBox(range)`: its box, widened to its vehicle's
@@ -5714,6 +5728,7 @@ mod teams_tests {
     fn borrowed<'a>(board: &'a Scoreboard, uuids: &HashMap<u32, [i32; 4]>) -> Teams<'a> {
         Teams {
             player: board.players_team("Steve"),
+            players: HashMap::new(),
             mobs: uuids
                 .iter()
                 .filter_map(|(id, u)| Some((*id, board.players_team(&uuid_text(*u))?)))

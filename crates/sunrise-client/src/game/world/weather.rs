@@ -24,6 +24,38 @@ pub(super) fn precipitation_at(
     biomes.get(id).snows_at(pos, sea_level)
 }
 
+/// What `Level.precipitationAt` reads of the level in place: it rains (the rain level above 0.2),
+/// the sky light is 15, the motion-blocking height, and the biome's precipitation there
+/// (`ClientLevel.getPrecipitationAt`'s zoomed biome; snow is `Some(true)` there).
+struct GamePrecipitation<'a, 'g>(&'a Game<'g>);
+
+impl sunrise_world::level::weather::PrecipitationReads for GamePrecipitation<'_, '_> {
+    fn is_raining(&self) -> bool {
+        self.0.weather_levels(1.0).0 > 0.2
+    }
+    fn can_see_sky(&self, p: BlockPos) -> bool {
+        self.0.world.light(p.x, p.y, p.z) >> 4 == 15
+    }
+    fn motion_blocking_y(&self, p: BlockPos) -> i32 {
+        self.0.rain_height(p.x, p.z)
+    }
+    fn biome_precipitation(&self, p: BlockPos) -> sunrise_world::level::PrecipitationKind {
+        use sunrise_world::level::PrecipitationKind;
+        let game = self.0;
+        match precipitation_at(
+            &game.world,
+            world_biomes!(game),
+            game.streaming.biome_zoom,
+            p,
+            game.weather_sea_level(),
+        ) {
+            Some(true) => PrecipitationKind::Snow,
+            Some(false) => PrecipitationKind::Rain,
+            None => PrecipitationKind::None,
+        }
+    }
+}
+
 impl Game<'_> {
     /// The joined `ClientLevel`'s sea level, or the server level's generator setting.
     pub(super) fn weather_sea_level(&self) -> i32 {
@@ -85,19 +117,11 @@ impl Game<'_> {
         darken
     }
 
-    /// `Level.isRainingAt`: it rains, the sky light is 15, nothing that stops
-    /// motion is above, and the biome's precipitation there is rain.
+    /// `Level.isRainingAt`: `Level.precipitationAt`
+    /// (`sunrise_world::level::weather::precipitation_at`) is rain.
     pub(super) fn raining_at(&self, p: BlockPos) -> bool {
-        self.weather_levels(1.0).0 > 0.2
-            && self.world.light(p.x, p.y, p.z) >> 4 == 15
-            && self.rain_height(p.x, p.z) <= p.y
-            && precipitation_at(
-                &self.world,
-                world_biomes!(self),
-                self.streaming.biome_zoom,
-                p,
-                self.weather_sea_level(),
-            ) == Some(false)
+        sunrise_world::level::weather::precipitation_at(&GamePrecipitation(self), p)
+            == sunrise_world::level::PrecipitationKind::Rain
     }
 
     /// `getHeight(Heightmap.Types.MOTION_BLOCKING, x, z)`: one above the

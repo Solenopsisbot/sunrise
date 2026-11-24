@@ -637,6 +637,16 @@ impl Game<'_> {
     /// here: single player's, a host's for each guest, a remote client's own.
     pub(super) fn destroy_progress(&mut self, pos: [i32; 3]) -> f32 {
         let state = self.world.block(pos[0], pos[1], pos[2]);
+        self.destroy_progress_for(pos, state)
+    }
+    /// `BlockBehaviour.getDestroyProgress` for a supplied state at `pos`: the game's own
+    /// dig math, including the `player_break_speed` hook. The caller checks that `state`
+    /// is a known state when it comes from a mod.
+    pub(super) fn destroy_progress_for(
+        &mut self,
+        pos: [i32; 3],
+        state: sunrise_world::registry::BlockStateId,
+    ) -> f32 {
         let facts = self.res.facts().get(state);
         if facts.hardness == -1.0 {
             return 0.0;
@@ -663,6 +673,7 @@ impl Game<'_> {
         let mut speed = sunrise_items::mining::destroy_speed(tool_speed, &player);
         let mut canceled = false;
         if mod_api::__private::listened(mod_api::HookId::PlayerBreakSpeed) {
+            let _dispatching = BreakSpeedDispatch::enter();
             self.native_player_break_speed(
                 self.own_entity_id() as u32,
                 pos,
@@ -1420,6 +1431,36 @@ mod tests {
 std::thread_local! {
     /// Whether a harvest check's hooks are running on this thread.
     static HARVEST_DISPATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The break-speed hook of one dig running, given back when dropped (a panic unwinding
+/// included). A listener that asks the mods' destroy-progress query meanwhile would run the
+/// hook again without bound, so the query answers None while this is held
+/// ([`BreakSpeedDispatch::running`]).
+pub(in crate::game) struct BreakSpeedDispatch {
+    outer: bool,
+}
+
+impl BreakSpeedDispatch {
+    fn enter() -> Self {
+        Self {
+            outer: BREAK_SPEED_DISPATCH.replace(true),
+        }
+    }
+    pub(in crate::game) fn running() -> bool {
+        BREAK_SPEED_DISPATCH.get()
+    }
+}
+
+impl Drop for BreakSpeedDispatch {
+    fn drop(&mut self) {
+        BREAK_SPEED_DISPATCH.set(self.outer);
+    }
+}
+
+std::thread_local! {
+    /// Whether a dig's break-speed hook is running on this thread.
+    static BREAK_SPEED_DISPATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The harvest hooks of one `mod_harvest_check` running, given back when dropped (a panic

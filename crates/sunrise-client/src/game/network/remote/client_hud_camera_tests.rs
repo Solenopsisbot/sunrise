@@ -431,6 +431,10 @@ fn a_watched_rider_gets_hearts_for_the_dragon_and_local_player_but_not_a_boat() 
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn hud_bars_follow_the_camera_player_like_26_3() {
+    run_hud_bars_follow_the_camera_player_like_26_3();
+}
+
+pub(in crate::game) fn run_hud_bars_follow_the_camera_player_like_26_3() {
     let path = std::env::var("SUNRISE_HUD_CAMERA_WITNESS")
         .expect("run through tools/test_camera_parity.py, which records the witness");
     let witness = std::fs::read_to_string(&path).unwrap_or_else(|err| {

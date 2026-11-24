@@ -45,13 +45,7 @@ impl Game<'_> {
     /// its entity id — when the guest is a player the tick can name: a fake
     /// guest resolves as none, as the write handle refuses it (#1077).
     pub(super) fn guest_identity(&self, conn: u32) -> Option<([i32; 4], u32)> {
-        let guest = self
-            .lan
-            .as_ref()?
-            .hub
-            .guests
-            .iter()
-            .find(|g| g.conn == conn)?;
+        let guest = self.lan.as_ref()?.hub.guest(conn)?;
         if guest.is_fake() {
             return None;
         }

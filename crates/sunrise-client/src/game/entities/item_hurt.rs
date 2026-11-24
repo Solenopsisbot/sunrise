@@ -42,8 +42,11 @@ impl Game<'_> {
         mark_item_hurt(item, amount);
         let at = item.position;
         self.post_item_damage(at, causing);
-        if let Some(contents) = self.dropped[index].hurt(0) {
-            self.dropped.remove(index);
+        if self.dropped[index].health <= 0 {
+            let contents = self.destroy_item_entity_drops(index, damage_type);
+            if let Some(index) = self.dropped.iter().position(|item| item.id == id) {
+                self.dropped.remove(index);
+            }
             self.spawn_destroyed_contents(contents.into_iter().map(|stack| (stack, at)).collect());
         }
         true
@@ -70,7 +73,10 @@ impl Game<'_> {
         mark_item_hurt(item, amount);
         let at = item.position;
         self.post_item_damage(at, None);
-        if let Some(contents) = item.hurt(0) {
+        if item.health <= 0
+            && !mod_api::__private::item_listens(mod_api::HookId::ItemDestroyed, &item.stack.item)
+            && let Some(contents) = item.hurt(0)
+        {
             self.spawn_destroyed_contents(contents.into_iter().map(|stack| (stack, at)).collect());
         }
     }

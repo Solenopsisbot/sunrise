@@ -13,8 +13,9 @@ pub trait LevelLightBackend {
     fn level_get_sky_darken(&self, level: LevelRef) -> Option<i32>;
     /// Side: both.
     /// The stored light of one layer at `pos` (`BlockAndLightGetter.getBrightness`), 0 to 15.
-    /// None as for `block_state`: a position that isn't loaded has no light to read. On a
-    /// client, the light of the level it shows, as the server sent it for a chunk it holds.
+    /// On a client, reads the light the server sent for the named level, whether shown or open
+    /// for viewing. Like `block_state`, returns None for a stale or unavailable level (including
+    /// a closed view), or a position outside build height or in an unloaded chunk. Never loads chunks.
     fn level_brightness(&self, level: LevelRef, layer: LightLayer, pos: [i32; 3]) -> Option<i32>;
     /// Side: both.
     /// `IBlockStateExtension.getLightEmission`: the source light of `state` at `pos`, not

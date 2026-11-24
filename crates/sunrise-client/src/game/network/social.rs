@@ -65,11 +65,19 @@ impl Game<'_> {
         }
     }
     /// `Minecraft.isBlocked`: whether a player's chat is hidden (never the player's own).
-    pub(super) fn social_hides(&mut self, id: u128) -> bool {
+    pub(super) fn social_hides(&self, id: u128) -> bool {
         if !self.social.hidden.contains(&id) {
             return false;
         }
-        let (_, me) = self.social_players();
+        let me = self.remote.as_ref().map_or_else(
+            || {
+                self.level.player_uuid.map_or(0, |u| {
+                    u.iter()
+                        .fold(0u128, |a, &w| (a << 32) | u128::from(w as u32))
+                })
+            },
+            |r| r.profile(),
+        );
         id != me
     }
     /// `new SocialInteractionsScreen(lastScreen)`: it opens on All, with an empty search.

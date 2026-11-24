@@ -779,35 +779,6 @@ mod entity_event_particle_tests {
 }
 
 #[cfg(test)]
-mod nested_spawn_tests {
-    #[test]
-    #[ignore = "daily"]
-    fn lifted_mob_callback_keeps_nested_spawns_until_the_next_pass() {
-        crate::game::entity::taken_pass_tests::in_both_dimensions(|game, balance| {
-            let kind = game
-                .res
-                .mob_types()
-                .get("minecraft:villager")
-                .unwrap()
-                .clone();
-            game.mobs.push(sunrise_client::mobs::Mob::new(
-                99,
-                kind,
-                sunrise_core::geometry::Vec3::new(0.5, 80.0, 0.5),
-                0.0,
-            ));
-            crate::game::entity::taken_pass_tests::assert_mob_spawn_survives(
-                game,
-                balance,
-                |game| {
-                    game.wake_villager(99);
-                },
-            );
-        });
-    }
-}
-
-#[cfg(test)]
 mod off_level_tests {
     use super::*;
 

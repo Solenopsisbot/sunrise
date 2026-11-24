@@ -117,6 +117,23 @@ macro_rules! gui_draw_value {
                 scale: *scale,
                 pivot: *pivot,
             },
+            $from::PlayerFace {
+                uuid,
+                x,
+                y,
+                size,
+                hat,
+                flip,
+                color,
+            } => $to::PlayerFace {
+                uuid: *uuid,
+                x: *x,
+                y: *y,
+                size: *size,
+                hat: *hat,
+                flip: *flip,
+                color: *color,
+            },
             $from::Push(ops) => $to::Push(ops.clone()),
             $from::Pop => $to::Pop,
         }

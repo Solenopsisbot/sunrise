@@ -124,7 +124,7 @@ fn warp(declared: Declared) -> (Value, Dispatcher) {
         &[mod_api::Command::new(
             "warp go <world:test:mode> <name:test:warp>",
         )],
-        |_| false,
+        &sunrise_client::command::Dispatcher::new(),
         &arguments,
     );
     assert!(problems.is_empty(), "{problems:?}");
@@ -237,7 +237,11 @@ fn a_client_command_refuses_an_argument_type_that_declares_a_provider_by_name() 
     );
 
     // The server's tree keeps the same usage.
-    let (tree, _, problems) = super::command_tree(&commands, |_| false, &arguments);
+    let (tree, _, problems) = super::command_tree(
+        &commands,
+        &sunrise_client::command::Dispatcher::new(),
+        &arguments,
+    );
     assert!(problems.is_empty(), "{problems:?}");
     assert_eq!(
         tree["children"]["warp"]["children"]["go"]["children"]["world"]["children"]["name"]["custom_argument"],

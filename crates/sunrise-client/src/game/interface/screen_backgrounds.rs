@@ -171,7 +171,7 @@ impl Game<'_> {
         partial: f32,
     ) -> Option<sunrise_client::gfx::BorderDraw> {
         use sunrise_client::border_render::{self, BorderRenderer};
-        let distance = f64::from(self.streaming.radius * 16);
+        let distance = f64::from(self.effective_render_distance() * 16);
         border_render::extract(
             &self.border,
             partial,

@@ -369,9 +369,20 @@ pub(super) fn mob_meta(
     // A name taken away or hidden again is sent as none / false.
     defaults.push((2, serializer::OPTIONAL_COMPONENT, Value::OptText(None)));
     defaults.push((3, serializer::BOOLEAN, Value::Bool(false)));
+    // Entity.DATA_NO_GRAVITY (`setNoGravity`: `/data`, a summon's NoGravity, a mod).
+    if m.no_gravity {
+        meta.push((5, serializer::BOOLEAN, Value::Bool(true)));
+    }
+    defaults.push((5, serializer::BOOLEAN, Value::Bool(false)));
     // LivingEntity.DATA_LIVING_ENTITY_FLAGS: using an item 1, in the off
-    // hand 2 (a skeleton draws its bow, a witch raises her potion).
-    let using = i8::from(m.extra.using_item > 0) | i8::from(m.extra.using_off_hand) << 1;
+    // hand 2 (a skeleton draws its bow). Only startUsingItem and
+    // stopUsingItem write them: a drinking witch's count is her own
+    // (`Witch.usingTime`, with `Witch.DATA_USING_ITEM` in `mob_raider_meta`),
+    // so her living flags stay 0 while she drinks. A witch that starts a real
+    // use is sent as one. An admiring piglin's count still goes out as a use:
+    // a client draws `PiglinArmPose.ADMIRING_ITEM` from it.
+    let uses_item = m.extra.using_item > 0 && !(m.species() == Species::Witch && m.extra.flag);
+    let using = i8::from(uses_item) | i8::from(m.extra.using_off_hand) << 1;
     if using != 0 {
         meta.push((8, serializer::BYTE, Value::Byte(using)));
     }
@@ -986,7 +997,9 @@ fn mob_effects(m: &Mob) -> impl Iterator<Item = ShownEffect> + '_ {
     })
 }
 
-/// Raider.IS_CELEBRATING: also list false so tracking sends the end of a celebration.
+/// Raider.IS_CELEBRATING, and a witch's Witch.DATA_USING_ITEM (17, after it):
+/// `isDrinkingPotion`, set for the drink and cleared when it is done. Both also
+/// list false, so tracking sends the end of a celebration or a drink.
 pub(super) fn mob_raider_meta(
     m: &Mob,
     meta: &mut Vec<(u8, i32, Value)>,
@@ -998,6 +1011,12 @@ pub(super) fn mob_raider_meta(
             meta.push((16, serializer::BOOLEAN, Value::Bool(true)));
         }
         defaults.push((16, serializer::BOOLEAN, Value::Bool(false)));
+    }
+    if m.species() == Species::Witch {
+        if m.extra.flag {
+            meta.push((17, serializer::BOOLEAN, Value::Bool(true)));
+        }
+        defaults.push((17, serializer::BOOLEAN, Value::Bool(false)));
     }
 }
 
@@ -1951,6 +1970,13 @@ impl Game<'_> {
             if self.tracked_entity_glowing(d.id) {
                 e.meta.push((0, serializer::BYTE, Value::Byte(0x40)));
             }
+            // Entity.DATA_NO_GRAVITY, which `setNoGravity` writes: also false by
+            // default, so a flag taken away goes out too.
+            if d.no_gravity {
+                e.meta.push((5, serializer::BOOLEAN, Value::Bool(true)));
+            }
+            e.defaults
+                .push((5, serializer::BOOLEAN, Value::Bool(false)));
             e.meta.push((8, serializer::ITEM_STACK, Value::Item(stack)));
         }
         for o in self.orbs.iter().filter(|o| o.id > after) {
@@ -3889,7 +3915,7 @@ impl Game<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::game) mod tests {
     use super::{
         EventTimings, Hub, LanHost, LanSettings, OFFHAND_SLOT, living_flags, mob_freeze_meta,
     };
@@ -4572,6 +4598,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn datapack_damage_world_open_reuses_the_no_pack_preload() {
+        run_datapack_damage_world_open_reuses_the_no_pack_preload();
+    }
+
+    pub(in crate::game) fn run_datapack_damage_world_open_reuses_the_no_pack_preload() {
         use super::{
             SyncData,
             sync::{SyncCache, cached_sync_data, initialize_world_sync_data},
@@ -4630,6 +4660,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn datapack_damage_world_open_replaces_preload_atomically() {
+        run_datapack_damage_world_open_replaces_preload_atomically();
+    }
+
+    pub(in crate::game) fn run_datapack_damage_world_open_replaces_preload_atomically() {
         use super::{
             SyncData,
             sync::{SyncCache, cached_sync_data, initialize_world_sync_data},
@@ -4740,6 +4774,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn datapack_damage_unrelated_packs_do_not_load_sync_data_at_open() {
+        run_datapack_damage_unrelated_packs_do_not_load_sync_data_at_open();
+    }
+
+    pub(in crate::game) fn run_datapack_damage_unrelated_packs_do_not_load_sync_data_at_open() {
         use super::{
             SyncData,
             sync::{SyncCache, initialize_world_sync_data},
@@ -4808,6 +4846,11 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn datapack_damage_lazy_wire_snapshot_survives_reload_before_first_hub() {
+        run_datapack_damage_lazy_wire_snapshot_survives_reload_before_first_hub();
+    }
+
+    pub(in crate::game) fn run_datapack_damage_lazy_wire_snapshot_survives_reload_before_first_hub()
+    {
         use super::sync::{
             SyncCache, cached_sync_data, initialize_world_sync_data, prepare_sync_reload,
         };
@@ -4921,6 +4964,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn datapack_damage_lazy_wire_load_caches_after_all_packs_are_removed() {
+        run_datapack_damage_lazy_wire_load_caches_after_all_packs_are_removed();
+    }
+
+    pub(in crate::game) fn run_datapack_damage_lazy_wire_load_caches_after_all_packs_are_removed() {
         if crate::game::native_entity_refs::tests::run_fresh_cases(
             "game::lan::tests::datapack_damage_lazy_wire_load_caches_after_all_packs_are_removed",
             "SUNRISE_LAZY_DAMAGE_CUSTOM_COMPONENTS",
@@ -5852,10 +5899,10 @@ impl super::Dim {
 }
 
 #[cfg(test)]
-mod player_packet_tests;
+pub(in crate::game) mod player_packet_tests;
 
 #[cfg(test)]
-pub(crate) mod world_spawn_sync_tests {
+pub(in crate::game) mod world_spawn_sync_tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicI32, mpsc};
     use sunrise_client::lan::{Joined, Out, PlayerSender, guest::Guest};
@@ -5940,6 +5987,10 @@ pub(crate) mod world_spawn_sync_tests {
     #[test]
     #[ignore = "daily"]
     fn join_and_respawn_contexts_use_world_spawn_not_a_personal_spawn() {
+        run_join_and_respawn_contexts_use_world_spawn_not_a_personal_spawn();
+    }
+
+    pub(in crate::game) fn run_join_and_respawn_contexts_use_world_spawn_not_a_personal_spawn() {
         crate::game::native_entity_refs::tests::with_game(|game| {
             game.level.world_spawn = Some([100, 140, -20]);
             game.spawn = Some(sunrise_core::geometry::Vec3::new(96.5, 145.0, -31.5));
@@ -5958,6 +6009,10 @@ pub(crate) mod world_spawn_sync_tests {
     #[test]
     #[ignore = "daily"]
     fn setworldspawn_reaches_guests_with_the_dimension_it_ran_in() {
+        run_setworldspawn_reaches_guests_with_the_dimension_it_ran_in();
+    }
+
+    pub(in crate::game) fn run_setworldspawn_reaches_guests_with_the_dimension_it_ran_in() {
         crate::game::native_entity_refs::tests::with_game(|game| {
             game.build_registries();
             game.level.world_spawn = None;
@@ -6079,6 +6134,11 @@ pub(crate) mod world_spawn_sync_tests {
     #[test]
     #[ignore = "daily"]
     fn guest_respawn_without_a_known_world_spawn_never_advertises_the_hosts_personal_point() {
+        run_guest_respawn_without_a_known_world_spawn_never_advertises_the_hosts_personal_point();
+    }
+
+    pub(in crate::game) fn run_guest_respawn_without_a_known_world_spawn_never_advertises_the_hosts_personal_point()
+     {
         crate::game::native_entity_refs::tests::with_game(|game| {
             game.level.world_spawn = None;
             game.level.world_spawn_angle = [45.0, -10.0];
@@ -7114,5 +7174,7 @@ mod merchant_packet_tests {
 
 #[cfg(test)]
 mod login_profile_tests;
+#[cfg(test)]
+mod no_gravity_sync_tests;
 #[cfg(test)]
 mod tracking_hook_tests;

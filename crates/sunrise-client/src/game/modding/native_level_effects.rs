@@ -20,6 +20,9 @@ pub(super) struct NativeSoundRequest<'a> {
     pub(super) pitch: f32,
     pub(super) except: Option<u32>,
     pub(super) entity: Option<i32>,
+    /// The caller's seed (`ServerLevel.playSeededSound`), or `None` to draw the next one from
+    /// the level's sound-seed stream when the sound is published (`Level.playSound`).
+    pub(super) seed: Option<i64>,
 }
 
 impl Game<'_> {
@@ -45,14 +48,58 @@ impl Game<'_> {
         pitch: f32,
         except: Option<PlayerRef>,
     ) -> bool {
-        let except = match except {
-            None => None,
-            Some(player) => match self.player_connection(player) {
-                Ok(conn) => Some(conn),
-                // A fake player has no client to leave out.
-                Err(PlayerWorldRefusal::NoConnection) => None,
-                Err(_) => return false,
-            },
+        self.native_level_sound(level, sound, at, source, volume, pitch, except, None)
+    }
+    /// [`Self::level_play_sound`] with the caller's seed (`ServerLevel.playSeededSound`): the
+    /// level's sound-seed stream does not move.
+    pub(super) fn level_play_seeded_sound(
+        &mut self,
+        level: LevelRef,
+        sound: &str,
+        at: [f64; 3],
+        source: SoundSource,
+        volume: f32,
+        pitch: f32,
+        except: Option<PlayerRef>,
+        seed: i64,
+    ) -> bool {
+        self.native_level_sound(level, sound, at, source, volume, pitch, except, Some(seed))
+    }
+    /// The next seed of the stream the level's sounds draw from
+    /// (`Level.soundSeedGenerator.nextLong()`), drawn now without playing a sound: the same
+    /// draw a published [`Self::level_play_sound`] makes. None where that call would refuse
+    /// the level or send nothing.
+    pub(super) fn level_next_sound_seed(&mut self, level: LevelRef) -> Option<i64> {
+        self.native_level_dimension(level)?;
+        Some(self.lan.as_ref()?.hub.next_sound_seed())
+    }
+    /// The connection a level sound leaves out for `except` (`Level.playSound(except, ...)`):
+    /// `Some(None)` for no one, and for a fake player, who has no client to leave out; `None`
+    /// refuses the sound for a stale or client-side player.
+    pub(super) fn native_sound_except(&self, except: Option<PlayerRef>) -> Option<Option<u32>> {
+        let Some(player) = except else {
+            return Some(None);
+        };
+        match self.player_connection(player) {
+            Ok(conn) => Some(Some(conn)),
+            Err(PlayerWorldRefusal::NoConnection) => Some(None),
+            Err(_) => None,
+        }
+    }
+    /// A positional level sound leaving out `except`, with `seed` as [`NativeSoundRequest`] says.
+    fn native_level_sound(
+        &mut self,
+        level: LevelRef,
+        sound: &str,
+        at: [f64; 3],
+        source: SoundSource,
+        volume: f32,
+        pitch: f32,
+        except: Option<PlayerRef>,
+        seed: Option<i64>,
+    ) -> bool {
+        let Some(except) = self.native_sound_except(except) else {
+            return false;
         };
         self.native_queue_sound(NativeSoundRequest {
             level,
@@ -63,11 +110,13 @@ impl Game<'_> {
             pitch,
             except,
             entity: None,
+            seed,
         })
     }
     /// Queue or defer a validated level or entity-bound sound (`Level.playSound`), leaving out
     /// `except` and optionally binding to `entity`. Inside an open transaction the sound waits in
-    /// `PendingWrite::Sound` until root commit (drawing its seed on publish) and discards on abort.
+    /// `PendingWrite::Sound` until root commit (drawing its seed on publish unless the request
+    /// gave one) and discards on abort.
     pub(super) fn native_queue_sound(&mut self, request: NativeSoundRequest<'_>) -> bool {
         let NativeSoundRequest {
             level,
@@ -78,6 +127,7 @@ impl Game<'_> {
             pitch,
             except,
             entity,
+            seed,
         } = request;
         let Some(dimension) = self.native_level_dimension(level) else {
             return false;
@@ -85,18 +135,21 @@ impl Game<'_> {
         if self.lan.is_none() || !mod_sound_ok(sound, at, source.index(), volume, pitch) {
             return false;
         }
-        self.emit_level_effect(PendingWrite::Sound(NativeSound {
-            dimension,
-            sound: sound.to_owned(),
-            at,
-            source: source.index() as i32,
-            volume,
-            pitch,
-            seed: 0,
-            except,
-            entity,
-            skip_hooks: false,
-        }));
+        self.emit_level_effect(PendingWrite::Sound {
+            sound: NativeSound {
+                dimension,
+                sound: sound.to_owned(),
+                at,
+                source: source.index() as i32,
+                volume,
+                pitch,
+                seed: 0,
+                except,
+                entity,
+                skip_hooks: false,
+            },
+            seed,
+        });
         true
     }
     /// Sends `count` particles around `at` to the players in this level

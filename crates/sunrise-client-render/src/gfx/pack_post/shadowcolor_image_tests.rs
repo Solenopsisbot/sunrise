@@ -533,6 +533,7 @@ fn build_terrain(gpu: &Fixture, post: Post) -> PackPost {
             atlas: None,
             ids: None,
             cull: false,
+            pages: false,
         }),
     )
 }

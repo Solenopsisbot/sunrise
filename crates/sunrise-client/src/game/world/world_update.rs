@@ -109,6 +109,7 @@ impl Game<'_> {
         if let Err(e) = self.advance_studio_replay() {
             log::warn!("Sunrise Studio replay: {e}");
         }
+        self.poll_remote_light();
         // The renderer laid translucent quads out again (a shader pack's flat terrain came
         // or went) and dropped every section and far tile: meshed again, as for a new one.
         if self

@@ -594,7 +594,10 @@ fn a_canceled_tick_counts_no_effect_down() {
     };
     const HUSK: i32 = 34;
     const TICKING: i32 = 36;
-    struct Cancel;
+    use std::sync::Mutex;
+    /// Every id the listener's Pre events named, in the order they came.
+    type Heard = Arc<Mutex<Vec<u32>>>;
+    struct Cancel(Heard);
     #[mod_api::__subscriptions]
     impl Hooks for Cancel {
         fn entity_tick_listened(&self, _: HostSide<'_>, event: &mut EntityTickListenedEvent) {
@@ -604,6 +607,7 @@ fn a_canceled_tick_counts_no_effect_down() {
             r.entity_tick_each("minecraft:husk");
         }
         fn entity_tick_pre(&self, _: HostSide<'_>, event: &mut EntityTickPreEvent<'_>) {
+            self.0.lock().unwrap().extend_from_slice(event.entities);
             for id in [ZOMBIE as u32, HUSK as u32] {
                 if event.entities.contains(&id) {
                     event.canceled.push(id);
@@ -611,10 +615,24 @@ fn a_canceled_tick_counts_no_effect_down() {
             }
         }
     }
-    let mods: Mods = vec![ModEntry::new("camera-view-cancel", Box::new(Cancel))].into();
+    let heard: Heard = Arc::default();
+    // The ids the Pre events of one tick named, sorted, and forgotten for the next tick.
+    let take = |heard: &Heard| {
+        let mut ids = std::mem::take(&mut *heard.lock().unwrap());
+        ids.sort_unstable();
+        ids
+    };
+    let mods: Mods = vec![ModEntry::new(
+        "camera-view-cancel",
+        Box::new(Cancel(heard.clone())),
+    )]
+    .into();
     crate::game::api_values::install_parts(&mods).unwrap();
     mod_platform::testing::with_mods(mods, || {
         with_spectator(|game| {
+            // The spectator views the zombie: it is the camera entity.
+            set_camera(game, ZOMBIE);
+            assert_eq!(game.remote.as_ref().unwrap().camera, Some(ZOMBIE));
             add(game, HUSK, "minecraft:husk", [6.0, 64.0, 6.0]);
             add(game, TICKING, "minecraft:zombie", [7.0, 64.0, 7.0]);
             for id in [ZOMBIE, HUSK, TICKING] {
@@ -622,12 +640,17 @@ fn a_canceled_tick_counts_no_effect_down() {
             }
             let left =
                 |game: &Game<'_>| [ZOMBIE, HUSK, TICKING].map(|id| kept(game, id).unwrap()[0].1);
+            take(&heard);
             game.tick_remote_entities(true);
+            // The camera entity's tick was canceled from its own Pre event, the husk's from
+            // its own, and the zombie whose tick ran was told too, so the listener was live.
+            assert_eq!(take(&heard), [ZOMBIE as u32, HUSK as u32, TICKING as u32]);
             assert_eq!(left(game), [100, 100, 99]);
-            // Frozen: the zombie carrying this client's player still ticks, so it is told and
-            // its canceled tick still counts nothing down.
+            // Frozen: the camera zombie, carrying this client's player, still ticks, so it is
+            // told and its canceled tick still counts nothing down; the others are not told.
             ride(game, ZOMBIE, vec![OWN]);
             game.tick_remote_entities(false);
+            assert_eq!(take(&heard), [ZOMBIE as u32]);
             assert_eq!(left(game), [100, 100, 99]);
         });
     });

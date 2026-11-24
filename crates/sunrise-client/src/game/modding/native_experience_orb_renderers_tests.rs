@@ -96,6 +96,7 @@ fn verts(out: &[Vertex]) -> Vec<([f32; 3], [f32; 2], u32, u32, u32, [i8; 4], [f3
 fn hanging(id: u32, previous: Vec3) -> ExperienceOrb {
     let at = Vec3::new(FEET[0], FEET[1], FEET[2]);
     ExperienceOrb {
+        size_answer: None,
         attachment_lifetime: Default::default(),
         fall_distance: 0.0,
         rotation: [90.0, -10.0],

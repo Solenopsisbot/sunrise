@@ -1247,7 +1247,9 @@ pub enum PanelStyle {
 #[derive(sunrise_mod_api_macros::Wire)]
 pub enum PanelEvent {
     /// A click on an item of the panel, by its index in
-    /// `panel_items`' list.
+    /// `panel_items`' list: a right click as it goes down, a left click as
+    /// it comes up without having become a drag (`Dropped`), or as it goes
+    /// down while a stack is carried.
     Clicked {
         /// The item's index in the panel's list.
         index: u32,
@@ -1292,6 +1294,27 @@ pub enum PanelEvent {
     /// The player picked the tab at this index of the `panel_recipes` page's
     /// `tabs`.
     Tab(u32),
+    /// The player dragged an item off the panel's `panel_items` list and let
+    /// go of it outside the panel, over the open screen (JEI's ghost
+    /// ingredient drag). A drag starts once the pointer moves 4 GUI pixels
+    /// with the left button held on an item; until then the press is a
+    /// click, which comes as `Clicked` on its release while the list still
+    /// has that item at its index. The press belongs to the menu open when it
+    /// went down: dropping it back on the panel, Escape, the window losing
+    /// focus, and that menu closing or being replaced cancel it, and a
+    /// screen hook that cancels the release drops it; none of these sends
+    /// anything. The game moves nothing and no screen hears the release:
+    /// the mod decides what the drop does (a filter slot of a menu it knows,
+    /// say) and checks it on its own server.
+    Dropped {
+        /// The dragged item, as the mod sent it.
+        stack: Stack,
+        /// Where it was let go, in GUI pixels from the window's top left
+        /// (`Screen.mouseX`, as `ScreenView::mouse` gives it).
+        x: f32,
+        /// As `x`, down from the top.
+        y: f32,
+    },
 }
 
 /// The zoom a native mod asks for (`zoom`): the factor (1 is none), eased through the

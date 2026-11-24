@@ -226,30 +226,18 @@ impl Game<'_> {
     }
     /// `getSituationalMusic` and `getMusicVolume`.
     pub(super) fn situational_music(&self) -> (Option<Music>, f32) {
-        let empty = BackgroundMusic::default();
-        // The title screen has no player (and no level for the camera probe).
-        // A server's client has its player from handleLogin on, before the
-        // first teleport makes it here: the camera is still at the origin.
-        // A reconfiguration's clearClientLevel drops it again (menu music),
-        // so the last server's columns are never probed.
-        let eye = if self.title.is_some() {
-            None
+        // Login creates the client level before its first player teleport;
+        // reconfiguration clears it again. Use the render camera's probe
+        // while the level is present, not the local player's eyes.
+        let in_world = self.title.is_none()
+            && (self.player.is_some() || self.remote.as_ref().is_some_and(|r| r.has_level()));
+        let (background, probe_volume) = if in_world {
+            let biome = self.biome_at(self.view.position);
+            self.res
+                .music()
+                .at(self.dim.id(), biome, world_biomes!(self).pack_file(biome))
         } else {
-            self.eye_position().or_else(|| {
-                self.remote
-                    .as_ref()
-                    .is_some_and(|r| r.has_level())
-                    .then_some([0.0; 3])
-            })
-        };
-        let (background, probe_volume) = match eye {
-            Some(eye) => {
-                let (dimension, biome) = (self.dim.id(), self.biome_at(eye));
-                self.res
-                    .music()
-                    .at(dimension, biome, world_biomes!(self).pack_file(biome))
-            }
-            None => (empty, 1.0),
+            (BackgroundMusic::default(), 1.0)
         };
         let situation = Situation {
             // WinScreen.getBackgroundMusic.
@@ -257,7 +245,7 @@ impl Game<'_> {
                 .win
                 .is_some()
                 .then(mod_api::client::music::Music::credits),
-            in_world: eye.is_some(),
+            in_world,
             in_end: self.dim == super::Dim::End,
             boss_music: self.boss_music(),
             background: &background,
@@ -376,6 +364,10 @@ fn update_bound_entities(
         }));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/audio_music_tests.rs"]
+mod audio_music_tests;
 
 #[cfg(test)]
 mod bound_lookup_tests {

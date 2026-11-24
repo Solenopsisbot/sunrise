@@ -1389,12 +1389,26 @@ impl PackPost {
                 rp.set_vertex_buffer(0, geometry.vertices());
                 rp.set_index_buffer(geometry.indices.slice(..), wgpu::IndexFormat::Uint32);
                 let mut on_portal = false;
+                // Polygon-offset sign text takes the pass's biased pipeline, in its place among
+                // the run's draws (`Draw::polygon_offset`).
+                let offset = pass.polygon_offset.as_ref().and_then(|p| p.get());
+                let mut on_offset = false;
                 for d in draws {
                     if let Some(portal) = &portal_group
                         && d.portal != on_portal
                     {
                         rp.set_bind_group(0, if d.portal { portal } else { &group }, &[]);
                         on_portal = d.portal;
+                    }
+                    if let Some(offset) = offset
+                        && d.polygon_offset != on_offset
+                    {
+                        rp.set_pipeline(if d.polygon_offset {
+                            offset
+                        } else {
+                            pass.render()
+                        });
+                        on_offset = d.polygon_offset;
                     }
                     if pass.draw {
                         rp.set_bind_group(2, &geometry.group, &[geometry.offset(d.slot)]);

@@ -208,8 +208,11 @@ pub trait MenusBackendMut {
     /// Side: server.
     /// Close a player's open menu as `ServerPlayer.closeContainer` does. The server queues
     /// `ContainerClose`, then removes the menu, returns the carried stack to the inventory,
-    /// and fires `player_container_close`. Refuses stale menus, clients, a player whose state
-    /// is swapped in for a turn, a pending disconnect, and the player's own inventory menu.
+    /// and fires `player_container_close`. Refuses stale menus, clients, a player held out by
+    /// another player's active turn, a pending disconnect, and the player's own inventory menu.
+    /// Inside a hook of the player's own action (their item use, block use or command) the menu
+    /// closes at the call, its cursor going back to the inventory the action uses, as vanilla's
+    /// `ServerPlayer.openMenu` closes the open menu there before it opens the next one.
     /// During a click action, true accepts a request to close that same window at commit; an
     /// aborted action leaves it open. A client closes its own screen with `close`.
 

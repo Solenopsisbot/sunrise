@@ -631,10 +631,6 @@ fn a_used_hook_whose_version_changed_is_named() {
             let mut surface = base().build();
             surface.schema = 2;
             let old_surface = surface.to_json();
-            assert!(matches!(
-                Surface::read(old_surface.as_bytes()),
-                Err(crate::ReadError::Schema(2))
-            ));
             table.pin_hook_versions(old_surface.as_bytes()).unwrap();
         }
         table

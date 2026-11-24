@@ -130,6 +130,9 @@ pub(super) struct Boat {
     pub random: LegacyRandom,
     /// The server teleport the boat this client drives is easing to.
     pub(super) lerp: Option<DrivenLerp>,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub(super) size_answer: Option<sunrise_client::pose::SizeAnswer>,
 }
 /// `LinearInterpolationHandler` of the boat this client drives: where a server
 /// teleport takes it (`interpolationData`), the steps left, and where the boat
@@ -252,6 +255,7 @@ impl Boat {
             format!("minecraft:{wood}_chest_{suffix}").into(),
         ];
         Self {
+            size_answer: None,
             pitch: 0.0,
             join: Default::default(),
             attachment_lifetime: Default::default(),
@@ -349,16 +353,19 @@ impl Boat {
         self.items = vec![None; CHEST_SLOTS];
         self
     }
+    /// `EntityType.OAK_BOAT & co`'s `getDimensions()`: width, height and eye height.
+    pub(super) const DIMENSIONS: [f32; 3] = [1.375, 0.5625, 0.5625];
     pub fn bounds(&self) -> Aabb {
-        Self::bounds_at(self.position)
+        self.bounds_at(self.position)
     }
-    /// The box of a boat whose position is `p`.
-    fn bounds_at(p: Vec3) -> Aabb {
+    /// The box of this boat were its position `p`.
+    fn bounds_at(&self, p: Vec3) -> Aabb {
         let w = WIDTH / 2.0;
-        Aabb::new(
+        let vanilla = Aabb::new(
             Vec3::new(p.x - w, p.y, p.z - w),
             Vec3::new(p.x + w, p.y + HEIGHT, p.z + w),
-        )
+        );
+        sunrise_client::pose::SizeAnswer::sized_box(self.size_answer, Self::DIMENSIONS, p, vanilla)
     }
     /// `Entity.saveWithoutId` with `AbstractChestBoat`'s items: the loaded
     /// compound `raw` under the live fields.
@@ -923,7 +930,7 @@ impl Game<'_> {
     /// `AbstractInterpolationHandler.adjustInterpolationPosition`: check the
     /// shifted target against blocks, entities and the border at the boat's live pose.
     fn boat_lerp_target_fits(&self, boat: &Boat, target: Vec3) -> bool {
-        let bounds = Boat::bounds_at(target);
+        let bounds = boat.bounds_at(target);
         let scene = SceneCollisions {
             world: &self.world,
             binding: self.collision,
@@ -1619,7 +1626,7 @@ impl Game<'_> {
     fn boat_reached_cells(&self, b: &Boat, is: impl Fn([i32; 3]) -> bool) -> Vec<[i32; 3]> {
         let mut cells = reached_cells(b.bounds(), &is);
         if b.previous != b.position {
-            for p in reached_cells(Boat::bounds_at(b.previous), &is) {
+            for p in reached_cells(b.bounds_at(b.previous), &is) {
                 if !cells.contains(&p) {
                     cells.push(p);
                 }
@@ -1635,7 +1642,7 @@ impl Game<'_> {
         // after it last, so a block the boat moves into wins over one it leaves.
         let mut cells = Vec::new();
         if b.previous != b.position {
-            cells.extend(reached_cells(Boat::bounds_at(b.previous), |_| true));
+            cells.extend(reached_cells(b.bounds_at(b.previous), |_| true));
         }
         for cell in reached_cells(b.bounds(), |_| true) {
             if !cells.contains(&cell) {
@@ -1690,7 +1697,7 @@ impl Game<'_> {
     /// cleared. True when the fire broke it.
     fn boat_fire_passes(&mut self, i: usize) -> bool {
         let b = &self.boats[i];
-        let mut steps = vec![Boat::bounds_at(b.previous)];
+        let mut steps = vec![b.bounds_at(b.previous)];
         if b.previous != b.position {
             steps.push(b.bounds());
         }

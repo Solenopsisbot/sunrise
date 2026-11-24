@@ -87,6 +87,18 @@ pub enum GuiDraw {
         scale: [f32; 2],
         pivot: [f32; 2],
     },
+    /// `PlayerFaceExtractor.extractRenderState` of the player `uuid`'s skin: the face, then the
+    /// hat layer when `hat`, `size` pixels square, upside down when `flip`, tinted `color`. The
+    /// skin comes from the caller ([`GuiFaces`]).
+    PlayerFace {
+        uuid: u128,
+        x: i32,
+        y: i32,
+        size: i32,
+        hat: bool,
+        flip: bool,
+        color: u32,
+    },
     /// `pose().pushMatrix()` followed by `ops`.
     Push(Vec<PoseOp>),
     /// `pose().popMatrix()`.
@@ -882,19 +894,22 @@ impl HealthHud {
 
 /// Draws the calls with the HUD batch under their poses; items are left to
 /// the caller (they need the item renderer) and so are the vignette and
-/// nausea blits (their blending needs the screen-effect pipeline).
-/// [`paint_items`] draws both.
+/// nausea blits (their blending needs the screen-effect pipeline) and player
+/// faces (their skins are the game's). [`paint_items`] draws the first two,
+/// [`paint_checked`] all three.
 pub fn paint(batch: &mut crate::hud::HudBatch, atlas: &crate::hud::HudAtlas, draws: &[GuiDraw]) {
-    paint_with(batch, atlas, draws, None);
+    paint_with(batch, atlas, draws, None, None);
 }
 
 /// [`paint`], and with `items` also each `Item` (its stack, scaled about its pivot, then its
-/// decorations) and the blits of every blend. Without `items` those draw nothing, as `paint`.
+/// decorations) and the blits of every blend, and with `faces` each `PlayerFace`. Without them
+/// those draw nothing, as `paint`.
 fn paint_with<'a>(
     batch: &mut crate::hud::HudBatch,
     atlas: &crate::hud::HudAtlas,
     draws: impl IntoIterator<Item = &'a GuiDraw>,
     mut items: Option<&mut dyn GuiItems>,
+    mut faces: Option<&mut dyn GuiFaces>,
 ) {
     // The initial identity is implicit, so a layer without Push does not allocate a pose stack.
     let mut stack = Vec::new();
@@ -974,17 +989,10 @@ fn paint_with<'a>(
                 tex,
                 color,
             } => {
-                let Some(mut r) = atlas.blit_rect(texture.as_ref()).copied() else {
+                let at = [*x, *y, *w, *h];
+                if !blit(batch, atlas, texture, at, *uv, *src, *tex, *color) {
                     continue;
-                };
-                let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
-                let u0 = r.u0 + du * uv[0] / tex[0] as f32;
-                let v0 = r.v0 + dv * uv[1] / tex[1] as f32;
-                r.u1 = r.u0 + du * (uv[0] + src[0] as f32) / tex[0] as f32;
-                r.v1 = r.v0 + dv * (uv[1] + src[1] as f32) / tex[1] as f32;
-                r.u0 = u0;
-                r.v0 = v0;
-                batch.rect_uv(*x as f32, *y as f32, *w as f32, *h as f32, r, abgr(*color));
+                }
                 match blend {
                     Blend::Textured => {}
                     Blend::Vignette => batch.blend_since(start, crate::hud::Blend::Vignette),
@@ -1005,6 +1013,25 @@ fn paint_with<'a>(
                     items.item(batch, *slot, *x, *y, *seed);
                     batch.scale_since(start, pivot[0], pivot[1], scale[0], scale[1]);
                     items.decorations(batch, *slot, *x, *y);
+                }
+            }
+            GuiDraw::PlayerFace {
+                uuid,
+                x,
+                y,
+                size,
+                hat,
+                flip,
+                color,
+            } => {
+                if let Some(faces) = faces.as_deref_mut() {
+                    // The tab list's face blits, each a `Blit` of the skin, moved by this op's pose.
+                    let skin = faces.skin(*uuid);
+                    let at = [*x, *y, *size, *size];
+                    for (uv, src) in crate::tab_list::face_blits(*hat, *flip) {
+                        let tex = crate::tab_list::SKIN_TEX;
+                        blit(batch, atlas, &skin, at, uv, src, tex, *color);
+                    }
                 }
             }
             GuiDraw::Fill {
@@ -1071,6 +1098,33 @@ fn paint_with<'a>(
     }
 }
 
+/// A `Blit`'s quad: `texture`'s `src` texels from `uv` of its `tex` size, drawn at `at` (`x`,
+/// `y`, `w`, `h`) tinted `color`; `false`, drawing nothing, when the atlas lacks the texture.
+#[allow(clippy::too_many_arguments)]
+fn blit(
+    batch: &mut crate::hud::HudBatch,
+    atlas: &crate::hud::HudAtlas,
+    texture: &str,
+    [x, y, w, h]: [i32; 4],
+    uv: [f32; 2],
+    src: [i32; 2],
+    tex: [i32; 2],
+    color: u32,
+) -> bool {
+    let Some(mut r) = atlas.blit_rect(texture).copied() else {
+        return false;
+    };
+    let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
+    let u0 = r.u0 + du * uv[0] / tex[0] as f32;
+    let v0 = r.v0 + dv * uv[1] / tex[1] as f32;
+    r.u1 = r.u0 + du * (uv[0] + src[0] as f32) / tex[0] as f32;
+    r.v1 = r.v0 + dv * (uv[1] + src[1] as f32) / tex[1] as f32;
+    r.u0 = u0;
+    r.v0 = v0;
+    batch.rect_uv(x as f32, y as f32, w as f32, h as f32, r, abgr(color));
+    true
+}
+
 /// An ARGB colour as the HUD batch's packed RGBA.
 pub fn abgr(color: u32) -> u32 {
     let [a, r, g, b] = color.to_be_bytes();
@@ -1088,8 +1142,13 @@ fn opaque(color: u32) -> u32 {
 
 #[path = "hud_layout_items.rs"]
 mod items;
-pub use items::{GuiItems, Undrawable, item_slot, paint_checked, paint_items, undrawable};
+pub use items::{
+    GuiFaces, GuiItems, Undrawable, item_slot, paint_checked, paint_items, undrawable,
+};
 
+#[cfg(test)]
+#[path = "hud_layout_face_tests.rs"]
+mod face_tests;
 #[cfg(test)]
 #[path = "hud_layout_gradient_tests.rs"]
 mod gradient_tests;

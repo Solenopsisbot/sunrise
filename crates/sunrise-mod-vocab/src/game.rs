@@ -145,8 +145,6 @@ pub enum NbtDataType {
 pub enum NbtUpgradeError {
     /// The data version is newer than the game's: the fixes only go forward. Refused before any fix runs.
     FutureVersion(i32),
-    /// The chain has no source schema for that data version.
-    UnsupportedVersion(i32),
     /// The compound lacks the selected type's readable `id`, or the fixers cannot read it.
     /// A block state names its block in `Name` when saved before data version 5006 and in
     /// `id` from 5006 on, where vanilla's `BlockStateFieldNamesFix` renames the field. This
@@ -166,7 +164,6 @@ impl std::fmt::Display for NbtUpgradeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::FutureVersion(v) => write!(f, "data version {v} is newer than the game's"),
-            Self::UnsupportedVersion(v) => write!(f, "no data fixer schema for version {v}"),
             Self::MalformedCompound => f.write_str("malformed saved compound"),
             Self::LegacyTablesUnavailable => {
                 f.write_str("could not load the legacy datafix tables")

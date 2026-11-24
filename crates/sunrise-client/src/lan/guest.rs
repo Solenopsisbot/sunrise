@@ -575,10 +575,11 @@ pub struct Guest {
     pub advancements_sent: bool,
     pub advancements_visible: Vec<bool>,
     pub advancements_changed: std::collections::BTreeSet<usize>,
-    /// The server's scoreboard as this player's client has it (lan/scoreboard.rs).
+    /// The world board last published to this connection, excluding its private overlay.
     pub scoreboard: super::scoreboard::View,
     /// Whether the joining sync (`PlayerList.updateEntireScoreboard`) went out.
-    pub scoreboard_synced: bool,
+    pub(super) scoreboard_synced: bool,
+    pub(super) personal_sidebar: Option<Box<super::scoreboard::PersonalSidebar>>,
     /// Recipes unlocked since the client was last told
     /// (`ServerRecipeBook.addRecipes` sends them).
     pub recipes_unlocked: Vec<String>,
@@ -601,9 +602,16 @@ impl Guest {
         self.ip_address = address.ip().to_string();
     }
 
+    /// `ServerPlayer.nextContainerCounter`: advance the window counter to `counter % 100 + 1`
+    /// and return it. Every open takes its window id from here.
+    pub fn next_container_counter(&mut self) -> i32 {
+        self.next_window = self.next_window % 100 + 1;
+        self.next_window
+    }
+
     /// Allocate the next protocol window and a non-reusable menu identity.
     pub fn next_menu_window(&mut self) -> i32 {
-        self.next_window = self.next_window % 100 + 1;
+        self.next_container_counter();
         self.menu_generation = menu_generation();
         self.inactive_inventory_carried = self.carried.take();
         self.open_carried_sent = Some((self.next_window, None));
@@ -985,6 +993,7 @@ impl Guest {
             advancements_changed: Default::default(),
             scoreboard: Default::default(),
             scoreboard_synced: false,
+            personal_sidebar: None,
             recipes_unlocked: Vec::new(),
         }
     }

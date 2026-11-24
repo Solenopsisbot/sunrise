@@ -200,11 +200,14 @@ jobs:
           for package in $packages; do
             cargo test --locked --no-run -p "$package" --lib
           done
-          # Some client harnesses request the vanilla binary. The flags may span lines in Python.
-          client_test="[\"']test[\"'],[[:space:]]+([\"']--locked[\"'],[[:space:]]+)?[\"']-p[\"'],[[:space:]]+[\"']sunrise-client[\"'],[[:space:]]+"
-          vanilla_lib="([\"']--no-default-features[\"'],[[:space:]]+[\"']--lib[\"']|[\"']--lib[\"'],[[:space:]]+[\"']--no-default-features[\"'])"
-          if grep -zqE "$client_test$vanilla_lib" "${scripts[@]}"; then
-            cargo test --locked --no-run -p sunrise-client --lib --no-default-features
+          # sunrise-client's fixtures run from their own binary, built without the lib's other tests, whose one
+          # rustc a 16 GiB runner cannot hold (#4896): lab.parity_fixtures() builds the same commands.
+          if grep -q "lab.parity_fixtures()" "${scripts[@]}"; then
+            cargo build --locked --profile test -p sunrise-parity-fixtures --features fixtures,client-defaults \
+              --bin sunrise-parity-fixtures
+          fi
+          if grep -q "lab.parity_fixtures(default_features=False)" "${scripts[@]}"; then
+            cargo build --locked --profile test -p sunrise-parity-fixtures --features fixtures --bin sunrise-parity-fixtures
           fi
       - name: Build parity probes
         id: probes

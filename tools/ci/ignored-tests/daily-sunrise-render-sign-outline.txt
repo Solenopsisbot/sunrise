@@ -1,2 +1,1 @@
 sunrise-client-render gfx::world_text::tests::world_text_blends_culls_and_obeys_world_depth lib daily resources
-sunrise-render-shaderpack pack_entities::gpu_span_tests::sign_text_stays_native_while_model_uses_pack lib daily gpu

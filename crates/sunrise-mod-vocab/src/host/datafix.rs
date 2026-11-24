@@ -14,9 +14,10 @@ pub trait DatafixHost {
     ///
     /// Unknown mod IDs are preserved; generic format changes can still apply (for example,
     /// an item stack's count and components). At the game's current version a well-formed
-    /// compound comes back unchanged.
+    /// compound comes back unchanged. Data older than the first schema is read with
+    /// that schema, including unversioned data (`data_version = -1`).
     ///
-    /// Returns [`NbtUpgradeError`] for an unsupported or future source version, malformed
+    /// Returns [`NbtUpgradeError`] for a future source version, malformed
     /// data, unavailable legacy datafix tables, or input or output past vanilla's encoded
     /// NBT read depth.
     #[static_call]

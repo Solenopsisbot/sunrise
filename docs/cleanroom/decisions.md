@@ -66,3 +66,42 @@ the full list.
   `game::shader_packs::player_status_tests::pack_status_leaves_queued_effects_alone`,
   `game::shader_packs::player_status_tests::pack_status_on_a_server_follows_what_it_sent` and
   `game::shader_packs::player_status_tests::pack_status_starts_over_with_a_new_local_player` (`sunrise-client`).
+
+## D-3: an image whose format qualifier differs from its buffer's format
+
+- **Open point:** spec rev 1, 5.2, lines 783-784 declare images as `layout(<format>) uniform image2D <name>;` over the
+  buffer they name, and 6.7, lines 984-996 list the formats a buffer, raw texture or image may have. The spec doesn't
+  say what happens when the qualifier names another format than the buffer's (`layout(rgba16)` on a buffer whose
+  `colortex8Format` is `RGBA16F`), and it is not one of section 9's open questions. wgpu binds a storage image only
+  in its texture's exact format, and the shader must declare that same format, so a differing qualifier is either
+  replaced by the texture's format or its program is refused (#548).
+- **Decision:** a 16-bit normalized qualifier (`rgba16`, `rg16`, `r16` and their `_snorm` forms) on the 16-bit float
+  format of the same channels (`RGBA16F`, `RG16F`, `R16F`), which is the same size per texel, binds the texture's
+  float format, and the program gets a note naming it, the image, the qualifier and the format bound. The same holds
+  for the float format Sunrise makes of a 16-bit unorm or snorm buffer on a device without 16-bit normalized
+  formats. Every other differing pair is refused, with the note naming the program, the image, the qualifier and
+  the texture's format: another size per texel (`rgba8` on `RGBA16F`), other channels, an integer qualifier on a
+  float or normalized texture or the reverse, unorm against snorm, and a float qualifier on a normalized texture.
+  The `r11f_g11f_b10f` qualifier on Sunrise's `RGBA16F` stand-in for an `R11F_G11F_B10F` buffer or image keeps its
+  earlier rule, which is the same in kind, and now gets the same note.
+- **Semantics:** a rebound image is accessed as the texture's values, with the conversion of the texture's format,
+  not the qualifier's. A store of 2.0 through `layout(rgba16)` stays 2.0 in an `RGBA16F` buffer, and a store of 0.5
+  reads back as 0.5. So the same program can store differently by device: over an `RGBA16` buffer that the device
+  holds as `RGBA16` (with `TEXTURE_FORMAT_16BIT_NORM`), the qualifier matches, and the store of 2.0 is clamped to 1.0;
+  over the `RGBA16F` that Sunrise makes of that buffer without the feature, it stays 2.0. The note says when this
+  happens. Sunrise does not reinterpret the texture's bits as the qualifier's format; doing so would leave the
+  unorm16 bits of 0.5 (0x8000), which a half float reads as -0.0.
+- **Reason:** the spec leaves the pair open, and wgpu binds a storage texture only in its own format, with the shader
+  declaring that same format; so the program can keep its image only in the texture's format. The buffer's format is
+  what the pack chose for its data. The shader reads and writes floating-point vectors through unorm, snorm and float
+  formats alike, so taking the texture's format changes no expression of the program, only the conversion at the
+  texture. The pairs are limited to equal texel sizes so that a qualifier is never taken over a buffer of another
+  precision or channel count.
+- **Tests:** `pack_post::tests::only_16_bit_normalized_qualifiers_bind_their_float_texture`,
+  `pack_post::tests::a_rebound_image_declares_its_textures_format_alone` and
+  `pack_post::tests::a_rebound_image_is_noted_and_an_exact_one_is_not` (`sunrise-render-shaderpack`); the daily
+  `gfx::pack_post::normalized_image_tests::an_rgba16_image_of_a_float_buffer_keeps_the_floats_stored`,
+  `gfx::pack_post::normalized_image_tests::an_rgba16_snorm_image_of_a_float_buffer_keeps_the_floats_a_quad_program_stores`,
+  `gfx::pack_post::normalized_image_tests::an_rgba16f_image_of_a_float_buffer_binds_without_a_note` and
+  `gfx::pack_post::normalized_image_tests::an_rgba8_image_of_a_float_buffer_still_refuses_its_program`
+  (`sunrise-client-render`).

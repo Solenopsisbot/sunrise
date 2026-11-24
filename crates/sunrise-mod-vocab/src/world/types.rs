@@ -468,6 +468,31 @@ pub enum RaidStatus {
     Stopped,
 }
 
+/// The world clock a level follows (`WorldClock`, a `minecraft:world_clock` registry entry): the
+/// one its dimension type names as `default_clock`, shared by every level of that dimension type
+/// and saved with the world (`ServerClockManager`). `level.clock(host)` makes one; its writes are
+/// `ServerClockManager`'s `setTotalTicks`, `setRate` and `setPaused`. A paused clock is a fixed
+/// time. A handle resolves again on each call, through its level: `false` once the level is gone,
+/// for a handle of an earlier open, and on a client.
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+// exhaustive: its fields are private, so mods cannot build or destructure it
+pub struct WorldClockRef {
+    pub(crate) level: LevelRef,
+}
+
+impl WorldClockRef {
+    /// Create a handle for the game.
+    // hidden: a game-side helper, not part of the mod surface
+    #[doc(hidden)]
+    pub fn new(level: LevelRef) -> Self {
+        Self { level }
+    }
+    /// The level whose default clock this is.
+    pub fn level(self) -> LevelRef {
+        self.level
+    }
+}
+
 /// A chunk position in an open level. A handle may be kept after unloading;
 /// reads resolve it again, returning `false` or `None` when it is no longer loaded.
 #[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -501,6 +526,32 @@ impl ChunkRef {
 pub enum ChunkStatus {
     /// A full chunk in a level's live world.
     Full,
+}
+
+/// Why `level.load_chunk` did not bring its chunk to FULL: the error of the `ChunkResult`
+/// vanilla's chunk futures carry (`ServerChunkCache.getChunkFuture`, `ChunkResult.isSuccess`),
+/// and the failure Sunrise adds where vanilla would crash. `Ok(())` is the chunk loaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum ChunkLoadError {
+    /// Vanilla's `ChunkResult` error (`ChunkHolder.UNLOADED_CHUNK`): the chunk could not be
+    /// held, or the level went away during the wait. A stale handle, a client, a level the
+    /// server has not opened, a chunk past `ChunkPos.isValid` and a level whose generation is
+    /// paused or stopped answer it too.
+    Unloaded,
+    /// Generation panicked for this chunk or for one its generation needs around it: a mod's
+    /// chunk generator, contained by the engine where vanilla would crash. The level stays open
+    /// and is not generated there again until it opens again; asking again answers `Failed` at
+    /// once.
+    Failed,
+}
+
+impl crate::NoBackend for ChunkLoadError {
+    /// No game: as for a level the server has not opened.
+    fn no_backend() -> Self {
+        Self::Unloaded
+    }
 }
 
 /// A chunk's ticket level (`ChunkLevel`), as the server holds it: how much of

@@ -306,3 +306,245 @@ fn server_close_notifies_the_outgoing_receiver_and_only_opens_real_screens() {
         },
     );
 }
+
+#[test]
+#[ignore = "daily"]
+fn server_close_keeps_shown_native_screen_alive_for_closing_and_veto() {
+    isolated(
+        "server_close_keeps_shown_native_screen_alive_for_closing_and_veto",
+        || {
+            use mod_api::{
+                ClientHost, Hooks, MenuScreen, MenuScreenFactory, MenuScreenLayout, MenuScreenOpen,
+                ModEntry, Registrar, RegistrationContext, ScreenClosingEvent, ScreenOpening,
+                ScreenOpeningEvent, ScreenSlot,
+            };
+            use std::sync::{Arc, Mutex};
+            use sunrise_client::{hud::HudBatch, menu::Input};
+            use sunrise_protocol::{
+                menu_extra::{self, CHANNEL, Message},
+                packets::configuration::CustomPayload,
+                registry::Ids,
+            };
+
+            const MENU: &str = "test:close_native";
+            const POS: [i32; 3] = [11, 64, 19];
+            const SLOT_POS: [f32; 2] = [12.0, 24.0];
+
+            #[derive(Default)]
+            struct Probe {
+                cancel_dead: bool,
+                closing: Vec<(Option<String>, Option<[i32; 3]>, Option<[f32; 2]>)>,
+                draws: Vec<Vec<i32>>,
+            }
+            type Shared = Arc<Mutex<Probe>>;
+
+            struct Factory(Shared);
+            impl MenuScreenFactory for Factory {
+                fn create(&self, _: &dyn ClientHost, _: MenuScreenOpen<'_>) -> Option<MenuScreen> {
+                    let draws = self.0.clone();
+                    Some(
+                        MenuScreen::new(MenuScreenLayout {
+                            width: 176.0,
+                            height: 166.0,
+                            inventory_x: 8.0,
+                            inventory_y: 84.0,
+                            slots: vec![
+                                Some(ScreenSlot {
+                                    position: SLOT_POS,
+                                    ..Default::default()
+                                }),
+                                None,
+                            ],
+                            own_labels: true,
+                            own_background: true,
+                            ..Default::default()
+                        })
+                        .with_draw(move |_, frame, _| {
+                            draws.lock().unwrap().draws.push(frame.data.to_vec());
+                        }),
+                    )
+                }
+            }
+
+            struct Listener(Shared);
+            #[mod_api::__subscriptions]
+            impl Hooks for Listener {
+                fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+                    r.register_menu_screen(MENU, Arc::new(Factory(self.0.clone())))
+                        .unwrap();
+                }
+                fn screen_opening(
+                    &self,
+                    _: &dyn ClientHost,
+                    event: &mut ScreenOpeningEvent<'_>,
+                ) -> Option<ScreenOpening> {
+                    (event.new.id == "dead" && self.0.lock().unwrap().cancel_dead)
+                        .then_some(ScreenOpening::Cancel)
+                }
+                fn screen_closing(
+                    &self,
+                    host: &dyn ClientHost,
+                    event: &mut ScreenClosingEvent<'_>,
+                ) {
+                    self.0.lock().unwrap().closing.push((
+                        event.screen.menu.map(str::to_owned),
+                        host.screen_pos(),
+                        host.screen_slot(MENU, 0),
+                    ));
+                }
+            }
+
+            let probe = Shared::default();
+            let mods: mod_api::Mods = vec![ModEntry::new(
+                "close_native_probe",
+                Box::new(Listener(probe.clone())),
+            )]
+            .into();
+            sunrise_client::containers::with_mod_menu_types(
+                [(
+                    MENU.into(),
+                    "close_native_probe".into(),
+                    2,
+                    2,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    None,
+                    false,
+                    None,
+                )],
+                || {
+                    mod_platform::testing::with_mods(mods.clone(), || {
+                        mod_platform::__private::part_tests::install_parts_fixture(&mods).unwrap();
+                        with_client_game(|game| {
+                            let mut reader = logged_in(game);
+                            Arc::make_mut(&mut game.remote.as_mut().unwrap().builtin)
+                                .registries
+                                .insert(
+                                    "minecraft:menu".into(),
+                                    Ids::from_names(vec![MENU.to_owned()]),
+                                );
+
+                            let open_native = |game: &mut Game<'_>, window: i32| {
+                                deliver(
+                                    game,
+                                    C::CustomPayload(CustomPayload {
+                                        channel: CHANNEL.into(),
+                                        data: menu_extra::encode(&Message {
+                                            window,
+                                            pos: Some(POS),
+                                            data: Vec::new(),
+                                        })
+                                        .unwrap(),
+                                    }),
+                                );
+                                deliver(
+                                    game,
+                                    C::OpenScreen(play::OpenScreen {
+                                        container: window,
+                                        menu: 0,
+                                        title: Tag::String("Native".into()),
+                                    }),
+                                );
+                            };
+
+                            // 1. Decoded server ContainerClose keeps live reads valid during Closing.
+                            open_native(game, 14);
+                            assert_eq!(game.screen, Screen::Inventory);
+                            deliver(
+                                game,
+                                C::ContainerSetData(play::ContainerSetData {
+                                    container: 14,
+                                    id: 0,
+                                    value: 42,
+                                }),
+                            );
+                            let mut batch = HudBatch::scratch([320, 240]);
+                            assert!(game.draw_native_screen(&mut batch, 0.0, 0.0));
+                            assert_eq!(probe.lock().unwrap().draws, [vec![42]]);
+
+                            deliver(
+                                game,
+                                C::ContainerClose(play::ContainerClose { container: 14 }),
+                            );
+                            assert_eq!(game.screen, Screen::Playing);
+                            assert_eq!(game.remote_menu().0, 0);
+                            assert_eq!(
+                                probe.lock().unwrap().closing,
+                                [(Some(MENU.to_owned()), Some(POS), Some(SLOT_POS))]
+                            );
+                            assert!(!game.draw_native_screen(&mut batch, 0.0, 0.0));
+                            assert_eq!(game.screen_pos(), None);
+                            assert_eq!(game.screen_slot(MENU, 0), None);
+
+                            // 2. Vetoing a real destination (DeathScreen) keeps the shown screen
+                            //    drawing and readable while rejecting stale window protocol ops.
+                            probe.lock().unwrap().closing.clear();
+                            probe.lock().unwrap().draws.clear();
+                            probe.lock().unwrap().cancel_dead = true;
+                            open_native(game, 15);
+                            deliver(
+                                game,
+                                C::ContainerSetData(play::ContainerSetData {
+                                    container: 15,
+                                    id: 0,
+                                    value: 7,
+                                }),
+                            );
+                            game.player
+                                .as_mut()
+                                .unwrap()
+                                .set_health(0.0, false)
+                                .unwrap();
+                            game.remote.as_mut().unwrap().show_death_screen = true;
+                            let _ = sent(&mut reader);
+                            deliver(
+                                game,
+                                C::ContainerClose(play::ContainerClose { container: 15 }),
+                            );
+
+                            assert_eq!(game.screen, Screen::Inventory);
+                            assert_eq!(game.remote_menu().0, 0);
+                            assert!(probe.lock().unwrap().closing.is_empty());
+                            assert_eq!(game.screen_pos(), Some(POS));
+                            assert_eq!(game.screen_slot(MENU, 0), Some(SLOT_POS));
+                            // Stale protocol/menu ops for the closed window are rejected.
+                            deliver(
+                                game,
+                                C::ContainerSetData(play::ContainerSetData {
+                                    container: 15,
+                                    id: 0,
+                                    value: 99,
+                                }),
+                            );
+                            assert!(!game.remote_button_click(1));
+                            assert!(!game.remote_menu_ops(&[(Some(0), 0, Input::Pickup)]));
+                            assert!(!sent(&mut reader).iter().any(|p| matches!(
+                                p,
+                                S::ContainerClick(_) | S::ContainerButtonClick(_)
+                            )));
+                            // The displayed native screen still draws with its pre-close data.
+                            assert!(game.draw_native_screen(&mut batch, 0.0, 0.0));
+                            assert_eq!(probe.lock().unwrap().draws, [vec![7]]);
+
+                            // Leaving the vetoed screen later closes it with live reads and no echo.
+                            probe.lock().unwrap().cancel_dead = false;
+                            game.set_screen(Screen::Playing);
+                            assert_eq!(game.screen, Screen::Playing);
+                            assert_eq!(
+                                probe.lock().unwrap().closing,
+                                [(Some(MENU.to_owned()), Some(POS), Some(SLOT_POS))]
+                            );
+                            assert!(!game.draw_native_screen(&mut batch, 0.0, 0.0));
+                            assert!(
+                                !sent(&mut reader)
+                                    .iter()
+                                    .any(|p| matches!(p, S::ContainerClose(_)))
+                            );
+                        });
+                    });
+                },
+            );
+        },
+    );
+}

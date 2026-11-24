@@ -170,16 +170,14 @@ pub fn argument_type(id: i32, props: &[u8]) -> ArgType {
                 max: i32::MAX,
             },
         },
-        // No long type of its own: a double over the same bounds reads
-        // the same digits.
         "brigadier:long" => match p {
-            ArgumentProperties::Long { min, max } => ArgType::Double {
-                min: min.map_or(f64::MIN, |v| v as f64),
-                max: max.map_or(f64::MAX, |v| v as f64),
+            ArgumentProperties::Long { min, max } => ArgType::Long {
+                min: min.unwrap_or(i64::MIN),
+                max: max.unwrap_or(i64::MAX),
             },
-            _ => ArgType::Double {
-                min: f64::MIN,
-                max: f64::MAX,
+            _ => ArgType::Long {
+                min: i64::MIN,
+                max: i64::MAX,
             },
         },
         "brigadier:float" => match p {
@@ -537,6 +535,57 @@ mod tests {
         );
         assert!(signable("spawn").is_empty());
         assert!(signable("unknown words").is_empty());
+    }
+
+    /// A server's `brigadier:long` node parses as Brigadier's long on the client, not as a
+    /// double over the same bounds: a fraction is refused, and so is a value past a bound, with
+    /// `argument.long.low` / `big`, as the server will refuse it.
+    #[test]
+    fn a_servers_long_argument_is_a_long_on_the_client() {
+        let mut bounds = Writer::new();
+        bounds.u8(3);
+        bounds.i64(-5);
+        bounds.i64(9_000_000_000);
+        let packet = Commands {
+            nodes: vec![
+                literal("bank", vec![2], false),
+                CommandNode {
+                    kind: 0,
+                    executable: false,
+                    restricted: false,
+                    children: vec![0],
+                    redirect: None,
+                    name: String::new(),
+                    parser: None,
+                    suggestions: None,
+                },
+                argument("total", "brigadier:long", bounds.data, true),
+            ],
+            root: 1,
+        };
+        let d = from_packet(&packet, &Dispatcher::new());
+        let reg = crate::Registries::default();
+        let parsed = d.parse("bank 9000000000", &reg);
+        let (context, _) = parsed.executable().unwrap();
+        assert_eq!(context.get("total"), Some(&crate::Arg::Long(9_000_000_000)));
+        for (input, key, args) in [
+            ("bank 1.5", "parsing.long.invalid", vec!["1.5".to_owned()]),
+            (
+                "bank 9000000001",
+                "argument.long.big",
+                vec!["9000000000".to_owned(), "9000000001".to_owned()],
+            ),
+            (
+                "bank -6",
+                "argument.long.low",
+                vec!["-5".to_owned(), "-6".to_owned()],
+            ),
+        ] {
+            let error = d.parse(input, &reg).executable().unwrap_err();
+            let args: Vec<&dyn std::fmt::Display> =
+                args.iter().map(|a| a as &dyn std::fmt::Display).collect();
+            assert_eq!(error.message, crate::Text::tr(key, &args), "{input}");
+        }
     }
 
     #[test]

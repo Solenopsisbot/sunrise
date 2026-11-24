@@ -94,6 +94,7 @@ impl PartRegistrar {
             arm_poses,
             consume_effects,
             structure_types,
+            pool_element_types,
             feature_types,
             loot_modifier_serializers,
             loot_function_types,

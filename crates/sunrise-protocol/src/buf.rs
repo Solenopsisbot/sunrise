@@ -381,9 +381,11 @@ impl Ident {
         let value =
             std::str::from_utf8(value).map_err(|_| Error::new("invalid resource identifier"))?;
         let (namespace, path) = value.split_once(':').unwrap_or(("", value));
-        if !namespace
-            .bytes()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"_.-".contains(&c))
+        // Identifier.isValidNamespace refuses `..` before its characters.
+        if namespace == ".."
+            || !namespace
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"_.-".contains(&c))
             || !path
                 .bytes()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"/_.-".contains(&c))
@@ -465,14 +467,14 @@ impl Codec<Tag> for Nbt {
         w.nbt(v)
     }
 }
-/// Network NBT read with `NbtAccounter.unlimitedHeap()` limits.
+/// Network NBT with `NbtAccounter.unlimitedHeap()` limits.
 pub struct TrustedNbt;
 impl Codec<Tag> for TrustedNbt {
     fn read(r: &mut Reader) -> Result<Tag> {
         r.nbt_within(nbt::Limits::unlimited_heap())
     }
     fn write(v: &Tag, w: &mut Writer) {
-        Nbt::write(v, w)
+        w.nbt_within(v, nbt::Limits::unlimited_heap())
     }
 }
 /// `ByteBufCodecs.TRUSTED_COMPOUND_TAG`: unlimited-heap NBT with a required compound root.
@@ -820,6 +822,21 @@ mod tests {
         assert_eq!(C::read(&mut r).unwrap(), v);
         assert_eq!(r.remaining(), 0);
         w.data
+    }
+
+    /// `Identifier.STREAM_CODEC` parses with `Identifier.parse`, whose `isValidNamespace`
+    /// refuses the namespace `..`; a `..` path and a `.` namespace are valid identifiers.
+    #[test]
+    fn an_identifier_with_the_namespace_dot_dot_is_refused() {
+        let read = |text: &str| {
+            let mut w = Writer::new();
+            w.string(text);
+            Ident::read(&mut Reader::new(&w.data))
+        };
+        assert!(read("..:stone").is_err());
+        assert_eq!(read(".:stone").unwrap(), ".:stone");
+        assert_eq!(read("minecraft:..").unwrap(), "minecraft:..");
+        assert_eq!(read("stone").unwrap(), "minecraft:stone");
     }
 
     #[test]

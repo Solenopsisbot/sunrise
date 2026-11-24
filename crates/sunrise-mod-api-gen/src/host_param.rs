@@ -100,6 +100,7 @@ pub(super) fn context_param(hook: &Hook) -> Option<HostParam> {
             PhaseContext::ClientReload => "&dyn ClientReloadHost",
             PhaseContext::ClientReloadListener => "&dyn ClientReloadListenerContext",
             PhaseContext::ClientSetup => "&mut dyn ClientSetupContext",
+            PhaseContext::ClientIdentity => "&dyn ClientIdentityHost",
             PhaseContext::PackDiscovery => "&mut dyn PackDiscoveryContext",
         }
         .into(),
@@ -119,6 +120,7 @@ pub(super) fn phase_engine_type(phase: PhaseContext) -> &'static str {
         PhaseContext::ClientReload => "&dyn mod_api::ClientReloadHost",
         PhaseContext::ClientReloadListener => "&dyn mod_api::ClientReloadListenerContext",
         PhaseContext::ClientSetup => "&mut dyn mod_api::ClientSetupContext",
+        PhaseContext::ClientIdentity => "&dyn mod_api::ClientIdentityHost",
         PhaseContext::PackDiscovery => "&mut dyn mod_api::PackDiscoveryContext",
     }
 }

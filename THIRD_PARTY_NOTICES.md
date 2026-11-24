@@ -102,6 +102,15 @@ The GLSL frontend also resets the common type for each comma-separated declarato
 variable's array specifier does not change later variables.
 It also reads a struct member outside a constant expression through a pointer to the member,
 not out of a loaded copy of the whole struct, so a member an atomic function uses can be read.
+An array, struct or block too large to lay out (past naga's type size limit) is a parse error at its
+declaration, not a panic at the next array. `Options::interface_limits` carries the device's stage
+interface limits (`max_inter_stage_shader_variables`, `max_vertex_attributes`; wgpu's defaults
+when not given): a stage whose location-bound variables of one direction take more is a parse error
+before an entry-point argument is made per element. An interface variable whose elements or
+members would take a location past `u32` (each taking the next after its `layout(location = N)`)
+is a parse error at its declaration, not an overflow.
+An integer literal whose bit pattern does not fit in 32 bits is a parse error at the literal, not
+lowered to its low 32 bits (GLSL 4.60 §4.1.3).
 The HLSL backend writes an ordinary level-zero texture sample as `SampleLevel(..., 0.0)`, while
 comparison textures keep `SampleCmpLevelZero`; HLSL has no ordinary `SampleLevelZero` method.
 The shared interpolation defaults also compile with `glsl-in` alone, without needing the

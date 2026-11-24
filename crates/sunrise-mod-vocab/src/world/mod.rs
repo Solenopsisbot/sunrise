@@ -1,6 +1,7 @@
 //! Levels, chunks, dimensions, spawning, fluids as world state and the vocabulary the world speaks.
 
 pub(crate) mod advancement_progress;
+pub(crate) mod pool_element;
 pub(crate) mod scoreboard;
 pub(crate) mod team;
 // hidden: a module of game-side types; mods use their re-exports

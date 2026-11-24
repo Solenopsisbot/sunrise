@@ -10,7 +10,6 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 use sunrise_assets::resource_source::{ResourceRoot, ResourceSource};
-use sunrise_client_core::particle_type::ParticleType;
 use sunrise_core::{noise::SimplexNoise, position::BlockPos, random::LegacyRandom};
 use sunrise_world::worldgen::biome_temperature::{
     BiomeTemperature, BiomeTemperatureSettings, Precipitation, TemperatureModifier,
@@ -115,8 +114,6 @@ pub struct BiomeInfo {
     /// The biome's own fog colour attribute; otherwise the dimension's applies.
     pub fog: Option<u32>,
     pub water_fog: u32,
-    /// `minecraft:visual/ambient_particles` entries and their probabilities.
-    pub ambient_particles: Vec<(ParticleType, f32)>,
     /// `BiomeGenerationSettings.features`: the placed feature ids of each
     /// `GenerationStep.Decoration` step, in order.
     pub features: Vec<Vec<String>>,
@@ -125,21 +122,6 @@ pub struct BiomeInfo {
     pub attributes: sunrise_world::environment_attributes::AttributeMap,
 }
 impl BiomeInfo {
-    fn ambient_particles(v: &Value) -> Vec<(ParticleType, f32)> {
-        let list = &v["attributes"]["minecraft:visual/ambient_particles"];
-        let entries = list["argument"].as_array().or_else(|| list.as_array());
-        entries
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| {
-                Some((
-                    ParticleType::from_name(entry["particle"]["type"].as_str()?)?,
-                    entry["probability"].as_f64().unwrap_or(0.0) as f32,
-                ))
-            })
-            .collect()
-    }
-
     fn temperature_settings(&self) -> BiomeTemperatureSettings {
         BiomeTemperatureSettings {
             base_temperature: self.temperature,
@@ -318,7 +300,6 @@ impl BiomeInfo {
             sky: color(&attributes["minecraft:visual/sky_color"]),
             fog: color(&attributes["minecraft:visual/fog_color"]),
             water_fog: color(&attributes["minecraft:visual/water_fog_color"]).unwrap_or(0x050533),
-            ambient_particles: Self::ambient_particles(v),
             features: v["features"]
                 .as_array()
                 .into_iter()
@@ -534,7 +515,6 @@ impl Biomes {
                 sky: None,
                 fog: None,
                 water_fog: 0x3f_76_e4,
-                ambient_particles: Vec::new(),
                 features: Vec::new(),
                 attributes: Default::default(),
             });
@@ -824,6 +804,7 @@ mod pack_tests {
         let base = builtin(&["minecraft:meadow", "minecraft:plains", "minecraft:river"]);
         let red = json!({"temperature": 2.0, "effects": {"water_color": "#ff0000"},
             "attributes": {"minecraft:visual/ambient_particles": {
+                "modifier": "append",
                 "argument": [{"particle": {"type": "minecraft:ash"}, "probability": 0.25}]}}});
         let hot = json!({"effects": {"grass_color": 0x123456}});
         let files = [
@@ -837,9 +818,21 @@ mod pack_tests {
         assert_eq!(world.id("minecraft:river"), 2);
         assert_eq!(world.get(2).water, 0xFF0000);
         assert_eq!(world.get(2).temperature, 2.0);
-        assert_eq!(world.get(2).ambient_particles.len(), 1);
-        assert_eq!(world.get(2).ambient_particles[0].0.name(), "ash");
-        assert_eq!(world.get(2).ambient_particles[0].1, 0.25);
+        use sunrise_world::environment_attributes::{AMBIENT_PARTICLES, Entry, attribute};
+        use sunrise_world::{particle_options::ParticleOptions, particle_type::ParticleType};
+        let entry = world
+            .get(2)
+            .attributes
+            .get(attribute(AMBIENT_PARTICLES).unwrap());
+        let Some(Entry::AppendAmbientParticles(particles)) = entry else {
+            panic!("the replacement biome carries its ambient particle modifier");
+        };
+        assert_eq!(particles.len(), 1);
+        assert_eq!(
+            *particles[0].particle,
+            ParticleOptions::Simple(ParticleType::Ash)
+        );
+        assert_eq!(particles[0].probability, 0.25);
         // New biomes follow, in registry order.
         assert_eq!(world.id("minecraft:molten_peaks"), 3);
         assert_eq!(world.id("pack:zeta"), 4);

@@ -21,7 +21,7 @@ mod image_formats;
 mod packed;
 pub mod types;
 
-pub use image_formats::{image_format, storage_formats_of};
+pub use image_formats::{image_binding, image_format, rebinds, storage_formats_of};
 
 pub use construction::*;
 pub use execution::*;

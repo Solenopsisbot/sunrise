@@ -296,7 +296,12 @@ impl BlockEntityPart for Part {
         }
         Flow::Continue
     }
-
+}
+/// `menu_slot_take` for the live depot's menu type. A part of its own, so the depot's other menu
+/// hooks (`menu_clicked`, `menu_button`) stay off the quick-move menu.
+struct Taker;
+#[mod_api::sunrise_part]
+impl mod_api::MenuPart for Taker {
     fn menu_slot_take(&self, event: &mut MenuSlotTakeEvent<'_>) {
         if !SCRIPT.with(|s| {
             let s = s.borrow();
@@ -463,6 +468,7 @@ impl Hooks for Mod {
         r.block_entity_part(&kind, Part).unwrap();
         r.menu_part(DEPOT_MENU, Part);
         r.menu_part(STATUS_MENU, Part);
+        r.menu_part(QUICK_MOVE_MENU, Taker);
     }
 }
 
@@ -676,6 +682,7 @@ fn open_native_menu(game: &mut crate::game::Game<'_>) -> i32 {
         links: Vec::new(),
         asks_still_valid: false,
         opening_item: None,
+        slot_changed_seen: None,
     };
     game.lan
         .as_mut()
@@ -1677,7 +1684,9 @@ fn a_handled_quick_move_take_panic_after_live_slot_write_still_publishes_content
             event.stack.as_mut().unwrap().set_count(6).unwrap();
             Flow::Cancel
         }
-
+    }
+    #[mod_api::sunrise_part]
+    impl mod_api::MenuPart for TakePanicPart {
         fn menu_slot_take(&self, event: &mut MenuSlotTakeEvent<'_>) {
             assert_eq!(event.taken.count(), 4);
             let dirt =
@@ -1699,6 +1708,7 @@ fn a_handled_quick_move_take_panic_after_live_slot_write_still_publishes_content
             let kind = r.block_entity_type("depot").blocks(&[]).build();
             r.block_entity_part(&kind, TakePanicPart(self.0.clone()))
                 .unwrap();
+            r.menu_part(QUICK_MOVE_MENU, TakePanicPart(self.0.clone()));
             let stone = r.block_key("minecraft:stone");
             r.block_part(stone, TakePanicPart(self.0.clone()));
         }

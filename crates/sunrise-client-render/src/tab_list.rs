@@ -98,8 +98,22 @@ fn sprite(name: &'static str, x: i32, y: i32, w: i32, h: i32) -> GuiDraw {
     }
 }
 
-/// `PlayerFaceExtractor.extractRenderState`: the skin's face, then its hat
-/// layer, upside down for Dinnerbone and Grumm.
+/// A skin texture's size, as each face blit names it.
+pub const SKIN_TEX: [i32; 2] = [64, 64];
+
+/// `PlayerFaceExtractor.extractRenderState`'s blits of a skin ([`SKIN_TEX`]): the face, then
+/// its hat layer when `hat`, each as its `uv` and `src`; upside down (from the bottom row, a
+/// negative height) when `flip`, for Dinnerbone and Grumm. [`face`] and `GuiDraw::PlayerFace`
+/// both draw these.
+pub fn face_blits(hat: bool, flip: bool) -> impl Iterator<Item = ([f32; 2], [i32; 2])> {
+    let (v, height) = if flip { (16.0, -8) } else { (8.0, 8) };
+    [8.0, 40.0]
+        .into_iter()
+        .take(if hat { 2 } else { 1 })
+        .map(move |u| ([u, v], [8, height]))
+}
+
+/// [`face_blits`] as `Blit` draw calls of `skin`, each `size` square.
 #[allow(clippy::too_many_arguments)]
 pub fn face(
     out: &mut Vec<GuiDraw>,
@@ -111,21 +125,18 @@ pub fn face(
     flip: bool,
     color: u32,
 ) {
-    let (v, height) = if flip { (16.0, -8) } else { (8.0, 8) };
-    for u in [8.0, 40.0].into_iter().take(if hat { 2 } else { 1 }) {
-        out.push(GuiDraw::Blit {
-            texture: Cow::Owned(skin.to_owned()),
-            blend: Blend::Textured,
-            x,
-            y,
-            w: size,
-            h: size,
-            uv: [u, v],
-            src: [8, height],
-            tex: [64, 64],
-            color,
-        });
-    }
+    out.extend(face_blits(hat, flip).map(|(uv, src)| GuiDraw::Blit {
+        texture: Cow::Owned(skin.to_owned()),
+        blend: Blend::Textured,
+        x,
+        y,
+        w: size,
+        h: size,
+        uv,
+        src,
+        tex: SKIN_TEX,
+        color,
+    }));
 }
 
 /// `Hud.extractTabList`: whether the list shows. `Hud.extractRenderState`

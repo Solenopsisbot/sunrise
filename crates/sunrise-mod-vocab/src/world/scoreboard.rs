@@ -163,6 +163,28 @@ impl DisplaySlot {
     }
 }
 
+/// A sidebar shown to one player by [`PlayerRef::set_sidebar`], not an objective on the world board.
+// no wire: in-process argument to the player handle; only the game sends scoreboard packets.
+// exhaustive: mods construct this record with a literal.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sidebar {
+    /// The text above the lines.
+    pub title: Text,
+    /// Lines in display order, top first. Only the first 15 are read, as in vanilla's sidebar HUD.
+    pub lines: Vec<SidebarLine>,
+}
+
+/// One line of a [`Sidebar`].
+// no wire: in-process argument to the player handle, through Sidebar.
+// exhaustive: mods construct this record with a literal.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SidebarLine {
+    /// The text on the left.
+    pub text: Text,
+    /// Text in place of the numeric score on the right. `None` leaves that space blank.
+    pub value: Option<Text>,
+}
+
 /// `NumberFormat`: how a score's number is shown. An objective has one, and a score may override
 /// it; with neither, the slot's default shows (red in the sidebar, yellow in the player list).
 #[derive(Clone, Debug, PartialEq)]

@@ -283,6 +283,26 @@ impl ProjectileKind {
             Self::LargeFireball { .. } | Self::DragonFireball => 1.0,
         }
     }
+    /// Its type's `getDimensions()`: [`Self::size`] square, with the type's eye height.
+    pub fn dimensions(&self) -> [f32; 3] {
+        let eye = match self {
+            Self::Arrow { .. } | Self::Trident => 0.13,
+            Self::Snowball
+            | Self::Egg
+            | Self::EnderPearl
+            | Self::LlamaSpit
+            | Self::Potion(..)
+            | Self::ExperienceBottle
+            | Self::Thrown(_) => 0.2125,
+            Self::SmallFireball | Self::ShulkerBullet { .. } | Self::WitherSkull { .. } => {
+                0.265_625
+            }
+            Self::WindCharge | Self::BreezeWindCharge => 0.0,
+            Self::LargeFireball { .. } | Self::DragonFireball => 0.85,
+        };
+        let size = self.size() as f32;
+        [size, size, eye]
+    }
     /// Its entity type.
     pub fn id(&self) -> &'static str {
         match self {
@@ -415,6 +435,9 @@ pub struct Projectile {
     /// kind's when it is shot (`shoot_own`), which is the same stream since
     /// nothing else draws from it between.
     pub uuid: Option<[i32; 4]>,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub size_answer: Option<crate::pose::SizeAnswer>,
 }
 /// A new projectile's own random (`Entity.random`) and the UUID its first two
 /// draws make (`Mth.createInsecureUUID`).
@@ -753,10 +776,11 @@ impl Projectile {
             }
             _ => p.y,
         };
-        Aabb::new(
+        let vanilla = Aabb::new(
             Vec3::new(p.x - half, bottom, p.z - half),
             Vec3::new(p.x + half, bottom + height, p.z + half),
-        )
+        );
+        crate::pose::SizeAnswer::sized_box(self.size_answer, self.kind.dimensions(), p, vanilla)
     }
     /// The collision target of the owner, independent of living damage credit.
     pub fn collision_owner(&self) -> Option<Who> {
@@ -785,6 +809,7 @@ impl Projectile {
         // An arrow keeps its own random (`Entity.random`) for its later draws.
         let (random, uuid) = new_own_random();
         Self {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             join: Default::default(),
             id: 0,
@@ -1274,8 +1299,13 @@ impl Projectile {
             .sqrt()
             .max(1.0e-9);
         p.velocity = Vec3::new(dir[0] / len * 0.1, dir[1] / len * 0.1, dir[2] / len * 0.1);
-        p.update_rotation();
         p
+    }
+    /// `AbstractHurtingProjectile(EntityType, LivingEntity, Vec3, Level)`'s `setRot(owner.getYRot(), owner.getXRot())`.
+    pub fn facing_shooter(mut self, yaw: f32, pitch: f32) -> Self {
+        self.yaw = yaw;
+        self.pitch = pitch;
+        self
     }
     /// `ThrownEgg`'s item: what its hatchlings' variant comes from.
     pub fn set_egg_item(&mut self, stack: &crate::items::ItemStack) {
@@ -3164,6 +3194,22 @@ mod tests {
         p.tick(&w);
         // Fresh Java 26.3: (0.1 + 0.1) * (double) 0.95f.
         assert_eq!(p.velocity.x, 0.189_999_997_615_814_2);
+    }
+
+    /// A mob's fireball starts at its shooter's rotation and only turns towards its motion on its first tick.
+    #[test]
+    fn a_shot_fireball_starts_facing_its_shooter() {
+        let mut p = Projectile::fireball(
+            ProjectileKind::SmallFireball,
+            Vec3::new(0.0, 100.0, 0.0),
+            Some(Who::Mob(7)),
+            [1.0, 0.0, 0.0],
+        )
+        .facing_shooter(-90.0, 0.0);
+        assert_eq!((p.yaw, p.pitch), (-90.0, 0.0));
+        p.tick(&Empty(vec![]));
+        // rotateTowardsMovement(0.2F): yRotO -90 moves to 270, then 270 + 0.2 * (90 - 270).
+        assert_eq!((p.yaw, p.pitch), (234.0, -1.525_878_9e-6));
     }
 
     /// `Fireball.setItem` with `Fireball.defineSynchedData`'s default and

@@ -1,5 +1,6 @@
 use crate::game::{
-    execution_role::ExecutionRole, native_entity_refs::tests::with_game,
+    execution_role::ExecutionRole,
+    native_entity_refs::tests::{run_fresh_cases, with_game},
     native_guest_turn_tests::with_guests,
 };
 use mod_api::{
@@ -8,6 +9,17 @@ use mod_api::{
 };
 use mod_platform::testing::with_mods;
 use std::sync::{Arc, Mutex};
+
+const CHILD: &str = "SUNRISE_SERVER_LIFECYCLE_CHILD";
+
+/// Runs `test`, this module's test of that name, in a child process of its own, and false there.
+/// A final save is admitted only while no entity pass is lifted anywhere in the process
+/// (`Game::admit_entity_save`), so in a shared runner another test's lifted pass drops the
+/// `saved` these tests expect.
+fn in_child(test: &str) -> bool {
+    let name = format!("game::server_lifecycle::tests::{test}");
+    run_fresh_cases(&name, CHILD, &["stop"])
+}
 
 struct PanicAt {
     stopping: bool,
@@ -26,6 +38,9 @@ struct StoppedProbe {
 #[test]
 #[ignore = "daily"]
 fn integrated_stop_finishes_after_an_unencodable_record() {
+    if in_child("integrated_stop_finishes_after_an_unencodable_record") {
+        return;
+    }
     use sunrise_client::save::{LevelShape, SaveDir, SessionLock};
     use sunrise_core::nbt::{DISK_WRITE_NESTING_GUARD, Tag};
 
@@ -129,6 +144,9 @@ fn integrated_stop_finishes_after_an_unencodable_record() {
 #[test]
 #[ignore = "daily"]
 fn integrated_stop_propagates_metadata_errors_even_after_a_record_failure() {
+    if in_child("integrated_stop_propagates_metadata_errors_even_after_a_record_failure") {
+        return;
+    }
     use sunrise_client::save::{LevelShape, SaveDir, SessionLock};
     use sunrise_core::nbt::{DISK_WRITE_NESTING_GUARD, Tag};
 
@@ -175,6 +193,9 @@ fn integrated_stop_propagates_metadata_errors_even_after_a_record_failure() {
 #[test]
 #[ignore = "daily"]
 fn every_started_server_stops_and_saves_even_when_startup_or_ticks_fail() {
+    if in_child("every_started_server_stops_and_saves_even_when_startup_or_ticks_fail") {
+        return;
+    }
     struct Log(
         Arc<Mutex<Vec<&'static str>>>,
         PanicAt,

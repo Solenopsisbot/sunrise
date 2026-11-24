@@ -100,18 +100,15 @@ impl CommandTree {
         })
     }
 
-    /// Whether vanilla has a command of this name.
-    pub fn has(&self, name: &str) -> bool {
-        self.root["children"].get(name).is_some()
-    }
-
     /// The ClientboundCommandsPacket for a player with `level` permissions.
     pub fn packet(&self, level: u8, dedicated: bool, builtin: &Builtin) -> Commands {
         self.packet_with(level, dedicated, builtin, &Value::Null)
     }
 
     /// [`CommandTree::packet`] with more commands after vanilla's: `extra`
-    /// is a root in the report's format (server mods' commands).
+    /// is a root in the report's format (server mods' commands). A root vanilla registers on
+    /// this kind of server takes the mod's nodes beside its own (`add_mod_commands`); a mod's
+    /// other roots follow vanilla's.
     pub fn packet_with(
         &self,
         level: u8,
@@ -189,13 +186,12 @@ impl CommandTree {
             }
             gamerule["children"] = Value::Object(rules);
         }
-        if let (Some(children), Some(mods)) = (
-            root.get_mut("children").and_then(Value::as_object_mut),
-            extra.get("children").and_then(Value::as_object),
-        ) {
-            children.retain(|name, _| !mods.contains_key(name));
+        // Commands.CommandSelection: vanilla's roots of the other server kind are not registered.
+        if let Some(children) = root.get_mut("children").and_then(Value::as_object_mut) {
+            children.retain(|name, _| selected(name, dedicated));
         }
-        for root in [&root, extra, &sunrise] {
+        add_mod_commands(&mut root, extra);
+        for root in [&root, &sunrise] {
             fill(
                 root,
                 0,
@@ -254,6 +250,65 @@ impl CommandTree {
     }
 }
 
+/// Whether vanilla registers root `name` on this kind of server (Commands.CommandSelection).
+fn selected(name: &str, dedicated: bool) -> bool {
+    !(dedicated && INTEGRATED_ONLY.contains(&name) || !dedicated && DEDICATED_ONLY.contains(&name))
+}
+
+/// The mods' roots added to vanilla's report as NeoForge's `RegisterCommandsEvent` adds them to
+/// vanilla's dispatcher (Brigadier's `CommandNode.addChild`): a root vanilla registers merges
+/// into vanilla's node, which keeps its type, permission and suggestions; a mod's executable
+/// node makes it executable at the mod's execution level (the later executor replaces
+/// vanilla's), and the mod's children are added beside vanilla's, after them. Any other root is
+/// the mod's.
+fn add_mod_commands(root: &mut Value, extra: &Value) {
+    let Some(mods) = extra.get("children").and_then(Value::as_object) else {
+        return;
+    };
+    if !root["children"].is_object() {
+        root["children"] = Value::Object(serde_json::Map::new());
+    }
+    let Some(children) = root["children"].as_object_mut() else {
+        return;
+    };
+    for (name, node) in mods {
+        match children.get_mut(name) {
+            Some(vanilla) => merge_node(vanilla, node),
+            None => {
+                children.insert(name.clone(), node.clone());
+            }
+        }
+    }
+}
+
+/// `CommandNode.addChild` of a mod's `node` onto the report node `into` of the same name.
+fn merge_node(into: &mut Value, node: &Value) {
+    if node["executable"] == true {
+        into["executable"] = true.into();
+        into["execution_level"] = node["execution_level"].clone();
+    }
+    let Some(added) = node["children"].as_object() else {
+        return;
+    };
+    let Some(into) = into.as_object_mut() else {
+        return;
+    };
+    let children = into
+        .entry("children")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(children) = children.as_object_mut() else {
+        return;
+    };
+    for (name, child) in added {
+        match children.get_mut(name) {
+            Some(existing) => merge_node(existing, child),
+            None => {
+                children.insert(name.clone(), child.clone());
+            }
+        }
+    }
+}
+
 /// Commands.fillUsableCommands over the report: the children the source may use.
 #[allow(clippy::too_many_arguments)]
 fn fill(
@@ -292,12 +347,6 @@ fn fill(
                 required_level(child)
             };
         if required > level {
-            continue;
-        }
-        if path.is_empty()
-            && (dedicated && INTEGRATED_ONLY.contains(&name.as_str())
-                || !dedicated && DEDICATED_ONLY.contains(&name.as_str()))
-        {
             continue;
         }
         path.push(name.clone());
@@ -475,39 +524,69 @@ mod tests {
         assert_eq!(properties("brigadier:string", &p), vec![2]);
     }
 
-    /// A mod's root of a vanilla name (`mod_api::Command::replace_vanilla`)
-    /// takes vanilla's place in the merged tree: the client gets one `stop`,
-    /// the mod's, and the vanilla roots the mods don't name stay.
+    /// A mod's root of a vanilla name merges into vanilla's node, as NeoForge's
+    /// `RegisterCommandsEvent` registers into vanilla's dispatcher (Brigadier's
+    /// `CommandNode.addChild`): one `stop`, vanilla's (still executable, still restricted), with
+    /// the mod's `now` beside its own nodes; a mod's executable node replaces vanilla's executor
+    /// at the mod's level. On a server kind vanilla does not register `stop` on, the mod's root
+    /// is the only one.
     #[test]
-    fn a_mods_root_replaces_vanillas_of_its_name() {
+    fn a_mods_root_merges_into_vanillas_of_its_name() {
         let report: Value = serde_json::from_str(
             r#"{"type":"root","children":{
                 "me":{"type":"literal","children":{"action":{"type":"argument","parser":"minecraft:message","executable":true}}},
-                "stop":{"type":"literal","executable":true}}}"#,
+                "stop":{"type":"literal","executable":true,"permissions":{"type":"require","permission":{"level":"owners"}},
+                    "children":{"later":{"type":"literal","executable":true}}},
+                "seed":{"type":"literal","executable":true}}}"#,
         )
         .unwrap();
         let mods: Value = serde_json::from_str(
             r#"{"type":"root","children":{
-                "stop":{"type":"literal","children":{"now":{"type":"literal","executable":true}}}}}"#,
+                "stop":{"type":"literal","executable":false,"children":{"now":{"type":"literal","executable":true,"execution_level":0}}},
+                "seed":{"type":"literal","executable":true,"execution_level":3}}}"#,
         )
         .unwrap();
         let tree = CommandTree { root: report };
         let builtin = Builtin::default();
         let packet = tree.packet_with(4, true, &builtin, &mods);
-        let stops: Vec<_> = packet.nodes.iter().filter(|n| n.name == "stop").collect();
+        let roots: Vec<_> = packet.nodes[0]
+            .children
+            .iter()
+            .map(|&c| &packet.nodes[c as usize])
+            .collect();
+        let stops: Vec<_> = roots.iter().filter(|n| n.name == "stop").collect();
         assert_eq!(stops.len(), 1, "one root of the name");
-        assert!(
-            !stops[0].executable,
-            "the mod's root, not vanilla's executable one"
+        assert!(stops[0].executable && stops[0].restricted, "vanilla's node");
+        let children: Vec<_> = stops[0]
+            .children
+            .iter()
+            .map(|&c| packet.nodes[c as usize].name.as_str())
+            .collect();
+        assert_eq!(
+            children,
+            ["later", "now"],
+            "vanilla's usages stay, the mod's follow"
         );
-        assert!(packet.nodes.iter().any(|n| n.name == "now"));
+        assert!(roots.iter().any(|n| n.name == "me"), "other roots stay");
+        // The mod's executor replaced vanilla's at `seed`, at the mod's execution level.
+        let seed = |level| {
+            let packet = tree.packet_with(level, true, &builtin, &mods);
+            packet
+                .nodes
+                .iter()
+                .find(|n| n.name == "seed")
+                .unwrap()
+                .executable
+        };
+        assert!(seed(3));
+        assert!(!seed(2));
+        let integrated = tree.packet_with(4, false, &builtin, &mods);
+        let stop = integrated.nodes.iter().find(|n| n.name == "stop").unwrap();
         assert!(
-            packet.nodes.iter().any(|n| n.name == "me"),
-            "other roots stay"
+            !stop.executable,
+            "the mod's own root where vanilla has none"
         );
-        let alone = tree.packet_with(4, true, &builtin, &Value::Null);
-        let stop = alone.nodes.iter().find(|n| n.name == "stop").unwrap();
-        assert!(stop.executable, "without a mod's root vanilla's is sent");
+        assert!(!integrated.nodes.iter().any(|n| n.name == "later"));
     }
 
     #[test]

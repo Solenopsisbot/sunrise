@@ -18,6 +18,12 @@ pub enum CustomArgumentKind {
     Word,
     /// The rest of the line, spaces included.
     Greedy,
+    /// A Brigadier `integer` within its bounds (`IntegerArgumentType.integer(min, max)`):
+    /// refused below `min` or above `max` with `argument.integer.low` / `big`.
+    Integer { min: i32, max: i32 },
+    /// A Brigadier `long` within its bounds (`LongArgumentType.longArg(min, max)`): refused
+    /// below `min` or above `max` with `argument.long.low` / `big`.
+    Long { min: i64, max: i64 },
 }
 
 /// One completion a registered custom argument offers.
@@ -152,6 +158,11 @@ pub enum ArgType {
     Integer {
         min: i32,
         max: i32,
+    },
+    /// Brigadier's `LongArgumentType.longArg(min, max)`.
+    Long {
+        min: i64,
+        max: i64,
     },
     Float {
         min: f32,
@@ -544,6 +555,7 @@ pub struct ItemInput {
 pub enum Arg {
     Bool(bool),
     Int(i32),
+    Long(i64),
     Float(f32),
     Double(f64),
     Str(String),
@@ -1145,6 +1157,43 @@ fn particle_options(id: &str, t: &sunrise_core::nbt::Tag) -> Result<(), String> 
     }
     Ok(())
 }
+/// `IntegerArgumentType.parse`: an `int` within `min..=max`, or `argument.integer.low` / `big` with
+/// the cursor back at its start.
+fn read_integer(reader: &mut Reader, min: i32, max: i32) -> CmdResult<i32> {
+    let start = reader.cursor;
+    let v = reader.read_int()?;
+    bounded(reader, start, "integer", v, min, max)
+}
+/// `LongArgumentType.parse`: a `long` within `min..=max`, or `argument.long.low` / `big` with the
+/// cursor back at its start.
+fn read_long(reader: &mut Reader, min: i64, max: i64) -> CmdResult<i64> {
+    let start = reader.cursor;
+    let v = reader.read_long()?;
+    bounded(reader, start, "long", v, min, max)
+}
+/// Brigadier's `<kind>TooLow` / `<kind>TooBig`: the bound, then the value found.
+fn bounded<T: PartialOrd + fmt::Display>(
+    reader: &mut Reader,
+    start: usize,
+    kind: &str,
+    v: T,
+    min: T,
+    max: T,
+) -> CmdResult<T> {
+    let (key, bound) = if v < min {
+        ("low", &min)
+    } else if v > max {
+        ("big", &max)
+    } else {
+        return Ok(v);
+    };
+    reader.cursor = start;
+    Err(CommandError::tr_at(
+        &format!("argument.{kind}.{key}"),
+        &[bound, &v],
+        reader,
+    ))
+}
 /// TimeArgument units.
 fn time_unit(unit: &str) -> Option<i32> {
     match unit {
@@ -1160,26 +1209,8 @@ impl ArgType {
         let start = reader.cursor;
         Ok(match self {
             ArgType::Bool => Arg::Bool(reader.read_boolean()?),
-            ArgType::Integer { min, max } => {
-                let v = reader.read_int()?;
-                if v < *min {
-                    reader.cursor = start;
-                    return Err(CommandError::tr_at(
-                        "argument.integer.low",
-                        &[min, &v],
-                        reader,
-                    ));
-                }
-                if v > *max {
-                    reader.cursor = start;
-                    return Err(CommandError::tr_at(
-                        "argument.integer.big",
-                        &[max, &v],
-                        reader,
-                    ));
-                }
-                Arg::Int(v)
-            }
+            ArgType::Integer { min, max } => Arg::Int(read_integer(reader, *min, *max)?),
+            ArgType::Long { min, max } => Arg::Long(read_long(reader, *min, *max)?),
             ArgType::Float { min, max } => {
                 let v = reader.read_float()?;
                 if v < *min {
@@ -1825,6 +1856,16 @@ impl ArgType {
                         let text = reader.remaining().to_owned();
                         reader.cursor = reader.string.len();
                         text
+                    }
+                    // The number is checked as Brigadier's own type first; the mod's parser sees
+                    // the digits it accepted.
+                    CustomArgumentKind::Integer { min, max } => {
+                        read_integer(reader, min, max)?;
+                        reader.string[start..reader.cursor].to_owned()
+                    }
+                    CustomArgumentKind::Long { min, max } => {
+                        read_long(reader, min, max)?;
+                        reader.string[start..reader.cursor].to_owned()
                     }
                 };
                 match (custom.parse)(&text) {

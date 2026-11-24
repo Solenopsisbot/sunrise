@@ -33,6 +33,45 @@ pub trait LevelEffectsBackendMut {
         except: Option<PlayerRef>,
     ) -> bool;
     /// Side: server.
+    /// Draws the next seed of the stream this level's sounds take theirs from
+    /// (`Level.soundSeedGenerator.nextLong()`), without playing a sound: the draw vanilla's
+    /// `Level.playSound` makes before it calls `playSeededSound`. A mod that models a
+    /// `playSound` call draws here first and then plays the sound with
+    /// [`LevelRef::play_seeded_sound`](crate::LevelRef::play_seeded_sound), or plays nothing,
+    /// and the stream has moved exactly as vanilla's would. [`LevelRef::play_sound`](crate::LevelRef::play_sound),
+    /// [`EntityRef::play_sound`](crate::EntityRef::play_sound), [`EntityRef::play_bound_sound`](crate::EntityRef::play_bound_sound)
+    /// draw from the same stream, and so do the sounds the game itself sends; the seeded plays
+    /// draw nothing. The server keeps one stream for all its levels, where vanilla gives each
+    /// level its own: a draw here also moves the seeds of sounds played in other levels.
+    ///
+    /// The draw happens at the call, inside an open transaction too, and is not undone when
+    /// the transaction aborts, as with [`LevelRef::with_random`](crate::LevelRef::with_random).
+    /// A level sound such a transaction holds draws its own seed only when it is published at
+    /// commit, so it takes a later seed than a draw made after it in the same transaction.
+    /// `None` on a client, for a stale handle, a level that is not open and where the server
+    /// sends no sounds.
+    fn level_next_sound_seed(&mut self, level: LevelRef) -> Option<i64>;
+    /// Side: server.
+    /// [`LevelRef::play_sound`](crate::LevelRef::play_sound) with the seed the caller gives,
+    /// as `ServerLevel.playSeededSound(except, x, y, z, sound, source, volume, pitch, seed)`
+    /// plays it: the clients pick the sound's variant with `seed`, and the level's sound-seed
+    /// stream does not move. Pair it with
+    /// [`LevelRef::next_sound_seed`](crate::LevelRef::next_sound_seed) to model
+    /// `Level.playSound`, or pass a seed vanilla code drew elsewhere (a `getRandom().nextLong()`).
+    /// `except`, the checks, the `play_level_sound_at_position` hook and the transaction rules
+    /// are `play_sound`'s; the seed is kept through them. True means queued, not heard.
+    fn level_play_seeded_sound(
+        &mut self,
+        level: LevelRef,
+        sound: &str,
+        at: [f64; 3],
+        source: SoundSource,
+        volume: f32,
+        pitch: f32,
+        except: Option<PlayerRef>,
+        seed: i64,
+    ) -> bool;
+    /// Side: server.
     /// Sends `count` particles around `at` to the players in this level
     /// within 32 blocks, as `ServerLevel.sendParticles` does: each offset is
     /// a Gaussian times `spread`, and `speed` scales their motion (a zero

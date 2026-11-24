@@ -595,6 +595,7 @@ fn screen_ids_are_distinct_and_stable() {
         Screen::BlockEditor,
         Screen::ServerLinks,
         Screen::ConfirmLink,
+        Screen::DemoIntro,
         Screen::DialogWarning,
         Screen::Win,
         Screen::Mod,
@@ -787,6 +788,7 @@ fn a_mod_screen_on_a_machine_menu_takes_the_stock_layout_out() {
 fn a_falling_block_keeps_its_model_offset() {
     let at = Vec3::new(3.5, 70.25, -1.5);
     let falling = FallingBlock {
+        size_answer: None,
         ground: Default::default(),
         fire_ticks: 0,
         sync_velocity: false,

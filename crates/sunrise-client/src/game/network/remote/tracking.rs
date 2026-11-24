@@ -73,6 +73,7 @@ impl Game<'_> {
                         join: JoinSeq::next(),
                         position,
                         velocity: Vec3::ZERO,
+                        no_gravity: false,
                     },
                 );
             }

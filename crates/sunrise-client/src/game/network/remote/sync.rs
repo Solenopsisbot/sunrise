@@ -11,7 +11,7 @@ impl Remote {
     pub(in crate::game) fn player_info_skin(&self, uuid: u128) -> &str {
         self.skins
             .get(&uuid)
-            .map(String::as_str)
+            .map(|skin| skin.body(uuid).0)
             .unwrap_or_else(|| default_skin(uuid))
     }
 }
@@ -501,11 +501,7 @@ impl Game<'_> {
             self.send(packet);
         }
         for (slot, stack) in creative_slots {
-            let item = self.to_network(&stack);
-            self.send(S::SetCreativeModeSlot(play::SetCreativeModeSlot {
-                slot,
-                item,
-            }));
+            self.send_creative_item_add(slot, stack);
         }
     }
     pub(in crate::game) fn creative_stacks(&self) -> Vec<Option<ItemStack>> {
@@ -533,12 +529,37 @@ impl Game<'_> {
             }
         }
         for (slot, stack) in changed {
-            let item = self.to_network(&stack);
-            self.send(S::SetCreativeModeSlot(play::SetCreativeModeSlot {
-                slot,
-                item,
-            }));
+            self.send_creative_item_add(slot, stack);
         }
+    }
+
+    /// `MultiPlayerGameMode.handleCreativeModeItemAdd`, shared by each creative slot sender.
+    pub(super) fn send_creative_item_add(&self, slot: i16, stack: Option<ItemStack>) {
+        if !self.creative || self.remote.is_none() {
+            return;
+        }
+        let stack = stack.filter(|stack| !stack.is_empty());
+        // Vanilla checks the item's required features, and an empty stack's item is air.
+        let air;
+        let enabled = match &stack {
+            Some(stack) => self
+                .creative_screen
+                .catalog()
+                .item_enabled(stack, self.enabled_feature_ids()),
+            None => {
+                air = ItemStack::new("minecraft:air", 0);
+                self.creative_screen
+                    .catalog()
+                    .item_enabled(&air, self.enabled_feature_ids())
+            }
+        };
+        if !enabled {
+            return;
+        }
+        self.send_play(S::SetCreativeModeSlot(play::SetCreativeModeSlot {
+            slot,
+            item: self.to_network(&stack),
+        }));
     }
     /// `MultiPlayerGameMode.ensureHasSentCarriedItem`: the server hears of a
     /// new selected slot before anything the slot acts with.

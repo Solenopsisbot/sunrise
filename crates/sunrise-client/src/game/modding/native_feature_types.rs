@@ -2,7 +2,7 @@
 //! mod's `FeatureType`, over the caller's own world and random.
 use super::native_worldgen::WorkerResources;
 use mod_api::{
-    BlockKey, BlockMetadata, BlockState, BlockUpdateFlags, DatapackEntry, DatapackField,
+    BiomeKey, BlockKey, BlockMetadata, BlockState, BlockUpdateFlags, DatapackEntry, DatapackField,
     FeatureContext, FeatureType, HeightmapType, RandomSource,
 };
 use std::any::Any;
@@ -92,6 +92,9 @@ impl FeatureContext for Placing<'_> {
     }
     fn block_in_tag(&mut self, pos: [i32; 3], tag: &str) -> Option<bool> {
         self.target.block_in_tag(pos, tag)
+    }
+    fn biome(&mut self, pos: [i32; 3]) -> Option<BiomeKey> {
+        self.target.biome(pos)
     }
     fn set_block(&mut self, pos: [i32; 3], state: BlockState, flags: BlockUpdateFlags) -> bool {
         let Ok(state) = self.worker.index.to_engine(state) else {

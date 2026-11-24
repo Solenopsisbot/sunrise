@@ -1200,7 +1200,7 @@ but each sync packet retains its index range: 0 through 32,767 for a block-backe
 
 For blockless opens, an optional `owned_slots` array declares [transient menu storage](../concepts/capabilities/menu-slots.md#menu-owned-slots).
 It must contain exactly `slots` entries, each the maximum stack size (1–99) of that slot.
-Types declaring `owned_slots` are blockless-only and cannot declare `results` or `crafting`.
+Types declaring `owned_slots` are blockless-only and cannot declare `crafting`; they may declare `results` for take-only output slots whose non-result inputs return to the player on close.
 A block container cannot bind an owned-slot type as its menu.
 
 The optional menu `inputs` list marks machine feeds, including fuel, as `Input`
@@ -1426,7 +1426,7 @@ the keys it leaves out stay:
       "additions": { "sound": "minecraft:ambient.warped_forest.additions", "tick_chance": 0.0111 },
       "mood": { "sound": "minecraft:ambient.warped_forest.mood", "tick_delay": 6000, "block_search_extent": 8, "offset": 2.0 }
     },
-    "minecraft:audio/background_music": { "default": { "sound": "zinc:music.dunes", "min_delay": 12000, "max_delay": 24000 } },
+    "minecraft:audio/background_music": { "default": { "sound": { "sound_id": "zinc:music.dunes" }, "min_delay": 12000, "max_delay": 24000 } },
     "minecraft:audio/music_volume": 0.5
   }
 }
@@ -1436,8 +1436,10 @@ The particle list also accepts `{ "argument": [...] }`.
 
 | Value | Validation |
 |---|---|
-| Particle or sound | Namespaced ID |
-| Particle `probability`, music volume | 0 to 1 |
+| Particle | Namespaced ID |
+| Sound | Registered vanilla sound ID string, or inline `{ "sound_id": "<ns>:<path>" }` (optional `"range"`) for any sound including custom mod sounds |
+| Particle `probability` | 0 to 1 |
+| Music volume | 0 to 1, or a float environment-attribute modifier object (e.g. `{ "modifier": "multiply", "argument": 0.5 }`) |
 | Ambient additions | One object or a list; any finite `tick_chance` |
 | Ambient mood | Requires sound, `tick_delay`, `block_search_extent` and `offset` |
 | Music `default`, `creative`, `underwater` | Requires sound and nonnegative `min_delay` and `max_delay`; delays need not be ordered |

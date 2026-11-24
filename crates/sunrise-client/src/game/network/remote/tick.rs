@@ -1615,6 +1615,7 @@ impl Game<'_> {
         if !self.remote.as_ref().is_some_and(|r| r.loaded_sent) {
             return Ok(None);
         }
+        self.drop_spam_throttler.tick();
         let entity_collisions = self.entity_collisions(Mover::Player);
         // Those added before it tick before it: their pushes reach this move.
         let pushed = self.remote_pushes(true);

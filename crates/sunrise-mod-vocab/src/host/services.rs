@@ -112,6 +112,22 @@ pub trait Commands {
         unimplemented!("Commands::feedback")
     }
     /// Side: server.
+    /// An executor can send a failure line to the command's originating source, as vanilla's
+    /// `CommandSourceStack.sendFailure` (the same call a NeoForge command registered in
+    /// `RegisterCommandsEvent` makes on its source): the line in red, shown unless the source is
+    /// silent or does not accept failures (a command block or minecart with track output off),
+    /// and independent of `sendCommandFeedback`. A command block or minecart keeps it as its last
+    /// output. It changes nothing else: the executor still returns the command's result, so
+    /// Java's `source.sendFailure(text); return 0;` is `failure(text)` then `Ok(0)`: `execute
+    /// store result` reads 0, without the `Err` path of a failed command (`execute store success`
+    /// reads 1 and a command block counts a success, as for any vanilla command that returns 0).
+    /// Refuses text deeper than 512 component nodes before
+    /// applying any changes; a line whose red formatting no longer fits a packet or a saved
+    /// command block is replaced by `command.failed`, as a returned failure is.
+    fn failure(&mut self, line: Text) -> Result<(), TextFormError> {
+        unimplemented!("Commands::failure")
+    }
+    /// Side: server.
     /// Runs `line` (no slash) as the server's console does: permission
     /// level 4, from the world spawn in its level, with no output. A teleport to
     /// another level (`execute in minecraft:the_nether run tp Alex 0 70 0`)

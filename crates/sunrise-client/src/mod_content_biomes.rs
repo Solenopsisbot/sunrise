@@ -122,10 +122,24 @@ fn unit(v: Option<&Value>) -> bool {
         .is_some_and(|n| (0.0..=1.0).contains(&n))
 }
 
+/// Built-in registries from a content root, when present, so biome modifiers
+/// validate bare `SoundEvent` strings against the same static `SOUND_EVENT`
+/// registry as playback.
+pub(super) fn load_sound_events(root: &Path) -> Option<sunrise_protocol::registry::Builtin> {
+    sunrise_protocol::registry::Builtin::find(root)
+        .and_then(|p| sunrise_protocol::registry::Builtin::load(&p).ok())
+}
+
 /// One attribute's value as vanilla's biome JSON writes it, or why it is refused. Ambient
 /// particles may come in the `{"argument": [...]}` form; the list is what is kept.
-fn attribute(key: &str, v: &Value) -> std::result::Result<Value, String> {
-    let sound = |m: &Value| m.get("sound").and_then(Value::as_str).is_some_and(id);
+fn attribute(
+    key: &str,
+    v: &Value,
+    registered_sound: &impl Fn(&str) -> bool,
+) -> std::result::Result<Value, String> {
+    let sound_event =
+        |v: &Value| mod_api::client::music::parse_sound_event(v, registered_sound).is_some();
+    let sound = |m: &Value| m.get("sound").is_some_and(sound_event);
     let bad = |what: &str| format!("attributes.{key}: {what}");
     match key {
         "minecraft:visual/ambient_particles" => {
@@ -150,7 +164,7 @@ fn attribute(key: &str, v: &Value) -> std::result::Result<Value, String> {
             };
             for (name, value) in object {
                 let ok = match name.as_str() {
-                    "loop" => value.as_str().is_some_and(id),
+                    "loop" => sound_event(value),
                     "additions" => match value {
                         Value::Array(list) => list.iter().all(addition),
                         one => addition(one),
@@ -176,17 +190,23 @@ fn attribute(key: &str, v: &Value) -> std::result::Result<Value, String> {
                 let ok = matches!(name.as_str(), "default" | "creative" | "underwater")
                     && sound(music)
                     && min.is_some()
-                    && max.is_some();
+                    && max.is_some()
+                    && music
+                        .get("replace_current_music")
+                        .is_none_or(Value::is_boolean);
                 if !ok {
                     return Err(bad(&format!("{name} needs a sound and nonnegative delays")));
                 }
             }
             Ok(v.clone())
         }
-        _ => match unit(Some(v)) {
-            true => Ok(v.clone()),
-            false => Err(bad("not a number 0..=1")),
-        },
+        _ => {
+            let attr = sunrise_world::environment_attributes::attribute("audio/music_volume")
+                .expect("audio/music_volume attribute is registered");
+            sunrise_world::environment_attributes::Entry::parse(attr, v)
+                .map(|_| v.clone())
+                .map_err(|_| bad("not a number 0..=1 or float attribute modifier"))
+        }
     }
 }
 
@@ -222,7 +242,10 @@ fn colour(v: &Value) -> Option<u32> {
 
 impl Changes {
     /// The values in a `sunrise:modify_biome` file, vanilla biome JSON's names.
-    fn read(doc: &Value) -> std::result::Result<Self, String> {
+    fn read(
+        doc: &Value,
+        registered_sound: &impl Fn(&str) -> bool,
+    ) -> std::result::Result<Self, String> {
         let num = |k: &str| match doc.get(k) {
             None => Ok(None),
             Some(Value::Number(n)) => Ok(Some(n.clone())),
@@ -269,7 +292,7 @@ impl Changes {
                         .iter()
                         .find(|a| *a == key)
                         .ok_or_else(|| format!("attributes: unknown attribute {key}"))?;
-                    attributes.push((*name, attribute(key, value)?));
+                    attributes.push((*name, attribute(key, value, registered_sound)?));
                 }
             }
             Some(_) => return Err("attributes: not an object".into()),
@@ -367,6 +390,7 @@ impl Modifier {
         mod_id: &str,
         file: &str,
         text: &str,
+        registered_sound: &impl Fn(&str) -> bool,
         warnings: &mut Vec<String>,
     ) -> Result<Option<Self>> {
         let name = format!("mod {mod_id}: {file}");
@@ -434,7 +458,7 @@ impl Modifier {
             "remove_carvers" => Action::RemoveCarvers {
                 carvers: field("carvers")?,
             },
-            "sunrise:modify_biome" => match Changes::read(&doc) {
+            "sunrise:modify_biome" => match Changes::read(&doc, registered_sound) {
                 Ok(changes) => Action::Modify(changes),
                 Err(e) => {
                     warnings.push(at(format!("{e}: skipped")));

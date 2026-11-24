@@ -147,7 +147,8 @@ pub trait ItemsClientHost {
     /// the server at once as `MultiPlayerGameMode.handleCreativeModeItemAdd` does
     /// (`ServerboundSetCreativeModeSlotPacket`; the off hand is slot 45), even while a
     /// container menu is open. `Ok(Some(remainder))` is what did not fit; nothing is dropped.
-    /// A [`CreativeGiveError`] gives nothing.
+    /// A [`CreativeGiveError`] gives nothing (including `FeatureDisabled` when the connected
+    /// server does not enable the item's required feature flags).
     #[forward_api_inputs]
     #[forward_api_output]
     fn give_stack(&mut self, stack: &ItemStack) -> Result<Option<ItemStack>, CreativeGiveError>;

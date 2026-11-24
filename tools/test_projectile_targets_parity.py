@@ -14,7 +14,6 @@ and runs the registered witness tests against that directory via SUNRISE_PROJECT
   test_projectile_targets_parity.py [--prepare] [--record-only] [--filter SUBSTRING] [--resources DIR]
 """
 import argparse
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -132,17 +131,7 @@ def main():
         scratch = Path(tmp)
         homes = {k: scratch / k for k in ('SUNRISE_HOME', 'SUNRISE_LAUNCHER_HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME')}
         env = lab.game_env(os.environ, **homes, RUST_MIN_STACK='16777216')
-        compiled = run(['cargo', 'test', '--locked', '-p', 'sunrise-client', '--lib', '--no-run', '--message-format=json'],
-                       'compile-rust', env=env)
-        binaries = []
-        for line in compiled.read_text(encoding='utf-8').splitlines():
-            if not line.startswith('{'):
-                continue
-            row = json.loads(line)
-            if (row.get('reason') == 'compiler-artifact' and row.get('executable')
-                    and row.get('target', {}).get('name') == 'sunrise_client' and row.get('profile', {}).get('test')):
-                binaries.append(Path(row['executable']))
-        assert len(binaries) == 1, f'expected one sunrise_client test binary, got {binaries}'
+        binaries = [lab.parity_fixtures()]
         env['SUNRISE_TEST_RESOURCES'] = str(args.resources.resolve())
         env['SUNRISE_PROJECTILE_WITNESS_DIR'] = str(witness_dir.resolve())
         for idx, test in enumerate(chosen):

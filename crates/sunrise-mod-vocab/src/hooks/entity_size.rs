@@ -21,9 +21,13 @@ pub trait Hooks {
     /// another synched value the server sends changes its vanilla size (vanilla's
     /// `Entity.onSyncedDataUpdated`). Each side asks for its own copy and
     /// keeps its own answer: answer from the event, the same way on both, so that the server's
-    /// box and the client's agree. A mob is asked on the server before and after its tick. A
-    /// player is asked in two steps: before the player's motion, for the candidate poses its fit
-    /// tests use (on a client for its own player, and once a tick for each LAN guest's player),
+    /// box and the client's agree. On the server, a mob is asked before and after its tick, and
+    /// every other entity (an item, a minecart, a boat, a projectile, an armor stand, TNT, a
+    /// falling block, an orb, a rocket, a trident, a display, a marker, an interaction, an end
+    /// crystal...) at the same points, standing, the first time from its constructor; its box
+    /// (collisions, block contacts, picking) takes the answer. A player is asked in two steps:
+    /// before the player's motion, for the candidate poses its fit tests use (on a client for
+    /// its own player, and once a tick for each LAN guest's player),
     /// and after the motion, for the current pose's change (a client's own player after its
     /// tick). A size changed within a tick takes the answer at the next of those. Not
     /// cancellable.

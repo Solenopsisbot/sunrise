@@ -2195,6 +2195,7 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
             &preprocess(&pack, "gbuffers_line.fsh", &macros),
             Target::Buffers,
             &GbuffersInputs::default(),
+            naga::front::glsl::InterfaceLimits::WGPU_DEFAULT,
         )
         .unwrap();
         let mut bytes = vec![0; program.interface.uniform_size as usize];

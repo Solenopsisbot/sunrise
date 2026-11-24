@@ -29,6 +29,7 @@ impl Renderer {
         };
         let buffers = [Some(vertex), Some(instances)];
         let flat = self.pack_terrain_flat;
+        let pages = self.pack_terrain_draws().reads_pages();
         let sprite_rects = self
             .pack_atlas
             .as_ref()
@@ -56,6 +57,7 @@ impl Renderer {
                     material_maps: true,
                     ids: None,
                     cull: true,
+                    pages,
                 }),
                 block_ids,
                 celestial: self
@@ -199,6 +201,7 @@ impl Renderer {
             .as_ref()
             .map(|t| t.create_view(&Default::default()));
         let flat = self.pack_terrain_flat;
+        let pages = self.pack_terrain_draws().reads_pages();
         let table = (self.flat.as_ref())
             .filter(|_| flat)
             .map(|f| f.draw_layout.clone());
@@ -234,6 +237,7 @@ impl Renderer {
                     material_maps: true,
                     ids: None,
                     cull: true,
+                    pages,
                 }),
                 block_ids: &block_ids,
                 celestial,
@@ -379,7 +383,10 @@ impl Renderer {
     /// terrain's in the pack's block atlas (made here when missing; none when it does not fit).
     pub fn pack_inputs(&mut self) -> sunrise_shaders::GameInputs {
         let terrain = self.pack_terrain_inputs();
-        pack_atlas::game_inputs(terrain, self.pack_terrain_flat, &self.pack_lava_layers)
+        sunrise_shaders::GameInputs {
+            interface_limits: crate::core_shader::interface_limits(&self.device.limits()),
+            ..pack_atlas::game_inputs(terrain, self.pack_terrain_flat, &self.pack_lava_layers)
+        }
     }
 
     pub(super) fn pack_terrain_inputs(&mut self) -> Option<sunrise_shaders::GbuffersInputs> {
@@ -448,11 +455,37 @@ impl Renderer {
             self.queue.submit([encoder.finish()]);
         }
         self.pack_terrain_flat = flat;
-        Some(
-            self.pack_atlas
-                .as_ref()?
-                .terrain_inputs(self.pack_terrain_flat),
-        )
+        // Per-section draws read the pages where the pack's terrain programs still fit the
+        // vertex stage with them.
+        let gpu = pack_post::Gpu::of(&self.adapter, self.device.features());
+        let fit = (self.pack_terrain_bindings).pages_fit(&self.device.limits(), gpu);
+        self.pack_terrain_pages = !flat && self.terrain_pages && fit;
+        if !flat && self.terrain_pages && !fit {
+            log::warn!(
+                "shader pack terrain: {:?} and set 3 don't fit the vertex stage's storage \
+                 buffers; per-section draws give the constant normal and tangent",
+                self.pack_terrain_bindings
+            );
+        }
+        let draws = self.pack_terrain_draws();
+        Some(self.pack_atlas.as_ref()?.terrain_inputs_for(draws))
+    }
+    /// How the game's terrain draws give the pack's terrain programs their vertices, as
+    /// `pack_terrain_inputs` last took them: flat, or per section, reading their quad's corners
+    /// from the section arena's pages where vertex shaders read storage and the pack's programs
+    /// fit with them (`pack_terrain_pages`).
+    pub(crate) fn pack_terrain_draws(&self) -> pack_atlas::TerrainDraws {
+        match (self.pack_terrain_flat, self.pack_terrain_pages) {
+            (true, _) => pack_atlas::TerrainDraws::Flat,
+            (false, true) => pack_atlas::TerrainDraws::Pages,
+            (false, false) => pack_atlas::TerrainDraws::Attributes,
+        }
+    }
+    /// What the pack about to be loaded binds in its terrain programs' vertex stage
+    /// (`pack_atlas::TerrainBindings::of`), before `pack_inputs`: per-section draws read the
+    /// arena's pages only where those programs still fit with them.
+    pub fn set_pack_terrain_bindings(&mut self, bindings: pack_atlas::TerrainBindings) {
+        self.pack_terrain_bindings = bindings;
     }
     /// The macros this renderer gives shader packs: the GL extensions this device has
     /// (subgroups, when it has them), and the vendor, renderer and mipmap levels

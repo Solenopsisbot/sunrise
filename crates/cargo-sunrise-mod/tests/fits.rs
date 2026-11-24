@@ -28,6 +28,11 @@ struct Project {
 
 impl Project {
     fn new(name: &str, internals: &[&str]) -> Self {
+        Self::made(name, internals, mod_surface::SCHEMA)
+    }
+
+    /// A project pinned to `OLD`, whose SDK's surface has schema `old_schema`.
+    fn made(name: &str, internals: &[&str], old_schema: u32) -> Self {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/i3-d/tests")
             .join(format!("fit-check-{name}-{}", std::process::id()));
@@ -56,9 +61,19 @@ impl Project {
             (RESHAPED, "struct", "2299"),
             (BODILESS, "method", "4499"),
         ];
+        if old_schema != mod_surface::SCHEMA {
+            let folder = dir.join("releases").join(format!("sdk-{OLD}"));
+            fs::create_dir_all(&folder).unwrap();
+            let surface = format!(r#"{{"schema":{old_schema},"hash":"ab"}}"#);
+            fs::write(folder.join("surface.json"), surface).unwrap();
+        }
         sdk.release(OLD, MIXINS, Some(&build_data(OLD, &old)));
         sdk.release(NEW, MIXINS, Some(&build_data(NEW, &new)));
-        sdk.prefetch(&dir, OLD, NEW);
+        // `sdk diff` reads both surfaces, so a surface this tool does not read is fetched by the
+        // command under test.
+        if old_schema == mod_surface::SCHEMA {
+            sdk.prefetch(&dir, OLD, NEW);
+        }
         Self { dir, sdk }
     }
 
@@ -219,6 +234,25 @@ fn pin_without_a_build_moves_to_the_current_nightly() {
     )
     .unwrap();
     assert_answer(project.run(&["pin"]), 0, &[]);
+    let manifest = fs::read_to_string(project.dir.join(MANIFEST)).unwrap();
+    assert_eq!(
+        Manifest::parse(&manifest).unwrap().native.unwrap().sunrise,
+        NEW
+    );
+}
+
+#[test]
+#[ignore = "daily"]
+fn pin_moves_a_mod_off_a_build_whose_surface_schema_the_tool_does_not_read() {
+    let project = Project::made("pin-old-schema", &[], 1);
+    let check = project.run(&["check", "--build", OLD]);
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(
+        !check.status.success() && stderr.contains("`cargo sunrise-mod pin <build>`"),
+        "{stderr}"
+    );
+    let stdout = assert_answer(project.run(&["pin", NEW]), 0, &[]);
+    assert!(stdout.contains("can't be compared"), "{stdout}");
     let manifest = fs::read_to_string(project.dir.join(MANIFEST)).unwrap();
     assert_eq!(
         Manifest::parse(&manifest).unwrap().native.unwrap().sunrise,

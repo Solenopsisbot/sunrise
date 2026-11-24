@@ -222,6 +222,9 @@ pub struct ItemEntity {
     /// `Entity.random`, after the constructor's draws: `moveTowardsClosestSpace`
     /// takes an item's escape speed from it.
     pub random: sunrise_core::random::LegacyRandom,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub size_answer: Option<crate::pose::SizeAnswer>,
 }
 /// What `Entity.doWaterSplashEffect` asks the level to do for a dropped item.
 /// Particles are drawn on the client (`Level.addParticle` is empty on the
@@ -322,6 +325,8 @@ pub struct ItemEnvironmentTick {
     /// stacks the destroyed item left, which `ItemUtils.onContainerDestroyed`
     /// adds to the level where it lay.
     pub spilled: Vec<ItemStack>,
+    /// The damage type that reduced the item's health to zero, when `!alive`.
+    pub destroyed_by: Option<&'static str>,
 }
 impl ItemEnvironmentTick {
     pub fn should_play_lava_hurt_sound(&self, tick: u32) -> bool {
@@ -437,6 +442,8 @@ impl ItemEntity {
 }
 impl ItemEntity {
     pub const WIDTH: f64 = 0.25;
+    /// `EntityType.ITEM.getDimensions()`: width, height and eye height.
+    pub const DIMENSIONS: [f32; 3] = [0.25, 0.25, 0.2125];
     /// `EntityTypes.ITEM` declares a float eye height, widened by `Entity.getEyeY`.
     pub const EYE_HEIGHT: f64 = 0.2125_f32 as f64;
     /// `Entity.getLightProbePosition(partialTick)` for a dropped item: the eye
@@ -461,13 +468,19 @@ impl ItemEntity {
     }
     pub fn bounds(&self) -> Aabb {
         let h = Self::WIDTH / 2.0;
-        Aabb::new(
+        let vanilla = Aabb::new(
             Vec3::new(self.position.x - h, self.position.y, self.position.z - h),
             Vec3::new(
                 self.position.x + h,
                 self.position.y + Self::WIDTH,
                 self.position.z + h,
             ),
+        );
+        crate::pose::SizeAnswer::sized_box(
+            self.size_answer,
+            Self::DIMENSIONS,
+            self.position,
+            vanilla,
         )
     }
     /// `ItemEntity.hurtServer`'s health: `amount` off the health, and an item
@@ -479,13 +492,34 @@ impl ItemEntity {
         if self.health > 0 {
             return None;
         }
+        Some(self.spill_destroyed_contents())
+    }
+    /// Built-in `ItemStack.onDestroyed` spills (`BundleItem.onDestroyed` and
+    /// `BlockItem.onDestroyed` for shulker boxes) computed without modifying
+    /// `self.stack`, so `ItemPart::item_destroyed` sees the original intact
+    /// stack (`ItemEntity.hurtServer` -> `ItemStack.onDestroyed` -> `discard()`).
+    pub fn peek_destroyed_contents(&self) -> Vec<ItemStack> {
+        let Some(data) = self.stack.data() else {
+            return Vec::new();
+        };
+        if data.bundle_contents.is_empty() && data.container.is_empty() {
+            return Vec::new();
+        }
+        let mut copy = self.stack.clone();
+        let mut spilled = crate::bundle::destroyed(&mut copy);
+        spilled.extend(crate::item_data::destroyed_container(&mut copy));
+        spilled
+    }
+    /// Clears built-in container contents (`bundle_contents`, `container`) in place
+    /// and returns them for dropping (`ItemStack.onDestroyed`).
+    pub fn spill_destroyed_contents(&mut self) -> Vec<ItemStack> {
         // `ItemStack.onDestroyed` runs the item's own arm, and the component
         // the stack holds is the dispatch: a bundle's (`BundleItem.onDestroyed`)
         // `bundle_contents` and a container item's (`BlockItem.onDestroyed`)
         // `container`, which a mod's own item carries in the same way.
         let mut spilled = crate::bundle::destroyed(&mut self.stack);
         spilled.extend(crate::item_data::destroyed_container(&mut self.stack));
-        Some(spilled)
+        spilled
     }
     /// The ItemEntity snapshot used by both its move and its noCollision check.
     pub fn collision_context(&self) -> sunrise_world::collision_context::CollisionContext<'static> {
@@ -768,6 +802,9 @@ pub struct ExperienceOrb {
     pub fire_ticks: i32,
     /// `Entity.fallDistance` (`fall_distance` in its save).
     pub fall_distance: f64,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub size_answer: Option<crate::pose::SizeAnswer>,
 }
 /// An orb's `Entity.move` this tick, for the fall bookkeeping its caller
 /// finishes (the long-move cast, `checkFallDamage`'s HIT_GROUND).
@@ -798,6 +835,7 @@ impl ExperienceOrb {
     /// health, no age, fall or followed player, not yet ticked.
     pub fn new(id: u32, position: Vec3, velocity: Vec3, value: i32) -> Self {
         Self {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: [0.0, 0.0],
             join: Default::default(),
@@ -832,8 +870,15 @@ impl ExperienceOrb {
             Vec3::new(at.x + h, at.y + 0.5, at.z + h),
         )
     }
+    /// `EntityType.EXPERIENCE_ORB.getDimensions()`: width, height and eye height.
+    pub const DIMENSIONS: [f32; 3] = [0.5, 0.5, 0.425];
     pub fn bounds(&self) -> Aabb {
-        Self::box_at(self.position)
+        crate::pose::SizeAnswer::sized_box(
+            self.size_answer,
+            Self::DIMENSIONS,
+            self.position,
+            Self::box_at(self.position),
+        )
     }
     /// `Entity.unstuckIfPossible`, which `ExperienceOrb`'s constructor runs as
     /// `if (!level.noCollision(box)) unstuckIfPossible(box.getSize())`: the free
@@ -1817,6 +1862,9 @@ pub struct ArmorStand {
     pub speed_instance: bool,
     /// `NAME_TAG_DISTANCE` and `BELOW_NAME_DISTANCE` from server attribute updates.
     pub nameplate: crate::entities::nameplate::NameplateDistances,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub size_answer: Option<crate::pose::SizeAnswer>,
     /// Synced client-side effects from `UpdateMobEffect` / `RemoveMobEffect`, as a mob's.
     pub client_effects: crate::effects::PlayerEffects,
     /// `MobEffectInstance.BlendState` (previous, current) for its client-side darkness.
@@ -2049,6 +2097,7 @@ impl ArmorStand {
     }
     pub fn new(id: u32, position: Vec3, yaw: f32) -> Self {
         Self {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             pitch: 0.0,
             previous_pitch: 0.0,
@@ -2215,6 +2264,15 @@ impl ArmorStand {
         // `brokenByAnything` receives as the `DamageSource`.
         (self.health <= 0.5).then(|| hit_by.unwrap_or("minecraft:generic"))
     }
+    /// `ArmorStand.getDefaultDimensions`: MARKER_DIMENSIONS, or BABY_DIMENSIONS (the type's at
+    /// half scale, its eyes at 0.9875) for a small one, else the type's.
+    pub fn default_dimensions(&self) -> [f32; 3] {
+        match (self.marker, self.small) {
+            (true, _) => [0.0; 3],
+            (_, true) => [0.25, 0.9875, 0.9875],
+            _ => [0.5, 1.975, 1.7775],
+        }
+    }
     /// EntityType.ARMOR_STAND dimensions (0.5 x 1.975F, half for small).
     pub fn bounds(&self) -> Aabb {
         let s = if self.small { 0.5 } else { 1.0 };
@@ -2222,10 +2280,11 @@ impl ArmorStand {
         // (halving it for the small stand is exact).
         let (w, h) = (0.25 * s, f64::from(1.975_f32) * s);
         let p = self.position;
-        Aabb::new(
+        let vanilla = Aabb::new(
             Vec3::new(p.x - w, p.y, p.z - w),
             Vec3::new(p.x + w, p.y + h, p.z + w),
-        )
+        );
+        crate::pose::SizeAnswer::sized_box(self.size_answer, self.default_dimensions(), p, vanilla)
     }
     /// Leather boots on its feet: it walks on powder snow (`PowderSnowBlock.canEntityWalkOnPowderSnow`).
     fn feet_are_leather_boots(&self) -> bool {
@@ -2625,6 +2684,7 @@ mod fire_environment_tests {
             )
             .unwrap();
         let make = |id: &str| ItemEntity {
+            size_answer: None,
             random: sunrise_core::random::LegacyRandom::new(0),
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
@@ -2823,6 +2883,7 @@ mod destroyed_bundle_environment_tests {
             ItemStack::new("minecraft:diamond", 1),
         ];
         let mut bundle = ItemEntity {
+            size_answer: None,
             random: sunrise_core::random::LegacyRandom::new(0),
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
@@ -2867,6 +2928,163 @@ mod destroyed_bundle_environment_tests {
                 .data()
                 .is_none_or(|d| d.bundle_contents.is_empty()),
             "the destroyed bundle keeps nothing inside"
+        );
+        assert_eq!(second.destroyed_by, Some("minecraft:lava"));
+    }
+
+    fn test_item_entity(health: i32, fire_ticks: i32, stack: ItemStack) -> ItemEntity {
+        let at = Vec3::new(0.5, 64.5, 0.5);
+        ItemEntity {
+            size_answer: None,
+            random: sunrise_core::random::LegacyRandom::new(1),
+            attachment_lifetime: Default::default(),
+            fall_distance: 0.0,
+            rotation: [0.0, 0.0],
+            join: Default::default(),
+            no_gravity: false,
+            id: 1,
+            thrower: None,
+            target: None,
+            stack,
+            health,
+            fire_ticks,
+            position: at,
+            previous: at,
+            velocity: Vec3::ZERO,
+            ground: Default::default(),
+            vertical_collision: false,
+            age: 0,
+            pickup_delay: 0,
+            bob_offset: 0.0,
+            ticks: 0,
+            needs_sync: false,
+            stuck: Vec3::ZERO,
+            was_touching_water: false,
+        }
+    }
+
+    fn air_world_and_facts() -> (World, BlockFacts, sunrise_world::registry::BlockRegistry) {
+        let registry = sunrise_world::registry::BlockRegistry::from_facts_json(
+            br#"{"defaults":{"minecraft:air":0},"states":[["minecraft:air",false,false,"","minecraft:air"]]}"#
+                .as_slice(),
+        )
+        .unwrap();
+        let text = |s: &str| -> std::sync::Arc<str> { s.into() };
+        let air = sunrise_items::blocks::StateFacts {
+            name: text("minecraft:air"),
+            emission: 0,
+            dynamic_light: false,
+            dampening: 0,
+            skylight_down: true,
+            shape_occlusion: false,
+            can_occlude: false,
+            solid_render: false,
+            hardness: 0.0,
+            requires_tool: false,
+            replaceable: true,
+            random_ticks: false,
+            block_entity: false,
+            render_shape: sunrise_items::blocks::RenderShape::Invisible,
+            spawn_terrain_particles: true,
+            destroy_overlay: false,
+            full_collision: false,
+            friction: 0.6,
+            explosion_resistance: 0.0,
+            item: text("minecraft:air"),
+            pick_item: text("minecraft:air"),
+            sounds: sunrise_items::blocks::Sounds {
+                volume: 1.0,
+                pitch: 1.0,
+                break_sound: text(""),
+                step: text(""),
+                place: text(""),
+                hit: text(""),
+                fall: text(""),
+            },
+            fluid: Fluid::None,
+            fluid_level: 0,
+            fluid_falling: false,
+            waterlogged: false,
+            random_offset: false,
+            offset_limits: None,
+            outline_offset: false,
+            legacy_solid: false,
+            sturdy_full: 0,
+            classes: std::sync::Arc::from([text("AirBlock"), text("Block")]),
+            outline: std::sync::Arc::from([]),
+            outline_edges: std::sync::Arc::from([]),
+            map_color: 0,
+        };
+        let air_id = registry.default_state("minecraft:air").unwrap();
+        let facts = BlockFacts {
+            states: vec![air],
+            air: air_id,
+            woods: Default::default(),
+            sign_texts: Default::default(),
+        };
+        let world = World::new(facts.air, 1);
+        (world, facts, registry)
+    }
+
+    #[test]
+    fn environment_tick_records_on_fire_and_pre_killed_damage_types() {
+        let mut stack = ItemStack::new("minecraft:bundle", 1);
+        stack.data_mut().bundle_contents = vec![ItemStack::new("minecraft:diamond", 2)];
+        let (world, facts, registry) = air_world_and_facts();
+        let can_hurt = |_: &ItemStack, _: &str| true;
+
+        let mut burning = test_item_entity(1, 20, stack.clone());
+        let result = burning.environment_tick(&world, &facts, &registry, &can_hurt);
+        assert!(!result.alive);
+        assert_eq!(result.destroyed_by, Some("minecraft:on_fire"));
+        assert_eq!(result.spilled.len(), 1);
+        assert_eq!(&*result.spilled[0].item, "minecraft:diamond");
+
+        let mut pre_killed = test_item_entity(0, 0, stack);
+        let result = pre_killed.environment_tick(&world, &facts, &registry, &can_hurt);
+        assert!(!result.alive);
+        assert_eq!(result.destroyed_by, Some("minecraft:generic"));
+        assert_eq!(result.spilled.len(), 1);
+        assert_eq!(result.spilled[0].count, 2);
+    }
+
+    #[test]
+    fn environment_tick_deferring_spill_preserves_original_bundle_contents_for_hook() {
+        let mut stack = ItemStack::new("minecraft:bundle", 1);
+        stack.data_mut().bundle_contents = vec![ItemStack::new("minecraft:diamond", 3)];
+        let (mut world, facts, registry) = air_world_and_facts();
+        let can_hurt = |_: &ItemStack, _: &str| true;
+
+        let mut burning = test_item_entity(1, 20, stack);
+        let result = burning.environment_tick_with_hook_deferring_spill(
+            &mut world,
+            &facts,
+            &registry,
+            &can_hurt,
+            |_, _| false,
+        );
+        assert!(!result.alive);
+        assert_eq!(result.destroyed_by, Some("minecraft:on_fire"));
+        assert!(result.spilled.is_empty());
+        // Original stack contents stay intact until `item_destroyed` finishes.
+        let intact = &burning.stack.data().unwrap().bundle_contents;
+        assert_eq!(intact.len(), 1);
+        assert_eq!(&*intact[0].item, "minecraft:diamond");
+        assert_eq!(intact[0].count, 3);
+
+        let peeked = burning.peek_destroyed_contents();
+        assert_eq!(peeked.len(), 1);
+        assert_eq!(peeked[0].count, 3);
+        assert_eq!(burning.stack.data().unwrap().bundle_contents.len(), 1);
+
+        let spilled = burning.spill_destroyed_contents();
+        assert_eq!(spilled.len(), 1);
+        assert_eq!(spilled[0].count, 3);
+        assert!(
+            burning
+                .stack
+                .data()
+                .is_none_or(|d| d.bundle_contents.is_empty())
         );
     }
 }
@@ -3031,6 +3249,7 @@ mod merge_tests {
     fn item(id: &str, count: u32, x: f64, age: i32) -> ItemEntity {
         let at = Vec3::new(x, 64.0, 0.5);
         ItemEntity {
+            size_answer: None,
             random: sunrise_core::random::LegacyRandom::new(0),
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
@@ -3355,6 +3574,7 @@ mod world_border_tests {
                 None,
             );
             let mut orb = ExperienceOrb {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 fall_distance: 0.0,
                 rotation: [0.0, 0.0],
@@ -3563,6 +3783,7 @@ mod honey_slide_tests {
     pub(super) fn falling_item(x: f64, y: f64, z: f64, vx: f64, vy: f64, vz: f64) -> ItemEntity {
         let at = Vec3::new(x, y, z);
         ItemEntity {
+            size_answer: None,
             random: sunrise_core::random::LegacyRandom::new(0),
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
@@ -3666,6 +3887,7 @@ mod slime_bounce_tests {
     fn grounded_item() -> ItemEntity {
         let at = Vec3::new(0.5, 2.0, 0.5);
         ItemEntity {
+            size_answer: None,
             random: sunrise_core::random::LegacyRandom::new(0),
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
@@ -4577,6 +4799,7 @@ mod item_destroyed_tests {
             .map(|(id, count)| ItemStack::new(id, *count))
             .collect();
         ItemEntity {
+            size_answer: None,
             random: sunrise_core::random::LegacyRandom::new(0),
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
@@ -4728,6 +4951,7 @@ mod orb_underwater_tests {
             .iter()
             .map(|(v, _)| {
                 let mut orb = ExperienceOrb {
+                    size_answer: None,
                     attachment_lifetime: Default::default(),
                     fall_distance: 0.0,
                     rotation: [0.0, 0.0],
@@ -4766,6 +4990,7 @@ mod render_light_tests {
 
     fn orb(y: f64) -> ExperienceOrb {
         ExperienceOrb {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
             rotation: [0.0, 0.0],
@@ -4844,6 +5069,7 @@ mod dropped_item_light_tests {
 
     fn item(previous_y: f64, y: f64) -> ItemEntity {
         ItemEntity {
+            size_answer: None,
             random: sunrise_core::random::LegacyRandom::new(0),
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
@@ -4982,6 +5208,7 @@ mod orb_lava_tests {
 
     fn sample_orb(at: Vec3, health: i32) -> ExperienceOrb {
         ExperienceOrb {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
             rotation: [0.0, 0.0],

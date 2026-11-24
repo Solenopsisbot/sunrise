@@ -439,7 +439,7 @@ pub fn migrate_stats(text: &str) -> Option<Json> {
     use super::{
         CURRENT, Ty,
         files::{AdvancementJson, json_to_tag},
-        tables, update,
+        try_update,
     };
 
     let mut parsed = parse_strict(&text.encode_utf16().collect::<Vec<_>>())?;
@@ -487,14 +487,10 @@ pub fn migrate_stats(text: &str) -> Option<Json> {
             }
         }
     }
-    tables::standalone(|| {
-        let context = AdvancementJson::Other;
-        let mut tag = json_to_tag(&parsed, context);
-        update(Ty::Stats, &mut tag, from, CURRENT);
-        // The counts were normalized to numbers and nulls above: no boolean marker to read back.
-        from_nbt(&tag)
-    })
-    .ok()
+    let mut tag = json_to_tag(&parsed, AdvancementJson::Other);
+    try_update(Ty::Stats, &mut tag, from, CURRENT).ok()?;
+    // The counts were normalized to numbers and nulls above: no boolean marker to read back.
+    Some(from_nbt(&tag))
 }
 
 /// `GsonHelper.fromJson`: read one value without requiring the end of the document.

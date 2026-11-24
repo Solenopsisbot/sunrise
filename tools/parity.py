@@ -244,7 +244,8 @@ def dep_info(binary):
 
 
 def artifact_path(kind, name, profile):
-    directory = "debug" if profile == "dev" else profile
+    # Cargo's built-in test and bench profiles build into dev's and release's folders.
+    directory = {"dev": "debug", "test": "debug", "bench": "release"}.get(profile, profile)
     return TARGET / directory / ("examples" if kind == "example" else "") / name
 
 

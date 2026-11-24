@@ -160,7 +160,7 @@ pub(super) type MergedDataMaps = LoadedMaps<Value>;
 
 #[derive(Default)]
 pub(crate) struct DataMaps {
-    pub(super) biome_keys: mod_api::__private::BiomeKeys,
+    pub(super) biome_keys: std::sync::Arc<mod_api::__private::BiomeKeys>,
     maps: BTreeMap<String, HashMap<String, Vec<(String, Tag)>>>,
     pub(super) mob_maps: std::sync::Arc<sunrise_client::neoforge_mob_maps::NeoForgeMobMaps>,
 }
@@ -248,7 +248,7 @@ fn load_json_maps(
 
 impl DataMaps {
     pub(crate) fn with_biome_keys(mut self, keys: mod_api::__private::BiomeKeys) -> Self {
-        self.biome_keys = keys;
+        self.biome_keys = std::sync::Arc::new(keys);
         self
     }
 

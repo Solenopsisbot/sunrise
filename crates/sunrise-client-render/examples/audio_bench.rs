@@ -171,6 +171,7 @@ fn main() {
             angry: i % 2 == 0,
             silent: false,
             attack_scale: 0.5,
+            guardian_has_target: false,
             sniffer_digging: false,
         });
     }

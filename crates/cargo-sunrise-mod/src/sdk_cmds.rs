@@ -629,7 +629,19 @@ pub(crate) fn pin_report(entry: ChildEntry, root: &Path, to: &str) -> Result<(),
         return Ok(());
     }
     let old = fetch_pinned(root, &native.sunrise)?;
-    let old_surface = surface_of(&old)?;
+    // Moving off a build whose surface schema this tool does not read is how such a mod gets
+    // back to a build it does: there is nothing to compare, and `check` judges the new build.
+    let old_surface = match uses_table::read_surface(&old)? {
+        Ok(surface) => surface,
+        Err(e @ mod_surface::ReadError::Schema(_)) => {
+            println!(
+                "{}: {e}, so what the move changes can't be compared.",
+                old.name
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(format!("{}: {e}", old.surface.display())),
+    };
     let uses = match uses_table::scan(entry, root, &parsed, &old_surface)? {
         Scanned::Uses(uses) => uses,
         Scanned::Exact(_) => {

@@ -6,7 +6,6 @@ writing witness.json and meta.json into .local/witness/<version>/crosshair_pick/
 each sunrise-client crosshair parity test in its own fresh process against it via
 SUNRISE_CROSSHAIR_PICK_WITNESS."""
 import argparse
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -80,23 +79,6 @@ def run_logged(command, build, name, cwd=lab.ROOT, env=None):
     return path
 
 
-def build_test_binary(build, package, target_name, env):
-    compiled = run_logged(
-        ['cargo', 'test', '--locked', '-p', package, '--lib', '--no-run', '--message-format=json'],
-        build, f'compile-{package}', env=env,
-    )
-    binaries = []
-    for line in compiled.read_text(encoding='utf-8').splitlines():
-        if not line.startswith('{'):
-            continue
-        row = json.loads(line)
-        if (row.get('reason') == 'compiler-artifact' and row.get('executable')
-                and row.get('target', {}).get('name') == target_name and row.get('profile', {}).get('test')):
-            binaries.append(Path(row['executable']))
-    assert len(binaries) == 1, f'expected one {target_name} test binary, found {binaries}'
-    return binaries[0]
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--resources', type=Path, default=Path(os.environ.get('SUNRISE_TEST_RESOURCES', lab.RESOURCES)))
@@ -116,14 +98,7 @@ def main():
     if args.record_only:
         print(f'wrote {witness} ({witness.stat().st_size} bytes)')
         return
-    with tempfile.TemporaryDirectory(prefix='sunrise-crosshair-pick-build-') as build_tmp:
-        build_scratch = Path(build_tmp)
-        build_homes = {
-            k: build_scratch / k
-            for k in ('SUNRISE_HOME', 'SUNRISE_LAUNCHER_HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME')
-        }
-        build_env = lab.game_env(os.environ, **build_homes, RUST_MIN_STACK='16777216')
-        binary = build_test_binary(build, 'sunrise-client', 'sunrise_client', build_env)
+    binary = lab.parity_fixtures()
     for index, test in enumerate(TESTS):
         with tempfile.TemporaryDirectory(prefix=f'sunrise-crosshair-pick-{index}-') as tmp:
             scratch = Path(tmp)

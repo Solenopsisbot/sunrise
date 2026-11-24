@@ -25,7 +25,7 @@ ClientPacketListener.handleDisguisedChat	port	crates/sunrise-client/src/game/net
 ClientPacketListener.handleDeleteChat	port	crates/sunrise-client/src/game/network/remote/chat.rs::Game::handle_delete_chat
 ClientPacketListener.handleAnimate	port	crates/sunrise-client/src/game/network/remote/interaction_actions.rs::Game::remote_animate	action 0 stops sleeping, 1 and 2 attach crit and enchanted hit emitters to the tracked entity
 ClientPacketListener.handleHurtAnimation	port	crates/sunrise-client/src/game/network/remote/packets_object.rs::Game::apply_hurt_animation_packet	HurtAnimation arm: own player's hurt tilt, or a mob's hurt time
-ClientPacketListener.handleSetSpawn	port	crates/sunrise-client/src/game/network/remote/packets_world.rs::Game::apply_set_default_spawn_position_packet	SetDefaultSpawnPosition arm; gap: minor: only an overworld spawn is kept, other dimensions are dropped
+ClientPacketListener.handleSetSpawn	port	crates/sunrise-client/src/game/network/remote/packets_world.rs::Game::apply_set_default_spawn_position_packet	stores the border-adjusted spawn position and packet dimension
 ClientPacketListener.handleAddTransientBlockPacket	port	crates/sunrise-client/src/game/blocks/transient_blocks.rs::Game::add_transient_block	the block is queued, shown for its time to live and dropped once its section is drawn again
 ClientPacketListener.findTotem	port	crates/sunrise-client/src/game/items/totem.rs::Game::find_totem	the first hand's item with death_protection, else a new totem, then LocalPlayer.displayItemActivation
 ClientPacketListener.handleSetExperience	port	crates/sunrise-client/src/game/network/remote/packets_player.rs::Game::apply_set_experience_packet	SetExperience arm
@@ -39,8 +39,8 @@ ClientPacketListener.handleBlockEntityData	port	crates/sunrise-client/src/game/n
 ClientPacketListener.handleContainerSetData	port	crates/sunrise-client/src/game/network/remote/packets_player.rs::Game::apply_container_set_data_packet	ContainerSetData arms (lectern, furnace, crafter, brewing); station containers go to remote_stations.rs::Game::remote_station_data
 ClientPacketListener.handleContainerClose	port	crates/sunrise-client/src/game/network/remote/mod.rs::Game::apply_packet	ContainerClose arm: restores the inventory menu and closes the active screen without sending a close
 ClientPacketListener.handleBlockEvent	port	crates/sunrise-client/src/game/network/remote/packets_world.rs::Game::apply_block_event_packet	BlockEvent arm: client block event, then the block entity event
-ClientPacketListener.handleGameEvent	port	crates/sunrise-client/src/game/network/remote/packets_world.rs::Game::apply_game_event_packet	GameEvent arm (weather, mode, credits, respawn, arrow hit, sting, limited crafting, chunks load start); gap: minor: demo mode (5) is not shown
-ClientPacketListener.openDemoIntroScreen	skip:other		demo mode only (GameEvent 5); Sunrise has no demo mode
+ClientPacketListener.handleGameEvent	port	crates/sunrise-client/src/game/network/remote/packets_world.rs::Game::apply_game_event_packet	GameEvent arm (weather, mode, credits, demo popup and hints, respawn, arrow hit, sting, limited crafting, chunks load start)
+ClientPacketListener.openDemoIntroScreen	port	crates/sunrise-client/src/game/interface/demo_intro.rs::Game::apply_demo_event	GameEvent demo intro creates a parentless popup with the current key bindings
 ClientPacketListener.startWaitingForNewLevel	inline	crates/sunrise-client/src/game/network/remote/session.rs::Game::enter_remote_dimension	the tracker starts and the LevelLoadingScreen draws until the player's section is shown
 ClientPacketListener.handleMapItemData	port	crates/sunrise-client/src/game/blocks/maps/mod.rs::Game::remote_map_item_data
 ClientPacketListener.handleUpdateAdvancementsPacket	port	crates/sunrise-client/src/game/interface/advancements/mod.rs::Game::remote_advancements	UpdateAdvancements arm passes the added icons

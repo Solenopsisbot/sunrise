@@ -5,14 +5,20 @@ In `register_commands`, push each server usage as
 Use `Command::op(usage, level)` for a usage that requires operator permission.
 The executor receives a borrowed `CommandInvocation`, not a raw line to split
 or a command path to route. Read named values through `command.argument(name)`
-and `CommandArgumentValue`. An integer is already an `i32`; a player argument is
+and `CommandArgumentValue`. An integer is already an `i32` and a `long` an `i64`, inside the
+bounds of `integer(min,max)` or `long(min,max)` (`<amount:integer(0,1000)>`, `<total:long(0,)>`:
+Brigadier's `IntegerArgumentType.integer(min, max)` and `LongArgumentType.longArg(min, max)`,
+sent to clients with their bounds and refused out of range with `argument.integer.low` / `big`
+or `argument.long.low` / `big` before the executor runs); a player argument is
 a live `PlayerRef`, not selector text.
 
 Only the executor whose registration owns the parsed node runs, with its mod's
 identity. If the owner is disabled after registration, the command is refused.
 Return `Ok(n)` for success with integer result `n` (zero is also success), or
 `Err(message.into())` with a `Text` for failure. Failure text defaults to red and does
-not depend on `sendCommandFeedback`. It is not shown for forked commands, silent sources,
+not depend on `sendCommandFeedback`. For Java's `source.sendFailure(text); return 0;`, call
+`host.commands().failure(text)` and return `Ok(0)`: the same red line, but the command succeeds
+with result 0, as in vanilla (`execute store result` reads 0, `execute store success` reads 1). It is not shown for forked commands, silent sources,
 or sources that do not accept failures. "Unknown or incomplete command" remains a parse error for input
 that matches no usage. Neither failure nor a disabled owner tries another executor.
 `execute store result` sees `n` on success; `execute store success` sees one.
@@ -45,7 +51,18 @@ for that node. A usage with optional arguments also executes where those
 arguments begin, so `status` and `status [player:player]` overlap at `status`. By
 contrast, a public `status detail` allows traversal through `status`, but does not
 make an operator-only `status` executable. Use distinct paths to keep distinct
-executors. A root vanilla already owns is not registered.
+executors.
+
+A usage whose first word is a vanilla command's merges into that command, as NeoForge's
+`RegisterCommandsEvent` registers into vanilla's dispatcher (Brigadier's `CommandNode.addChild`):
+`Command::new("time season <name:word>")` adds `season` beside vanilla's `time set`, `add` and
+`query`, which stay. Vanilla's nodes keep their permission, so the words a mod adds under `/time`
+are reached only by who may use `/time`, and a world without cheats refuses them as it refuses
+`/time`. A usage that executes at a vanilla node, such as `Command::new("seed")`, replaces
+vanilla's executor there, as the later registration does in Brigadier. A mod argument cannot share
+the place of a vanilla node of the same name, nor a mod literal a vanilla argument's: such a usage
+is left out, with the reason in the log. Sunrise's own `/modprofile` and `/pregen` are never
+merged into.
 
 Literal words use lowercase letters, digits, `_` and `-`. Only the first word may
 additionally begin with one `/`: register `/set <x:word>` and type `//set stone` in chat.
@@ -125,7 +142,7 @@ flags), criterion names and requirements, from the set the last `/reload` built.
 
 ## Run a command as a player
 
-`player.entity().run_command_with_output(host, line, level)` runs a command as that
+`player.entity().run_command_with_output(host, line, level, suppress_output)` runs a command as that
 player, from their position and rotation, with `@s` selecting them. Pass
 `PermissionLevel::from_level(i32::from(player.permission_level(host)?))` to use
 the player's own permission level. The supplied level is taken as given, so a mod
@@ -133,11 +150,14 @@ can also choose a different level explicitly. A leading slash is allowed.
 
 The returned `CommandResult` has `success` (the same bool as `run_command`) and
 `feedback`: the success and failure lines received by the source, in order, as
-plain text. The player still receives those lines in chat, and operator
-notifications follow the normal rules. Feedback silenced by the source or game
-rules is absent. Other entities use a silent source and return no lines; a stale,
-removed or unavailable entity returns `success: false` and no lines. Teleports to
-another level still happen at the next tick's start. `run_command(host, line, level)` keeps its bool return.
+plain text. Pass `false` for normal player chat and operator notifications, or
+`true` to suppress both and return an empty `feedback` list. Like vanilla's
+`withSuppressedOutput`, this silences command feedback, not the command's effects:
+`/say` still broadcasts its message. Other entities already use a silent source.
+A stale, removed or unavailable entity returns `success: false` and no lines.
+Teleports to another level still happen at the next tick's start.
+`run_command(host, line, level, suppress_output)` takes the same option and
+returns only whether the command succeeded.
 
 ## Entity and player selectors
 

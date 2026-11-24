@@ -145,7 +145,7 @@ fn a_server_replacement_of_a_known_biome_keeps_its_id_and_changes_its_data() {
     let _scratch = Scratch(root.clone());
     let base = write_base(&root);
     let replaced: Value = serde_json::from_str(
-        r##"{"effects":{"water_color":"#112233"},"attributes":{"minecraft:visual/ambient_particles":{"argument":[{"particle":{"type":"minecraft:ash"},"probability":0.25}]}}}"##,
+        r##"{"effects":{"water_color":"#112233"},"attributes":{"minecraft:visual/ambient_particles":{"modifier":"override","argument":[{"particle":{"type":"minecraft:ash"},"probability":0.25}]}}}"##,
     )
     .unwrap();
     let received = vec![
@@ -156,9 +156,24 @@ fn a_server_replacement_of_a_known_biome_keeps_its_id_and_changes_its_data() {
     assert_eq!(client.id("minecraft:plains"), base.id("minecraft:plains"));
     let plains = client.get(client.id("minecraft:plains"));
     assert_eq!(plains.water, 0x112233);
-    assert_eq!(plains.ambient_particles.len(), 1);
-    assert_eq!(plains.ambient_particles[0].0.name(), "ash");
-    assert_eq!(plains.ambient_particles[0].1, 0.25);
+    let ambient_attr = sunrise_world::environment_attributes::attribute(
+        sunrise_world::environment_attributes::AMBIENT_PARTICLES,
+    )
+    .unwrap();
+    let Some(sunrise_world::environment_attributes::Entry::Override(
+        sunrise_world::environment_attributes::Value::AmbientParticles(particles),
+    )) = plains.attributes.get(ambient_attr)
+    else {
+        panic!("replaced plains must carry visual/ambient_particles");
+    };
+    assert_eq!(particles.len(), 1);
+    assert_eq!(
+        *particles[0].particle,
+        sunrise_world::particle_options::ParticleOptions::Simple(
+            sunrise_world::particle_type::ParticleType::Ash,
+        )
+    );
+    assert_eq!(particles[0].probability, 0.25);
     // The tables that read the biome's file see the replacement; river is untouched.
     assert!(client.pack_file("minecraft:plains").is_some());
     assert!(client.pack_file("minecraft:river").is_none());

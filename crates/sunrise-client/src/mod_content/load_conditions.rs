@@ -277,6 +277,12 @@ pub fn build_with_conditions(
         }
     }
     conditions.check_errors()?;
+    let builtin_sounds = biomes::load_sound_events(base);
+    let registered_sound = |name: &str| {
+        builtin_sounds
+            .as_ref()
+            .is_some_and(|b| crate::music::registered_sound(b, name))
+    };
     let mut modifiers = Vec::new();
     let mut structure_modifiers = Vec::new();
     for (file, owner, text, structure) in accepted {
@@ -288,7 +294,13 @@ pub fn build_with_conditions(
                 &mut warnings,
             )?);
         } else {
-            modifiers.extend(biomes::Modifier::read(owner, &file, &text, &mut warnings)?);
+            modifiers.extend(biomes::Modifier::read(
+                owner,
+                &file,
+                &text,
+                &registered_sound,
+                &mut warnings,
+            )?);
         }
     }
     // A tag naming an id nobody registers fails as a whole in vanilla, and

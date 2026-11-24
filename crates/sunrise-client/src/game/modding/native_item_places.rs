@@ -3589,6 +3589,13 @@ pub(super) mod tests {
     #[test]
     #[ignore = "daily"]
     fn crafted_by_replaces_the_map_in_a_handler_backed_slot() {
+        if crate::game::native_entity_refs::tests::run_fresh_cases(
+            "game::native_item_places::tests::crafted_by_replaces_the_map_in_a_handler_backed_slot",
+            "SUNRISE_CRAFTED_BY_HANDLER_CASE",
+            &["replace"],
+        ) {
+            return;
+        }
         with_crafted_by_handler_map(true, None, |game, place, source, original| {
             assert_eq!(
                 game.storage_transaction(|game, tx| place.on_crafted_by(game, tx, 3)),
@@ -3626,6 +3633,13 @@ pub(super) mod tests {
     #[test]
     #[ignore = "daily"]
     fn crafted_by_refused_handler_write_drops_the_map_and_stat() {
+        if crate::game::native_entity_refs::tests::run_fresh_cases(
+            "game::native_item_places::tests::crafted_by_refused_handler_write_drops_the_map_and_stat",
+            "SUNRISE_CRAFTED_BY_HANDLER_CASE",
+            &["refuse"],
+        ) {
+            return;
+        }
         with_crafted_by_handler_map(false, None, |game, place, source, original| {
             // Catch the refusal and commit the caller's transaction anyway.
             assert_eq!(
@@ -3652,13 +3666,15 @@ pub(super) mod tests {
     #[test]
     #[ignore = "daily"]
     fn crafted_by_packet_refusal_returns_commit_refused_and_drops_map_and_stat() {
+        use crate::game::maps::MapData;
         use std::sync::{atomic::AtomicUsize, mpsc};
         use sunrise_client::lan::{PlayerSender, conn::transaction_packets::Scope};
 
+        const CASE: &str = "SUNRISE_CRAFTED_BY_PACKET_REFUSAL_CASE";
         if crate::game::native_entity_refs::tests::run_fresh_cases(
             "game::native_item_places::tests::crafted_by_packet_refusal_returns_commit_refused_and_drops_map_and_stat",
-            "SUNRISE_CRAFTED_BY_PACKET_REFUSAL_CASE",
-            &["run"],
+            CASE,
+            &["exchange", "settle"],
         ) {
             return;
         }
@@ -3666,6 +3682,52 @@ pub(super) mod tests {
         let (send, receive) = mpsc::channel();
         // A real bounded LAN sender with no room left to reserve another packet.
         let sender = PlayerSender::new(send, Arc::new(AtomicUsize::new(usize::MAX)));
+        if std::env::var(CASE).unwrap() == "settle" {
+            super::super::native_guest_turn_tests::with_guests(|game| {
+                let source = game.new_map_id(MapData::fresh(0.0, 0.0, 1, "minecraft:overworld"));
+                let mut original = ItemStack::new("minecraft:filled_map", 1);
+                original.data_mut().map_id = Some(source);
+                original.data_mut().map_post_processing = Some(1);
+                game.as_guest(12, |_| {}).unwrap(); // Initialize the parked guest's body.
+                game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                    guest.carried = Some(original.clone());
+                    guest.sender = sender;
+                    guest.motion.as_mut().unwrap().health.indicated_dir = Some(90.0);
+                });
+                let menu = game
+                    .player_container_menu(game.player(12).unwrap())
+                    .unwrap();
+                let _packets = Scope::begin();
+                let outer = game.storage_transaction_settled(|game, tx| {
+                    // No ItemPlace::exchange: the cursor is written in the guest turn, then that
+                    // turn sends its pending hurt animation on return. The write succeeds and
+                    // packet refusal is first observed when the replacement frame settles.
+                    assert_eq!(
+                        menu.cursor().on_crafted_by(game, tx, 3),
+                        Err(CraftedByError::CommitRefused)
+                    );
+                    assert!(Scope::refused());
+                    assert_eq!(game.pending_transaction_item_stats(), 0);
+                    assert_eq!(game.menu_carried(menu), Some(Some(original.clone())));
+                    assert!(game.map(source + 1).is_none());
+                    assert_eq!(game.peek_map_id(), source + 1);
+                    Ok::<_, ()>(())
+                });
+                assert_eq!(outer, Err(TransactionError::CommitRefused));
+                assert_eq!(game.menu_carried(menu), Some(Some(original)));
+                assert!(game.map(source + 1).is_none());
+                assert_eq!(game.peek_map_id(), source + 1);
+                assert_eq!(
+                    game.lan.as_ref().unwrap().play[&12]
+                        .stats
+                        .get("crafted", "minecraft:filled_map"),
+                    0
+                );
+                assert!(receive.try_recv().is_err());
+            });
+            return;
+        }
+
         with_crafted_by_handler_map(true, Some(sender), |game, place, source, original| {
             let _packets = Scope::begin();
             let outer = game.storage_transaction_settled(|game, tx| {

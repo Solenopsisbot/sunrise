@@ -22,7 +22,11 @@ impl ItemStack {
     }
 }
 #[derive(Debug)]
-enum StackWriteError {}
+enum StackWriteError {
+    /// The engine's `CountExceeded { maximum }`, for a fixture validator to refuse an
+    /// overstacked edit with (the fixture never reads the maximum).
+    CountExceeded,
+}
 mod content {
     pub(super) mod crash {
         pub fn current_native_mod() -> Option<&'static str> {

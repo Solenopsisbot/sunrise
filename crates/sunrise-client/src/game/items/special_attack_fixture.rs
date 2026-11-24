@@ -186,12 +186,16 @@ impl Game<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::game) mod tests {
     /// Invoke the actual attack methods in an empty scratch Game, without
     /// starting a server, opening a world or entering the game loop.
     #[test]
     #[ignore = "needs prepared resources and SUNRISE_SPECIAL_ATTACK_CASES=INPUT,OUTPUT"]
     fn special_attack_cases_without_world_startup() {
+        run_special_attack_cases_without_world_startup();
+    }
+
+    pub(in crate::game) fn run_special_attack_cases_without_world_startup() {
         let spec = std::env::var("SUNRISE_SPECIAL_ATTACK_CASES").expect("case paths required");
         let mut resources = None;
         let mut game = crate::game::game_tests::tests::server_game(&mut resources);

@@ -58,6 +58,7 @@ pub fn main() -> sunrise_client::Result<()> {
                 .ok_or("missing cauldron")?,
         )?;
         let mut item = ItemEntity {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
             random: sunrise_core::random::LegacyRandom::new(0),

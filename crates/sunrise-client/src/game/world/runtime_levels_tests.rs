@@ -556,6 +556,73 @@ fn a_ticket_a_chunk_unload_listener_adds_keeps_an_idle_custom_level_open() {
     });
 }
 
+/// A chunk whose generator panics (a mod's `build_terrain`) is `Failed` for `load_chunk`, which
+/// returns instead of waiting forever, and again at once when asked again: the engine contains
+/// the panic where vanilla would crash. The level stays open and generates elsewhere.
+#[test]
+#[ignore = "daily"]
+fn load_chunk_fails_where_a_mods_generator_panics() {
+    use super::native_entity_refs::tests::run_fresh_cases;
+    use mod_api::ChunkLoadError;
+    use sunrise_world::worldgen::mod_generators::{
+        ChunkAccess, ModChunkGenerator, ModChunkGenerators, install_mod_chunk_generators,
+    };
+
+    // The mods' chunk generators are a process-wide table: a child process of its own.
+    if run_fresh_cases(
+        "game::runtime_levels_tests::load_chunk_fails_where_a_mods_generator_panics",
+        "SUNRISE_RUNTIME_LEVEL_FAILED_CHUNK_CHILD",
+        &["failed_chunk"],
+    ) {
+        return;
+    }
+    struct Breaks;
+    impl ModChunkGenerator for Breaks {
+        fn build_terrain(&self, chunk: &mut dyn ChunkAccess) {
+            let pos = chunk.pos();
+            assert!((pos.x, pos.z) != (0, 0), "the generator breaks at [0, 0]");
+        }
+    }
+    let breaks: Arc<dyn ModChunkGenerator> = Arc::new(Breaks);
+    install_mod_chunk_generators(ModChunkGenerators::from([(
+        "broken:terrain".to_owned(),
+        breaks,
+    )]))
+    .map_err(|_| "installed twice")
+    .unwrap();
+    let level = RuntimeLevel::new(
+        "minecraft:overworld",
+        RuntimeGenerator::Mod("broken:terrain".into()),
+        1,
+    );
+    with_opener("broken", "broken:a", level, |game, _| {
+        tick_post(game);
+        game.apply_runtime_levels();
+        let level = game.level("broken:a").unwrap();
+        let host: &mut dyn ServerHost = game;
+        assert_eq!(level.load_chunk(host, [0, 0]), Err(ChunkLoadError::Failed));
+        assert_eq!(
+            level.load_chunk(host, [0, 0]),
+            Err(ChunkLoadError::Failed),
+            "at once when asked again"
+        );
+        assert_eq!(
+            level.load_chunk(host, [1, 0]),
+            Err(ChunkLoadError::Failed),
+            "a neighbour whose wait needs the failed column generated"
+        );
+        assert_eq!(
+            level.load_chunk(host, [20, 20]),
+            Ok(()),
+            "the level generates elsewhere"
+        );
+        assert!(
+            game.native_level_world(level).is_some(),
+            "the level stays open"
+        );
+    });
+}
+
 /// A chunk a mod loads (`LevelRef::load_chunk`, #4550) in an idle custom level in the tick its
 /// close is due keeps the level open, not ticking, with the chunk, while the `UNKNOWN` ticket
 /// lives; once the ticket expires, the idle level closes as before.
@@ -587,7 +654,7 @@ fn a_live_loading_ticket_keeps_an_idle_custom_level_open_until_it_expires() {
         assert_eq!(game.levels.parked[&dim].idle, IDLE_TICKS - 1);
         assert!(!game.chunk_loaded(chunk));
         let host: &mut dyn ServerHost = game;
-        assert!(level.load_chunk(host, [5, 5]));
+        assert_eq!(level.load_chunk(host, [5, 5]), Ok(()));
         // The close falls due in this tick, and the ticket outlives it.
         game.tick_server(false).unwrap();
         assert!(

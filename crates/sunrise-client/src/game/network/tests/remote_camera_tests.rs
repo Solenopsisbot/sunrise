@@ -34,6 +34,7 @@ fn frame(id: u32, pos: [i32; 3], facing: u8) -> ItemFrame {
 fn tnt(id: u32) -> PrimedTnt {
     let at = Vec3::new(4.5, 64.0, 7.5);
     PrimedTnt {
+        size_answer: None,
         rotation: [135.0, 0.0],
         join: Default::default(),
         attachment_lifetime: Default::default(),
@@ -168,6 +169,10 @@ fn a_frame_camera_turns_with_its_facing() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn a_spectated_sleeping_villager_shows_the_bed_view() {
+    run_a_spectated_sleeping_villager_shows_the_bed_view();
+}
+
+pub(in crate::game) fn run_a_spectated_sleeping_villager_shows_the_bed_view() {
     use super::mob_camera_entity;
     use sunrise_client::camera::{Camera, CameraType};
 

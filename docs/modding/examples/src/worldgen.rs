@@ -116,6 +116,7 @@ pub mod structures {
             ];
             Some(FoundStructure {
                 position: min,
+                pool_pieces: Vec::new(),
                 pieces: vec![Arc::new(Pillar {
                     min,
                     max: [min[0], min[1] + 4, min[2]],

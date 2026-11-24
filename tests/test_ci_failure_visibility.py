@@ -190,14 +190,41 @@ class Visibility(unittest.TestCase):
         self.assertNotIn("clippy", fmt["run"])
         self.assertIn("clippy", native["run"])
         self.assertNotIn("continue-on-error", native)
-        for name in ("Lint native targets", "Lint the server build without sound or controllers"):
-            step = next(s for s in steps if s.get("name") == name)
-            self.assertLess(steps.index(fmt), steps.index(step))
-            self.assertLess(steps.index(step), steps.index(final))
-            self.assertNotIn("formatting", step.get("if", ""))
+        self.assertLess(steps.index(fmt), steps.index(native))
+        self.assertLess(steps.index(native), steps.index(final))
+        self.assertNotIn("formatting", native.get("if", ""))
         self.assertIn("failure()", final["if"])
         self.assertIn("!cancelled()", final["if"])
-        for name in ("native-lint", "server-lint"):
-            step = next(s for s in steps if s.get("id") == name)
-            self.assertIn("!cancelled()", step["if"])
-            self.assertNotIn("success()", step["if"])
+        self.assertIn("!cancelled()", native["if"])
+        self.assertNotIn("success()", native["if"])
+
+    def test_server_lint_failure_fails_the_step(self):
+        # A failing server lint must propagate non-zero exit and print its output unfolded.
+        steps = yaml.safe_load((ROOT / '.github/workflows/dyna-ci.yml').read_text())["jobs"]["lint"]["steps"]
+        native = next(s for s in steps if s.get("id") == "native-lint")
+        script = native["run"]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            runner_temp = tmp_path / "runner_temp"
+            runner_temp.mkdir()
+            fake_ci = tmp_path / "tools" / "ci"
+            fake_ci.mkdir(parents=True)
+            # Stub check_warnings.py: fail if --target-dir is present (server lint), succeed otherwise
+            (fake_ci / "check_warnings.py").write_text(
+                "import sys\n"
+                "if '--target-dir' in sys.argv:\n"
+                "    print('Simulated server clippy failure')\n"
+                "    sys.exit(1)\n"
+                "sys.exit(0)\n"
+            )
+            env = {
+                **os.environ,
+                "RUNNER_TEMP": str(runner_temp),
+                "GITHUB_OUTPUT": str(tmp_path / "github_output"),
+                "JOBS": "-j4",
+            }
+            res = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("Server lint failed:", res.stdout)
+            self.assertIn("Simulated server clippy failure", res.stdout)
+            self.assertIn("workspace_lint=success", (tmp_path / "github_output").read_text())

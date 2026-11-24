@@ -7840,7 +7840,10 @@ fn structure_modifiers_and_biome_modifier_reject_out_of_range_spawns() {
         let biome = format!(
             r#"{{"type":"neoforge:add_spawns","biomes":"minecraft:plains","spawners":{spawner}}}"#
         );
-        assert!(biomes::Modifier::read("zinc", "bad.json", &biome, &mut Vec::new()).is_err());
+        assert!(
+            biomes::Modifier::read("zinc", "bad.json", &biome, &|_| false, &mut Vec::new())
+                .is_err()
+        );
     }
 }
 

@@ -14,7 +14,7 @@ pub trait EntityFlagsBackend {
     /// Returns the mob's persistent glowing tag (`Entity.hasGlowingTag`).
     fn entity_glowing(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
-    /// Returns the mob's no-gravity flag (`Entity.isNoGravity`).
+    /// Returns the mob's or dropped item's no-gravity flag (`Entity.isNoGravity`).
     fn entity_no_gravity(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
     /// Whether the entity's model is hidden (`Entity.isInvisible`): the
@@ -35,7 +35,8 @@ pub trait EntityFlagsBackendMut {
     /// Sets the mob's persistent glowing tag (`Entity.setGlowingTag`). Returns false for players and guests.
     fn entity_set_glowing(&mut self, entity: EntityRef, glowing: bool) -> bool;
     /// Side: server.
-    /// Sets the mob's no-gravity flag (`Entity.setNoGravity`). Returns false for players and guests.
+    /// Sets the mob's or dropped item's no-gravity flag (`Entity.setNoGravity`).
+    /// Returns false for players and guests.
     fn entity_set_no_gravity(&mut self, entity: EntityRef, no_gravity: bool) -> bool;
     /// Side: server.
     /// Sets the entity's shared invisibility flag (`Entity.setInvisible`). Returns false for players and guests.

@@ -1,7 +1,10 @@
 //! Block particles: the sprite and tint of a block's faces and particle material, honey slides,
 //! and the burst a destroyed block leaves (`ClientLevel.addDestroyBlockEffect`).
 use super::*;
-use sunrise_client::blocks::RenderShape;
+use sunrise_client::{
+    blocks::{MAP_COLORS, RenderShape},
+    particles::{ParticleOptions, ParticleType},
+};
 use sunrise_core::geometry::Direction;
 
 impl Game<'_> {
@@ -15,7 +18,6 @@ impl Game<'_> {
 
     /// `HoneyBlock.showParticles`: the crumb count of entity event 53 or 54.
     pub(super) fn honey_entity_particles(&mut self, at: [f64; 3], event: i8) {
-        use sunrise_client::particles::{ParticleOptions, ParticleType};
         let Some(count) = sunrise_client::landing::honey_particle_count(event) else {
             return;
         };
@@ -138,12 +140,74 @@ impl Game<'_> {
         self.particles.push(particle);
         true
     }
+    /// Resolve the three vanilla providers of `BlockParticleOption`. Render shape is
+    /// a falling-dust gate, not a terrain or marker gate.
+    pub(super) fn block_provider_options(
+        &self,
+        ty: ParticleType,
+        state: BlockStateId,
+        pos: [i32; 3],
+    ) -> Option<ParticleOptions> {
+        self.pack.assets.registry.state(state)?;
+        let facts = self.res.facts();
+        let block = facts.get(state);
+        let sprite = || {
+            // BlockStateModelSet.getParticleMaterial uses the missing model when
+            // the state has no model (e.g. air), not some other block's texture.
+            Self::block_particle_sprite(&self.pack, state).unwrap_or_else(|| "missingno".into())
+        };
+        let options = match ty {
+            ParticleType::Block | ParticleType::DustPillar | ParticleType::BlockCrumble => {
+                if facts.is_air(state)
+                    || &*block.name == "minecraft:moving_piston"
+                    || !block.spawn_terrain_particles
+                {
+                    return None;
+                }
+                ParticleOptions::block(
+                    ty,
+                    sprite(),
+                    self.terrain_particle_tint(state, pos).unwrap_or(0xFFFFFF),
+                )
+            }
+            ParticleType::FallingDust => {
+                if !facts.is_air(state) && block.render_shape == RenderShape::Invisible {
+                    return None;
+                }
+                let map_color = || MAP_COLORS[usize::from(block.map_color)];
+                let tint = match &*block.name {
+                    "minecraft:anvil" | "minecraft:chipped_anvil" | "minecraft:damaged_anvil" => {
+                        map_color()
+                    }
+                    name if name.starts_with("minecraft:")
+                        && name.ends_with("_concrete_powder") =>
+                    {
+                        map_color()
+                    }
+                    name => sunrise_client::animate_tick::fixed_falling_dust_color(name)
+                        .or_else(|| self.terrain_particle_tint(state, pos))
+                        .unwrap_or_else(map_color),
+                };
+                // FallingDustParticle uses its own sprite set, never the block sprite.
+                ParticleOptions::block(ty, String::new(), tint)
+            }
+            ParticleType::BlockMarker => ParticleOptions::block(ty, sprite(), 0xFFFFFF),
+            _ => return None,
+        };
+        Some(options.with_source(&block.name))
+    }
+
     pub(super) fn particle_sprite(
         &self,
         state: BlockStateId,
         pos: [i32; 3],
     ) -> Option<(String, u32)> {
         let sprite = Self::block_particle_sprite(&self.pack, state)?;
+        let tint = self.terrain_particle_tint(state, pos).unwrap_or(0xFFFFFF);
+        Some((sprite, tint))
+    }
+
+    fn terrain_particle_tint(&self, state: BlockStateId, pos: [i32; 3]) -> Option<u32> {
         let chunks = &self.world.chunks;
         let (cx, cz) = (pos[0] >> 4, pos[2] >> 4);
         let region: [[Option<&sunrise_client::chunk::Chunk>; 3]; 3] = std::array::from_fn(|dz| {
@@ -153,21 +217,15 @@ impl Game<'_> {
                     .map(|c| &**c)
             })
         });
-        let tint = self
-            .pack
-            .context
-            .tables
-            .terrain_particle_tint(
-                state,
-                pos,
-                &region,
-                world_biomes!(self),
-                self.streaming.biome_zoom,
-                self.streaming.biome_blend,
-                self.streaming.nether_shading,
-            )
-            .unwrap_or(0xFFFFFF);
-        Some((sprite, tint))
+        self.pack.context.tables.terrain_particle_tint(
+            state,
+            pos,
+            &region,
+            world_biomes!(self),
+            self.streaming.biome_zoom,
+            self.streaming.biome_blend,
+            self.streaming.nether_shading,
+        )
     }
     /// `BlockTransformer.TransformParticle.send`: its level event.
     pub(super) fn transform_particle(&mut self, particle: &str, pos: [i32; 3]) {

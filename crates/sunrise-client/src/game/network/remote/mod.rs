@@ -35,7 +35,7 @@ mod claimed_item_use_tests;
 #[cfg(test)]
 mod gamemode_actions_tests;
 use super::raw_backlog::Received;
-use super::remote_chunks::{ChunkDecoder, ChunkFormat, Next};
+use super::remote_chunks::{ChunkDecoder, ChunkFormat, Next, RemoteLight};
 use super::remote_vehicles::PassengerSeat;
 use super::render_tick::{mob_tracking_body, player_tracking_body};
 use super::{Dim, Game, Hit, Mining, Screen, item_use::ticks_left, level_sounds::LevelSound};
@@ -74,7 +74,7 @@ use sunrise_client::{
     tab_list::SPECTATOR,
     text::Text,
 };
-use sunrise_core::{geometry::Vec3, random::RandomSource};
+use sunrise_core::{geometry::Vec3, profile::AccountProperty, random::RandomSource};
 use sunrise_protocol::{
     entity_data::{ITEM_ENTITY_ITEM, Value},
     item::{Hashed, Stack},
@@ -87,6 +87,7 @@ use sunrise_protocol::{
     secure_chat::{self, Signature},
     text::{Language, plain},
 };
+use sunrise_server_files::profiles::ServicesKeySet;
 use {
     sunrise_core::nbt::Tag,
     sunrise_mod_runtime::attachments::{Holder, ResidentAttachments},
@@ -97,12 +98,15 @@ use {
     },
 };
 
-mod abilities;
+pub(in crate::game) mod abilities;
 mod chat;
+#[cfg(test)]
+mod chat_audit_tests;
 mod chat_received;
 mod commands;
-pub(in crate::game) use chat::{ChatTrust, Decoration};
-use chat_received::QueuedChat;
+#[cfg(test)]
+pub(in crate::game) use chat::Decoration;
+use chat_received::{QueuedChat, QueuedChatKind};
 pub(in crate::game) mod client_level_tick;
 mod effect;
 mod entity_data_schema;
@@ -238,6 +242,8 @@ pub(super) struct PendingItem {
     pub(in crate::game) join: JoinSeq,
     pub(in crate::game) position: [f64; 3],
     velocity: Vec3,
+    /// Entity.DATA_NO_GRAVITY, if it came before the stack.
+    pub(in crate::game) no_gravity: bool,
 }
 
 /// `Entity.startRiding` / `removePassenger` for a `SetPassengers` packet: the
@@ -282,15 +288,80 @@ fn mob_pos_rot(m: &Mob) -> PosRot {
     }
 }
 
-/// `Minecraft.services().profileKeySignatureValidator()`: the services' profile-key keys, which a
-/// player's chat key must be signed by. Asked for once per connection to a server, off the game
-/// thread.
+/// `Minecraft.services()` trust keys, fetched once per connection off the game thread.
 pub(super) enum ServicesKeys {
     Pending,
-    Ready(Vec<RsaPublicKey>),
-    /// `canValidateProfileKeys()` is false: none could be had.
-    Missing,
+    Ready(ServicesKeySet),
 }
+
+impl ServicesKeys {
+    /// Minecraft.services() has the keys wherever the game is played, single player's own
+    /// server included: its guests' chat keys are checked against them.
+    fn fetching() -> Arc<std::sync::Mutex<Self>> {
+        use sunrise_server_files::profiles;
+        Self::fetching_with(|| profiles::fetch_profile_key_keys(&profiles::discovery_url()))
+    }
+    /// The keys start `Pending` and arrive from `fetch` on a thread of their own, so a
+    /// listener never caches a verdict on keys it does not have yet. A thread that cannot
+    /// start leaves them pending.
+    pub(super) fn fetching_with<E: std::fmt::Display>(
+        fetch: impl FnOnce() -> std::result::Result<ServicesKeySet, E> + Send + 'static,
+    ) -> Arc<std::sync::Mutex<Self>> {
+        let keys = Arc::new(std::sync::Mutex::new(ServicesKeys::Pending));
+        let slot = keys.clone();
+        let _ = std::thread::Builder::new()
+            .name("Services keys".into())
+            .spawn(move || {
+                // The error is the line vanilla logs, after which it has no keys.
+                let keys = fetch().unwrap_or_else(|why| {
+                    log::error!("Sunrise: {why}");
+                    ServicesKeySet::default()
+                });
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = ServicesKeys::Ready(keys);
+            });
+        keys
+    }
+}
+
+/// One `PlayerInfo` property, shared by the list entry and the entities that kept it.
+struct PlayerTextures {
+    property: AccountProperty,
+    unpacked: std::sync::OnceLock<sunrise_client::skins::Textures>,
+}
+
+impl PlayerTextures {
+    fn new(property: AccountProperty) -> Self {
+        Self {
+            property,
+            unpacked: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// `SkinManager.createLookup(profile, requireSecure)`: a secure lookup shows
+    /// only textures whose signature the keys verified, so it waits for keys that
+    /// are still pending; the local player's shows its textures unverified.
+    fn unpack(
+        &self,
+        services_keys: &ServicesKeys,
+        valid_uris: &[impl AsRef<str>],
+        require_secure: bool,
+    ) -> Option<&sunrise_client::skins::Textures> {
+        use sunrise_client::skins;
+        let signature = self.property.signature.as_deref();
+        let property_keys: &[RsaPublicKey] = match services_keys {
+            // Never cache an invalid result for a signature the pending keys could verify.
+            ServicesKeys::Pending if signature.is_some() && require_secure => return None,
+            ServicesKeys::Pending => &[],
+            ServicesKeys::Ready(keys) => &keys.profile_property_keys,
+        };
+        Some(self.unpacked.get_or_init(|| {
+            let value = &self.property.value;
+            let signature = skins::property_signature(value, signature, property_keys);
+            skins::unpack(value, signature, valid_uris)
+        }))
+    }
+}
+
 /// The signed-in account's `/minecraft/profile` fetch after joining.
 enum OwnProfile {
     Idle,
@@ -587,12 +658,12 @@ pub(super) struct Remote {
     tab_game_modes: HashMap<u128, Arc<std::sync::atomic::AtomicI32>>,
     /// First resolved `PlayerInfo` game mode cell of the current `LocalPlayer` entity.
     own_player_info: std::cell::OnceCell<Arc<std::sync::atomic::AtomicI32>>,
-    /// Each listed profile's unpacked `textures` property.
-    skin_textures: HashMap<u128, sunrise_client::skins::Textures>,
+    /// Each listed profile's `textures` property, verified once the keys are ready.
+    skin_textures: HashMap<u128, Arc<PlayerTextures>>,
     /// Active skin and cape from the services profile when the server sent none.
     own_profile: OwnProfile,
-    /// The skin texture each profile's players show, once its download is ready.
-    skins: HashMap<u128, String>,
+    /// The accepted body, cape and elytra of each profile after its downloads settle.
+    skins: HashMap<u128, sunrise_client::skins::ResolvedSkin>,
     skins_revision: u64,
     published_skins: Option<(usize, u128, u64, u64)>,
     listed: std::collections::HashSet<u128>,
@@ -615,7 +686,7 @@ pub(super) struct Remote {
     /// The `textures` each player entity found in the player list first
     /// (`AbstractClientPlayer.getPlayerInfo` keeps that `PlayerInfo`): its skin
     /// outlives the entry, which NPC plugins remove a moment after spawning.
-    level_player_textures: HashMap<i32, sunrise_client::skins::Textures>,
+    level_player_textures: HashMap<i32, Arc<PlayerTextures>>,
     /// Entities with shared flag 6 (`Entity.isCurrentlyGlowing` on a client); mobs keep
     /// theirs in `Mob::glowing`.
     pub(super) glowing: std::collections::HashSet<i32>,
@@ -672,6 +743,9 @@ pub(super) struct Remote {
     clock_game_time: i64,
     /// `ClientChunkCache.Storage`'s view centre (ClientboundSetChunkCacheCenterPacket).
     chunk_center: (i32, i32),
+    /// A viewed-level swap adopts columns before the server sends the active cache centre.
+    pub(super) awaiting_viewed_chunk_center: bool,
+    pub(super) chunk_light: RemoteLight,
     /// Received events a frame left for the next one, in order, and when
     /// the oldest of them first waited (`poll_remote`).
     backlog: VecDeque<Received>,
@@ -1324,7 +1398,7 @@ impl Game<'_> {
             C::SetPlayerInventory(p) => self.apply_set_player_inventory_packet(p),
             C::ContainerSetData(p) => self.apply_container_set_data_packet(p)?,
             C::OpenScreen(p) => self.remote_open_screen(p),
-            C::MountScreenOpen(p) => self.remote_open_mount(p),
+            C::MountScreenOpen(p) => self.remote_open_mount(p)?,
             C::UpdateRecipes(p) => self.remote_recipe_properties(p),
 
             C::RecipeBookAdd(p) => self.remote_recipe_book_add(p),
@@ -1393,25 +1467,8 @@ impl Game<'_> {
                     r.simulation_distance = p.distance;
                 }
             }
-            C::SetChunkCacheRadius(p) => {
-                self.streaming.radius = crate::game::entity_culling::streaming_radius_for(
-                    self.settings.render_distance,
-                    Some(p.distance),
-                );
-                if let Some(r) = self.remote.as_mut() {
-                    r.view_distance = p.distance;
-                    let center = r.chunk_center;
-                    // ClientChunkCache.updateViewRadius: a new storage of that size.
-                    self.drop_remote_chunks_out_of_range(center, p.distance);
-                }
-            }
-            C::SetChunkCacheCenter(p) => {
-                if let Some(r) = self.remote.as_mut() {
-                    r.chunk_center = (p.x, p.z);
-                    let distance = r.view_distance;
-                    self.drop_remote_chunks_out_of_range((p.x, p.z), distance);
-                }
-            }
+            C::SetChunkCacheRadius(p) => self.set_remote_chunk_cache_radius(p.distance),
+            C::SetChunkCacheCenter(p) => self.set_remote_chunk_cache_center((p.x, p.z)),
             C::BlockEntityData(p) => self.remote_block_entity_packet(p),
             C::OpenSignEditor(p) => self.remote_open_sign_editor(p),
             C::OpenBook(p) => self.remote_open_book(p.hand),
@@ -1467,6 +1524,7 @@ impl Game<'_> {
             join,
             position: [x, y, z],
             velocity,
+            no_gravity,
         }) = pending
         else {
             return;
@@ -1483,6 +1541,7 @@ impl Game<'_> {
             ItemEntity {
                 join,
                 random,
+                no_gravity,
                 ..ItemEntity::new(id as u32, stack, at, velocity, bob)
             },
         );
@@ -2266,9 +2325,9 @@ fn object_skin_changed(published: &HashMap<String, String>, key: &str, skin: &st
 /// looks the PlayerInfo up once and holds it, removed from the list or not).
 fn skin_entries(
     level_players: &HashMap<i32, u128>,
-    listed: &HashMap<u128, sunrise_client::skins::Textures>,
-    kept: &mut HashMap<i32, sunrise_client::skins::Textures>,
-) -> Vec<(u128, sunrise_client::skins::Textures)> {
+    listed: &HashMap<u128, Arc<PlayerTextures>>,
+    kept: &mut HashMap<i32, Arc<PlayerTextures>>,
+) -> Vec<(u128, Arc<PlayerTextures>)> {
     for (id, uuid) in level_players {
         if !kept.contains_key(id)
             && let Some(textures) = listed.get(uuid)
@@ -2369,21 +2428,14 @@ fn client_has_level(logged_in: bool, reconfiguring: Option<u64>) -> bool {
     logged_in && reconfiguring.is_none()
 }
 
-/// `ClientChunkCache.Storage.inRange`: whether column `x`, `z` is within `calculateStorageRange`
-/// (the server's radius, at least two, plus three) of the view centre. The radius and the centre
-/// are the server's to send, any `i32`: the distances are taken without overflow, which panicked
-/// a debug build and, wrapping in release, dropped every loaded chunk.
-fn in_storage_range(view_distance: i32, center: (i32, i32), x: i32, z: i32) -> bool {
-    let range = view_distance.max(2).saturating_add(3).unsigned_abs();
-    x.abs_diff(center.0) <= range && z.abs_diff(center.1) <= range
-}
-
 // A packet's removals (`RemoveEntities`), apart: this file may not grow.
 #[cfg(test)]
 mod interaction_event_tests;
 
 #[cfg(test)]
 mod native_entity_tests;
+#[cfg(test)]
+mod no_gravity_data_tests;
 
 #[cfg(test)]
 mod camera_view_tests;
@@ -2408,7 +2460,7 @@ impl Remote {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub(in crate::game) mod tests {
     mod client_explosion_tests {
         include!("client_explosion_tests.rs");
     }
@@ -2442,22 +2494,22 @@ pub(crate) mod tests {
     mod client_block_changed_tests {
         include!("client_block_changed_tests.rs");
     }
-    mod camera_draw_tests {
+    pub(in crate::game) mod camera_draw_tests {
         include!("camera_draw_tests.rs");
     }
-    mod client_camera_tests {
+    pub(in crate::game) mod client_camera_tests {
         include!("client_camera_tests.rs");
     }
-    mod camera_parity_red_tests {
+    pub(in crate::game) mod camera_parity_red_tests {
         include!("camera_parity_red_tests.rs");
     }
-    mod set_camera_kinds_tests {
+    pub(in crate::game) mod set_camera_kinds_tests {
         include!("set_camera_kinds_tests.rs");
     }
-    mod camera_death_tests {
+    pub(in crate::game) mod camera_death_tests {
         include!("camera_death_tests.rs");
     }
-    mod client_hud_camera_tests {
+    pub(in crate::game) mod client_hud_camera_tests {
         include!("client_hud_camera_tests.rs");
     }
     mod client_day_time_tests {
@@ -2486,6 +2538,9 @@ pub(crate) mod tests {
     }
     mod client_read_tests {
         include!("client_read_tests.rs");
+    }
+    mod container_drop_tests {
+        include!("container_drop_tests.rs");
     }
     mod creative_sync_tests {
         include!("creative_sync_tests.rs");
@@ -2538,7 +2593,7 @@ pub(crate) mod tests {
     mod particle_group_tests {
         include!("particle_group_tests.rs");
     }
-    mod placement_preview_tests {
+    pub(in crate::game) mod placement_preview_tests {
         include!("placement_preview_tests.rs");
     }
     mod player_animation_tests {

@@ -844,6 +844,10 @@ impl Game<'_> {
         reg.structures = ids.structures.clone();
         reg.biomes = ids.biomes.clone();
         reg.clocks = ids.clocks.clone();
+        // The mods' clocks (`register_world_clock`) for `/time of`.
+        reg.clocks
+            .extend(mod_api::__private::world_clock_declarations());
+        reg.clocks.sort();
         reg.dimensions = vec![
             "minecraft:overworld".into(),
             "minecraft:the_nether".into(),
@@ -1915,8 +1919,9 @@ impl Game<'_> {
         self.ui.registries.random_sequences = self.rand_sequences.ids();
         &mut self.ui.registries
     }
-    /// Advance every clock the world has met (ServerClockManager.tick) when `advance_time` allows
-    /// it: each at its own rate, unless paused. The active clock's total is World.day_time.
+    /// Advance every clock of the world's `minecraft:world_clock` registry, the mods' own included,
+    /// and every other clock the world has met (ServerClockManager.tick) when `advance_time`
+    /// allows it: each at its own rate, unless paused. The active clock's total is World.day_time.
     pub(super) fn advance_clock(&mut self) {
         if !self
             .ui
@@ -1929,11 +1934,17 @@ impl Game<'_> {
         }
         let mut names: Vec<String> = self.ui.command_clocks.keys().cloned().collect();
         let active = self.active_clock().to_owned();
+        // ServerClockManager.init holds every `minecraft:world_clock` entry, the mods' own
+        // (`register_world_clock`) among them, and `tick` advances each one, touched or not.
         for name in [
             OVERWORLD_CLOCK.to_owned(),
             "minecraft:the_end".to_owned(),
             active,
-        ] {
+        ]
+        .into_iter()
+        .chain(self.ui.registries.clocks.iter().cloned())
+        .chain(mod_api::__private::world_clock_declarations())
+        {
             if !names.contains(&name) {
                 names.push(name);
             }
@@ -2703,7 +2714,7 @@ mod tests {
             "one word, not two"
         );
         // A name the game has is not taken over.
-        let (_, _, problems) = super::super::native_server::command_tree(
+        let (_, _, problems) = super::super::native_server::client_command_tree(
             &[mod_api::Command::new("help <x:word>")],
             |name| vanilla.find(name).is_some(),
             &arguments,

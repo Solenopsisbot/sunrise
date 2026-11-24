@@ -1537,6 +1537,7 @@ fn hook_records(hooks: &[catalog::Hook], types: &[Type], notes: &mut Vec<String>
                         catalog::PhaseContext::ClientReload => "client_reload",
                         catalog::PhaseContext::ClientReloadListener => "client_reload_listener",
                         catalog::PhaseContext::ClientSetup => "client_setup",
+                        catalog::PhaseContext::ClientIdentity => "client_identity",
                         catalog::PhaseContext::PackDiscovery => "pack_discovery",
                     }
                     .to_owned()

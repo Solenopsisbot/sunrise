@@ -88,6 +88,11 @@ impl Game<'_> {
         {
             return Ok(());
         }
+        // Escape cancels a press on the item panel; one that is a drag takes
+        // the Escape, and the screen stays open.
+        if key == KeyCode::Escape && self.mod_browser_drag_escape() {
+            return Ok(());
+        }
         if key == KeyCode::Escape && self.mod_browser_back() {
             return Ok(());
         }
@@ -143,7 +148,8 @@ impl Game<'_> {
                 Screen::ServerLinks => self.set_screen(Screen::Paused),
                 // ConfirmScreen.keyPressed: Escape answers no; both return to
                 // the Server Links screen they came from.
-                Screen::ConfirmLink => self.set_screen(self.confirm_link_back()),
+                Screen::ConfirmLink => self.close_confirm_link(),
+                Screen::DemoIntro => self.close_demo_intro(),
                 Screen::DialogWarning => self.set_screen(Screen::ServerLinks),
                 Screen::Advancements => self.close_advancements(),
                 Screen::WorldOptions => self.world_options_escape(),
@@ -155,7 +161,6 @@ impl Game<'_> {
                 Screen::Mod => self.close_mod_screen(),
                 Screen::HudEditor => self.close_hud_editor(),
             },
-            KeyCode::KeyL if self.screen == Screen::Advancements => self.close_advancements(),
             KeyCode::F11 => self.toggle_fullscreen(),
             KeyCode::KeyE
                 if self.screen == Screen::Creative && self.creative_screen.tab().search => {}

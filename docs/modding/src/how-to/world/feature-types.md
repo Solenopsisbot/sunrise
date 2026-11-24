@@ -85,6 +85,7 @@ the modifiers before you drew from.
 | `block_entity` | Give a block you placed in this call its block entity's saved NBT |
 | `state`, `state_with`, `is_air`, `metadata` | Resolve a registered `BlockKey` to a `BlockState`, and test states |
 | `min_y`, `max_y` | The level's height bounds |
+| `biome` | The biome at a position (`WorldGenLevel.getBiome`), or `None` where the level can't be read |
 
 `set_block` answers `false` for the state already there, as `Level.setBlock` answers. A write
 outside the region it may write (during decoration, the game's own decoration region around the

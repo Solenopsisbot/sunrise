@@ -16,6 +16,16 @@ pub trait PlayerMenusBackend {
     /// Reads for the acting player use their current inventory, equipment, cursor and ender
     /// contents. On a client, refuses stale players and unsupported menu layouts.
     fn player_container_menu(&self, player: PlayerRef) -> Option<MenuRef>;
+    /// Side: server.
+    /// The player's container counter (`ServerPlayer.containerCounter`): the window id the
+    /// last menu opened for them took, 0 until one opens. Every menu the server opens for
+    /// them advances it first, as vanilla's `nextContainerCounter` does, to `counter % 100 + 1`
+    /// and takes that id: a block's or an entity's container, a mount's inventory, a merchant,
+    /// [`PlayerRef::open_mod_menu`](crate::PlayerRef::open_mod_menu), and
+    /// [`PlayerRef::next_container_counter`](crate::PlayerRef::next_container_counter). So the
+    /// next open takes `container_counter % 100 + 1`, the id a Java `MenuProvider.createMenu`
+    /// is handed. None for a player not online here (a stale handle) and on a client.
+    fn player_container_counter(&self, player: PlayerRef) -> Option<i32>;
 }
 /// The handles' writes of the `player_menus` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -46,13 +56,14 @@ pub trait PlayerMenusBackendMut {
     /// `opening_hand` for an item opener regardless of slot backing, or `None` for another opener.
     /// The server remembers that hand's stack for `menu_still_valid`. A type declaring
     /// `owned_slots` uses ordinary clicks and accepts writes through `ItemPlace::MenuSlot`; it may
-    /// not declare results or crafting. The old menu closes on the server as a close does (its
+    /// declare take-only `results` but not a `crafting` grid. The old menu closes on the server as
+    /// a close does (its
     /// `removed`, `player_container_close`, the cursor stack and crafting grids back to the
     /// inventory) before the new one is built; `replace` says whether the client is first sent
     /// a close for it, as for `open_menu`. `MenuReplace::InPlace` sends none: the client keeps
     /// its screen and mouse until the new screen replaces it. The window id, or Ok(None) when
     /// a mod cancelled the open or a registered exclusion is out of range. Errors: `NotModMenu`,
-    /// `OwnedSlotsWithResults`, `ClickInProgress` (a speculative click cannot open a new screen),
+    /// `OwnedSlotsWithCrafting`, `ClickInProgress` (a speculative click cannot open a new screen),
     /// `PlayerUnavailable` (including a client that does not support the blockless layout, a
     /// disconnect in progress or a turn unavailable for the veto), `TooLarge`,
     /// `DataCountMismatch`, `Title` or `TitleNotEncodable`. A cancelled or refused open
@@ -89,6 +100,16 @@ pub trait PlayerMenusBackendMut {
         window: i32,
         places: Vec<MenuSlotPlace>,
     ) -> Result<(), MenuSlotBackRefusal>;
+    /// Side: server.
+    /// Advances the player's container counter as an open does (`ServerPlayer.nextContainerCounter`:
+    /// `counter % 100 + 1`) and returns the new value, opening and closing nothing: the open
+    /// menu keeps its own window id. For a mod that models `ServerPlayer.openMenu` when no
+    /// window follows the advance, as when `MenuProvider.createMenu` answers `null`: vanilla
+    /// advances the counter before it asks, and the next menu opened takes the id after this
+    /// one. An aborted transaction does not undo the advance, as it does not undo a menu's open,
+    /// except a merchant's window replaced in that same transaction, whose abort puts back the
+    /// window and counter it replaced. None for a player not online here and on a client.
+    fn player_next_container_counter(&mut self, player: PlayerRef) -> Option<i32>;
     /// Side: server.
     /// Opens the player's own ender chest for them with no block, titled `title`: a three-row
     /// `ChestMenu` over their `PlayerEnderChestContainer`, as `EnderChestBlock.useWithoutItem`

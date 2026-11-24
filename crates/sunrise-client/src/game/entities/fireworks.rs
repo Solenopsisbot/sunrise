@@ -84,6 +84,9 @@ pub(super) struct Rocket {
     was_touching_water: bool,
     /// `Entity.firstTick`: no splash on the tick it appears in water.
     first_tick: bool,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub(super) size_answer: Option<sunrise_client::pose::SizeAnswer>,
 }
 impl Rocket {
     /// A rocket a server sent (`handleAddEntity`): placed and moved by it.
@@ -91,6 +94,7 @@ impl Rocket {
         let item = ItemStack::new("minecraft:firework_rocket", 1);
         let (_, explosions) = fireworks_of(&item);
         Self {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: [0.0, 0.0],
             join: Default::default(),
@@ -171,6 +175,7 @@ impl Rocket {
             .unwrap_or_else(|| ItemStack::new("minecraft:firework_rocket", 1));
         let (_, explosions) = fireworks_of(&item);
         Self {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: r.rotation,
             join: Default::default(),
@@ -247,7 +252,7 @@ impl Rocket {
                 motion.apply_block_speed(self.position, &mut self.velocity);
                 motion.step_on(
                     (self.id, "minecraft:firework_rocket"),
-                    (self.position, Self::bounds_at(self.position)),
+                    (self.position, self.bounds()),
                     &self.ground,
                     &mut self.velocity,
                 );
@@ -294,9 +299,17 @@ impl Rocket {
             )
         }
     }
+    /// `EntityType.FIREWORK_ROCKET.getDimensions()`: width, height and eye height.
+    pub(super) const DIMENSIONS: [f32; 3] = [0.25, 0.25, 0.2125];
     /// `EntityType.FIREWORK_ROCKET`: 0.25 x 0.25.
     pub(super) fn bounds(&self) -> Aabb {
-        Self::bounds_at(self.position)
+        let vanilla = Self::bounds_at(self.position);
+        sunrise_client::pose::SizeAnswer::sized_box(
+            self.size_answer,
+            Self::DIMENSIONS,
+            self.position,
+            vanilla,
+        )
     }
     /// [`Self::bounds`] at `position`.
     fn bounds_at(position: Vec3) -> Aabb {
@@ -482,12 +495,8 @@ impl Game<'_> {
         let side = game_side!(self);
         let motion = self.body_motion(&side);
         motion.apply_block_speed(r.position, &mut r.velocity);
-        let writes = self.body_step_on(
-            entity,
-            (r.position, Rocket::bounds_at(r.position)),
-            &r.ground,
-            &mut r.velocity,
-        );
+        let writes =
+            self.body_step_on(entity, (r.position, r.bounds()), &r.ground, &mut r.velocity);
         super::entity::apply_contact_writes(
             writes,
             &mut r.velocity,
@@ -552,6 +561,7 @@ impl Game<'_> {
             .insert(id, sunrise_client::save::insecure_uuid(own));
         let (velocity, lifetime) = rocket_draws(own, flight);
         Rocket {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: [0.0, 0.0],
             join: Default::default(),

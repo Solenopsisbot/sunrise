@@ -468,6 +468,7 @@ pub const GLUE: crate::core_shader::Glue = crate::core_shader::Glue {
             Params = hz_params; Color = hz_color; UV2 = hz_uv2;",
     finish: "",
     vertex_id: "int(gl_VertexIndex)",
+    interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
 };
 
 /// One corner of a record for a custom shader.

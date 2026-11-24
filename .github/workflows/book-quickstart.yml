@@ -181,11 +181,11 @@ jobs:
         run: >-
           cargo test --locked -p cargo-sunrise-mod --test run --
           --ignored --exact run_writes_native_registration_logs_to_latest_log
-      - name: Native add-on builds with local and registry libraries
+      - name: Native add-on builds with local libraries
         if: inputs.own_sdk
         run: >-
           cargo test --locked -p cargo-sunrise-mod --test addon --
-          --ignored --exact builds_and_checks_a_native_addon_with_local_and_registry_libraries
+          --ignored --exact builds_and_checks_a_native_addon_with_local_libraries
       - name: Installed native rows bend and route a client model
         if: inputs.own_sdk
         run: >-

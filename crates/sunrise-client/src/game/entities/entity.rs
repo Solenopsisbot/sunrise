@@ -72,6 +72,9 @@ pub(super) struct Blast {
     pub(super) spared: Option<u32>,
 }
 
+/// `EntityType.TRIDENT.getDimensions()`: width, height and eye height.
+const THROWN_TRIDENT_DIMENSIONS: [f32; 3] = [0.5, 0.5, 0.13];
+
 pub(super) trait Entity: EntityRules {
     /// The kind's serializer overlays its object-owned attachments itself (for
     /// recursive object trees); the common save walk must not encode them twice.
@@ -100,6 +103,18 @@ pub(super) trait Entity: EntityRules {
     /// (clamped to -90..90), then `setOldRot`.
     fn set_rotation(&mut self, rotation: [f32; 2]);
     fn bounds(&self) -> Aabb;
+    /// `Entity.getDimensions(getPose())` before `entity_size`, for a kind the server asks for
+    /// at its size passes (`modding/entity_sizes.rs`), its pose standing; None for one asked
+    /// another way (a mob, by `native_mob_sizes`) or not at all.
+    fn vanilla_dimensions(&self) -> Option<[f32; 3]> {
+        None
+    }
+    /// What `entity_size` last answered for it ([`Self::vanilla_dimensions`]).
+    fn size_answer(&self) -> Option<sunrise_client::pose::SizeAnswer> {
+        None
+    }
+    /// Keep `answer`: its box takes it while it holds.
+    fn set_size_answer(&mut self, _answer: sunrise_client::pose::SizeAnswer) {}
     /// What a selector finds this entity as (`@e`), or `None` for one it cannot
     /// name yet. Required, so a new kind states which.
     fn selector_target(&self) -> Option<Target>;
@@ -804,6 +819,21 @@ mod render_bounds_tests {
         assert!(bounds.min_position().y <= 9.5);
         assert!(bounds.max_position().y >= 12.8);
     }
+}
+
+/// The `entity_size` answer a kind keeps in its `size_answer` field, for its vanilla size `$vanilla`.
+macro_rules! stored_size {
+    ($vanilla:expr) => {
+        fn vanilla_dimensions(&self) -> Option<[f32; 3]> {
+            Some($vanilla(self))
+        }
+        fn size_answer(&self) -> Option<sunrise_client::pose::SizeAnswer> {
+            self.size_answer
+        }
+        fn set_size_answer(&mut self, answer: sunrise_client::pose::SizeAnswer) {
+            self.size_answer = Some(answer);
+        }
+    };
 }
 
 /// The common retained support owned by moving bodies.
@@ -2248,6 +2278,7 @@ impl Entity for Mob {
 }
 
 impl Entity for ItemEntity {
+    stored_size!(|_: &Self| ItemEntity::DIMENSIONS);
     stored_ground!();
     fn fall_distance(&self) -> f64 {
         self.fall_distance
@@ -2343,6 +2374,7 @@ impl Entity for ItemEntity {
 }
 
 impl Entity for ExperienceOrb {
+    stored_size!(|_: &Self| ExperienceOrb::DIMENSIONS);
     stored_ground!();
     fn reset_fall_distance(&mut self) {
         // An orb keeps no fall distance here.
@@ -2415,6 +2447,7 @@ impl Entity for ExperienceOrb {
 }
 
 impl Entity for Boat {
+    stored_size!(|_: &Self| Boat::DIMENSIONS);
     stored_ground!();
     fn reset_fall_distance(&mut self) {
         // A boat keeps no fall distance here.
@@ -2505,6 +2538,7 @@ impl Entity for Boat {
 }
 
 impl Entity for Minecart {
+    stored_size!(|_: &Self| Minecart::DIMENSIONS);
     stored_ground!();
     fn fall_distance(&self) -> f64 {
         self.fall_distance
@@ -2608,6 +2642,7 @@ pub(super) fn armor_stand_size(stand: &ArmorStand) -> (f64, f64) {
 }
 
 impl Entity for ArmorStand {
+    stored_size!(ArmorStand::default_dimensions);
     stored_ground!(enchantment_fall_distance);
     fn support_collision(
         &self,
@@ -2759,6 +2794,7 @@ impl Entity for ArmorStand {
 }
 
 impl Entity for PrimedTnt {
+    stored_size!(|_: &Self| PrimedTnt::DIMENSIONS);
     stored_ground!();
     fn support_collision(
         &self,
@@ -2852,6 +2888,7 @@ impl Entity for PrimedTnt {
 }
 
 impl Entity for FallingBlock {
+    stored_size!(|_: &Self| FallingBlock::DIMENSIONS);
     stored_ground!();
     fn fall_distance(&self) -> f64 {
         self.fall_distance
@@ -2930,7 +2967,7 @@ impl Entity for FallingBlock {
         Some(Target::Falling(self.id))
     }
     fn bounds(&self) -> Aabb {
-        sunrise_client::falling_block::bounds(self.position)
+        FallingBlock::bounds(self)
     }
     fn is_pickable(&self) -> bool {
         true
@@ -2938,6 +2975,7 @@ impl Entity for FallingBlock {
 }
 
 impl Entity for Projectile {
+    stored_size!(|p: &Self| p.kind.dimensions());
     stored_ground!();
     fn fall_distance(&self) -> f64 {
         self.arrow
@@ -3133,6 +3171,7 @@ impl Entity for Projectile {
 }
 
 impl Entity for Rocket {
+    stored_size!(|_: &Self| Rocket::DIMENSIONS);
     stored_ground!();
     fn reset_fall_distance(&mut self) {
         // A firework rocket keeps no fall distance here.
@@ -3210,6 +3249,7 @@ impl Entity for Rocket {
 }
 
 impl Entity for ThrownTrident {
+    stored_size!(|_: &Self| THROWN_TRIDENT_DIMENSIONS);
     stored_ground!();
     fn reset_fall_distance(&mut self) {
         // A thrown trident keeps no fall distance here.
@@ -3284,9 +3324,15 @@ impl Entity for ThrownTrident {
     }
     fn bounds(&self) -> Aabb {
         let p = self.position;
-        Aabb::new(
+        let vanilla = Aabb::new(
             Vec3::new(p.x - 0.25, p.y, p.z - 0.25),
             Vec3::new(p.x + 0.25, p.y + 0.5, p.z + 0.25),
+        );
+        sunrise_client::pose::SizeAnswer::sized_box(
+            self.size_answer,
+            THROWN_TRIDENT_DIMENSIONS,
+            p,
+            vanilla,
         )
     }
     /// `AbstractArrow.noPhysics`, set once a loyal trident turns back. Its own
@@ -3681,6 +3727,7 @@ mod set_rotation_tests {
     #[test]
     fn set_rotation_keeps_yaw_and_clamps_pitch_on_kinds_that_had_none() {
         let mut orb = ExperienceOrb {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
             join: Default::default(),

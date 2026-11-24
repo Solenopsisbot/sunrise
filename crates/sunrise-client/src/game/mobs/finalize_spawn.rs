@@ -28,13 +28,12 @@ pub(super) fn biome_or_plains(name: Option<String>) -> String {
 impl FinalizeGame<'_, '_> {
     /// The biome id at a block, when its chunk is loaded.
     fn biome_name(&self, pos: [i32; 3]) -> Option<String> {
-        let chunk = self.game.world.chunks.get(&(pos[0] >> 4, pos[2] >> 4))?;
-        Some(
-            world_biomes!(self.game)
-                .get(chunk.biome(pos[0], pos[1], pos[2]))
-                .name
-                .clone(),
-        )
+        // `LevelReader.getBiome`: the noise cell the biome zoom picks, perhaps in a neighbouring chunk.
+        let game = &self.game;
+        let biome = game
+            .world
+            .biome_at(game.streaming.biome_zoom, pos[0], pos[1], pos[2])?;
+        Some(world_biomes!(game).get(biome).name.clone())
     }
 }
 

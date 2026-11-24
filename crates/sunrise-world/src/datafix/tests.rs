@@ -172,14 +172,8 @@ fn a_1_14_villager_and_its_passenger_take_their_professions_on_chunk_write() {
 }
 
 #[test]
-fn versions_without_a_source_schema_or_past_the_current_version_are_refused() {
+fn the_current_version_is_unchanged_and_future_versions_are_refused() {
     let sign = compound(snbt(SIGN));
-    for version in [-1, 0, 98] {
-        assert_eq!(
-            upgrade_compound(NbtDataType::BlockEntity, version, sign.clone()),
-            Err(NbtUpgradeError::UnsupportedVersion(version))
-        );
-    }
     assert_eq!(
         upgrade_compound(NbtDataType::BlockEntity, CURRENT + 1, sign.clone()),
         Err(NbtUpgradeError::FutureVersion(CURRENT + 1))

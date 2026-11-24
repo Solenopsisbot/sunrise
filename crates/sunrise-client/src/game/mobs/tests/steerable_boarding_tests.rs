@@ -151,6 +151,10 @@ fn scene(
 #[test]
 #[ignore = "daily"]
 fn interact_with_a_pig_or_strider() {
+    run_interact_with_a_pig_or_strider();
+}
+
+pub(in crate::game) fn run_interact_with_a_pig_or_strider() {
     if tests::run_fresh_cases(TEST, CHILD, &["boarding"]) {
         return;
     }

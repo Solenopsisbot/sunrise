@@ -34,6 +34,7 @@ impl StructureType for Boxes {
         let min = [chunk.x * 16, height - 1, chunk.z * 16];
         Some(FoundStructure {
             position: min,
+            pool_pieces: Vec::new(),
             pieces: vec![Arc::new(BoxPiece {
                 min,
                 max: [min[0] + 8, min[1] + 5, min[2] + 8],
@@ -138,6 +139,7 @@ fn the_engines_after_place_call_reaches_the_type() {
             let min = [chunk.x * 16, height - 1, chunk.z * 16];
             Some(FoundStructure {
                 position: min,
+                pool_pieces: Vec::new(),
                 pieces: vec![Arc::new(BoxPiece {
                     min,
                     max: [min[0] + 8, min[1] + 5, min[2] + 8],
@@ -192,6 +194,7 @@ fn the_engines_after_place_call_reaches_the_type() {
         air,
         writes: Vec::new(),
         states: Vec::new(),
+        placed: Vec::new(),
     };
     let mut piece_random = LegacyRandom::new(3);
     let mut engine = EngineContext {
@@ -214,10 +217,7 @@ fn the_engines_after_place_call_reaches_the_type() {
 /// start, 47 jigsaw pieces in all, each on the one before.
 #[test]
 fn a_mod_type_assembles_from_pools_past_the_jigsaw_types_depth() {
-    use std::collections::BTreeMap;
-    use sunrise_world::worldgen::structure::{
-        BlockInfo, StateTransforms, StructureResources, jigsaw::Pools, save_nbt, start::Piece,
-    };
+    use sunrise_world::worldgen::structure::start::Piece;
     struct Deep;
     impl StructureType for Deep {
         fn find_generation_point(
@@ -235,6 +235,7 @@ fn a_mod_type_assembles_from_pools_past_the_jigsaw_types_depth() {
             assert_eq!(layout.pieces.len(), 47);
             Some(FoundStructure {
                 position: layout.position,
+                pool_pieces: Vec::new(),
                 pieces: Vec::new(),
             })
         }
@@ -246,6 +247,36 @@ fn a_mod_type_assembles_from_pools_past_the_jigsaw_types_depth() {
             Err(StructureError("the type saves no piece of its own".into()))
         }
     }
+    let inputs = link_inputs();
+    let mut random = WorldgenRandom::new(LegacyRandom::new(0));
+    random.set_large_feature_seed(0, 0, 0);
+    let (_, pieces) = Adapter::new("testmod:deep", Arc::new(Deep))
+        .find_generation_point(
+            &mut StubContext,
+            &inputs,
+            ChunkPos::new(0, 0),
+            &Arc::new(Tag::Compound(Compound::new())),
+            &mut random,
+        )
+        .expect("a start from the pool");
+    assert_eq!(pieces.len(), 47);
+    assert!(pieces.iter().all(|piece| matches!(piece, Piece::Pool(_))));
+    let bottoms: Vec<i32> = pieces.iter().map(|p| p.bounding_box().min[1]).collect();
+    assert_eq!(
+        bottoms,
+        (0..47).map(|i| bottoms[0] + 3 * i).collect::<Vec<_>>()
+    );
+}
+
+/// The pools of the jigsaw tests: `test:links` holds one link three blocks
+/// tall, a jigsaw at its foot facing down (`test:foot`) and one at its head
+/// facing up, which draws from `test:links` and targets `test:foot`.
+pub(in crate::game) fn link_inputs()
+-> sunrise_world::worldgen::structure::mod_types::StructureInputs<'static> {
+    use std::collections::BTreeMap;
+    use sunrise_world::worldgen::structure::{
+        BlockInfo, StateTransforms, StructureResources, jigsaw::Pools, save_nbt,
+    };
     mod_platform::__private::part_tests::install_parts_fixture(&[]).unwrap();
     let state = |id: &str, properties: serde_json::Value| serde_json::json!([id, id.ends_with("air"), false, "", {"id": id, "properties": properties}]);
     let facts = serde_json::json!({
@@ -341,31 +372,11 @@ fn a_mod_type_assembles_from_pools_past_the_jigsaw_types_depth() {
         )
         .unwrap(),
     ));
-    let inputs = sunrise_world::worldgen::structure::mod_types::StructureInputs::new(
-        resources, pools, bindings,
-    );
-    let mut random = WorldgenRandom::new(LegacyRandom::new(0));
-    random.set_large_feature_seed(0, 0, 0);
-    let (_, pieces) = Adapter::new("testmod:deep", Arc::new(Deep))
-        .find_generation_point(
-            &mut StubContext,
-            &inputs,
-            ChunkPos::new(0, 0),
-            &Arc::new(Tag::Compound(Compound::new())),
-            &mut random,
-        )
-        .expect("a start from the pool");
-    assert_eq!(pieces.len(), 47);
-    assert!(pieces.iter().all(|piece| matches!(piece, Piece::Pool(_))));
-    let bottoms: Vec<i32> = pieces.iter().map(|p| p.bounding_box().min[1]).collect();
-    assert_eq!(
-        bottoms,
-        (0..47).map(|i| bottoms[0] + 3 * i).collect::<Vec<_>>()
-    );
+    sunrise_world::worldgen::structure::mod_types::StructureInputs::new(resources, pools, bindings)
 }
 
 /// The start context the stub answers: heights from a flat 64.
-struct StubContext;
+pub(in crate::game) struct StubContext;
 impl sunrise_world::worldgen::structure::jigsaw::JigsawContext for StubContext {
     fn min_y(&self) -> i32 {
         -64
@@ -458,10 +469,12 @@ impl sunrise_world::worldgen::structure::start::StartContext for StubContext {
 
 /// The piece world of the clipping test: every write recorded, and a
 /// write outside the test's expectations fails it.
-struct RecordingWorld {
-    air: sunrise_world::registry::BlockStateId,
-    writes: Vec<[i32; 3]>,
-    states: Vec<sunrise_world::registry::BlockStateId>,
+pub(in crate::game) struct RecordingWorld {
+    pub(in crate::game) air: sunrise_world::registry::BlockStateId,
+    pub(in crate::game) writes: Vec<[i32; 3]>,
+    pub(in crate::game) states: Vec<sunrise_world::registry::BlockStateId>,
+    /// The features and elements placed, with where, in order.
+    pub(in crate::game) placed: Vec<String>,
 }
 impl sunrise_world::worldgen::structure::legacy::PieceWorld for RecordingWorld {
     fn block(&mut self, _: [i32; 3]) -> PieceResult<sunrise_world::registry::BlockStateId> {
@@ -562,6 +575,30 @@ impl sunrise_world::worldgen::structure::legacy::PieceWorld for RecordingWorld {
     ) -> PieceResult<bool> {
         Ok(true)
     }
+    fn place_feature(
+        &mut self,
+        _: &mut dyn sunrise_world::worldgen::structure::legacy::PieceRandom,
+        feature: sunrise_world::worldgen::structure::jigsaw::FeatureKey<'_>,
+        pos: [i32; 3],
+    ) -> PieceResult<bool> {
+        self.placed.push(format!("{feature:?} at {pos:?}"));
+        Ok(true)
+    }
+    fn place_element(
+        &mut self,
+        _: &mut dyn sunrise_world::worldgen::structure::legacy::PieceRandom,
+        element: &sunrise_world::worldgen::structure::jigsaw::PoolElement,
+        at: sunrise_world::worldgen::structure::jigsaw::ElementAt,
+    ) -> PieceResult<bool> {
+        let kind = match element {
+            sunrise_world::worldgen::structure::jigsaw::PoolElement::Single {
+                template, ..
+            } => template.location.to_string(),
+            _ => "other".into(),
+        };
+        self.placed.push(format!("{kind} at {at:?}"));
+        Ok(true)
+    }
 }
 
 /// The engine's own placement tests build their registry this way
@@ -599,7 +636,8 @@ fn legacy(
         .collect()
 }
 
-fn test_resources() -> &'static sunrise_world::worldgen::structure::StructureResources {
+pub(in crate::game) fn test_resources()
+-> &'static sunrise_world::worldgen::structure::StructureResources {
     mod_platform::__private::part_tests::install_parts_fixture(&[]).unwrap();
     let facts = serde_json::json!({
         "states": [
@@ -649,6 +687,7 @@ fn a_write_outside_the_chunk_box_is_dropped_silently() {
         air,
         writes: Vec::new(),
         states: Vec::new(),
+        placed: Vec::new(),
     };
     let mut random = sunrise_core::random::LegacyRandom::new(7);
     {
@@ -927,6 +966,7 @@ fn compiled_book_piece_resolves_on_worker_load_and_refuses_bad_saved_values() {
             air: sunrise_world::registry::BlockStateId(0),
             writes: vec![],
             states: vec![],
+            placed: vec![],
         };
         let mut random = LegacyRandom::new(9);
         piece
@@ -995,6 +1035,7 @@ fn piece_beardifier_shapes_terrain_and_is_resolved_once() {
         fn find_generation_point(&self, _: &mut dyn GenerationContext) -> Option<FoundStructure> {
             Some(FoundStructure {
                 position: [0, 64, 0],
+                pool_pieces: Vec::new(),
                 pieces: (0..3)
                     .map(|mode| {
                         Arc::new(TerrainPiece {

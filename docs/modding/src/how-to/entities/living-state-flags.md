@@ -32,6 +32,14 @@ mob's movement speed already reads as that modifier (a cat's or ocelot's own AI 
 handle, on a client and for a kind with no sprinting flag. It is the flag `Entity.isSprinting` reads, not
 the player's sprint key: a player's own client sets its flag again from its input.
 
+## No gravity
+
+`EntityRef::no_gravity(host)` reads `Entity.isNoGravity` and
+`EntityRef::set_no_gravity(host, enabled)` sets it on the server. Both cover mobs and live
+dropped items, including an `EntityRef` resolved from `ItemPart::on_entity_item_update`; an
+item honours the flag in its own tick. Stale handles and other kinds read `None` and refuse
+the write. The write marks the item for its next sync, as it does for a mob.
+
 ## Fire, water and consumption
 
 `EntityRef::is_on_fire(host)` reads vanilla `Entity.isOnFire` on either side: an entity that is not
@@ -141,12 +149,16 @@ in its saved compound.
 
 ## Mob flags
 
-Through `MobRef`: `no_ai`/`set_no_ai` (`Mob.isNoAi` and `setNoAi`: the mob stands, saved as `NoAI`) and
+Through `MobRef`: `no_ai`/`set_no_ai` (`Mob.isNoAi` and `setNoAi`: the mob stands, saved as `NoAI`),
+`is_in_sitting_pose`/`set_in_sitting_pose` (`TamableAnimal.isInSittingPose` and `setInSittingPose`, on the tamable
+animals: wolf, cat, parrot, nautilus and zombie nautilus) and
 `set_baby` (`Mob.setBaby` through the canonical species-specific setup). Ageable mobs start at their species'
 baby age (`-48000` for a sniffer, otherwise `-24000`) or become adults at `0`, including the age-boundary
 attribute, navigation and AI changes. Their age is saved as `Age` where the kind saves one. Non-ageable babies,
 such as zombies and piglins, keep their non-growing baby state instead. A species with no baby form refuses
-`set_baby` without changing anything. Neither `set_baby` nor `set_no_ai` changes `PersistenceRequired`.
+`set_baby` without changing anything. The sitting write changes the synced pose only, not the saved
+`isOrderedToSit` order, so the pet's own sit goal may write the pose again on its next tick, as vanilla. Neither
+`set_baby` nor `set_no_ai` changes `PersistenceRequired`.
 
 `ai_paused`/`set_ai_paused` pause a mob's AI step while its physics runs on, as vanilla's `isImmobile` does for a
 dying mob or a stunned ravager. A paused mob skips `Mob.serverAiStep` whole: its Brain or its goal and target

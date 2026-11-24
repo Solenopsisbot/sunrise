@@ -13,6 +13,10 @@ use sunrise_protocol::{
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn local_player_and_camera_entity_draw_like_the_real_client() {
+    run_local_player_and_camera_entity_draw_like_the_real_client();
+}
+
+pub(in crate::game) fn run_local_player_and_camera_entity_draw_like_the_real_client() {
     let path = std::env::var("SUNRISE_CAMERA_DRAW_WITNESS")
         .expect("run through tools/test_camera_parity.py, which records the witness");
     let witness = std::fs::read_to_string(&path).unwrap_or_else(|err| {

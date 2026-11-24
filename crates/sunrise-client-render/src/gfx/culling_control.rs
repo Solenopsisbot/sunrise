@@ -203,7 +203,7 @@ impl Renderer {
         self.sourced.take_due(&self.lods, now);
         #[cfg(debug_assertions)]
         if self.gpu_checks.wrapping_sub(1).is_multiple_of(64) {
-            self.sourced.check(&self.lods, now);
+            self.sourced.check(&self.lods, now, true);
         }
         let min_y = self.sections.min_y();
         let prepared = crate::spans::time("gpu sourced geometry", || {

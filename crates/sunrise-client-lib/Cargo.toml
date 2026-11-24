@@ -118,6 +118,8 @@ test-publication-scope = []
 test-tooltip-factories = []
 # Non-consuming residency journal observation for game fixtures only.
 test-residency-observer = []
+# Local server-pack feedback observation for game fixtures only.
+test-pack-feedback = []
 # A level side with no weather, tags or block entities, for tests and probes that never read them.
 test-dry-side = []
 default = ["audio", "controllers"]

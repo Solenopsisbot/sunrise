@@ -329,7 +329,12 @@ impl Game<'_> {
                     }
                 },
             );
-            let applied = decided && default_ok.get();
+            // A `menu_clicked` override that edits container slots notifies
+            // `menu_slot_changed` before the scope settles, so an invalid output or a panicking
+            // listener rolls the whole click back with it.
+            let applied = decided
+                && default_ok.get()
+                && (!handled.get() || game.reconcile_click_slot_changes(conn));
             (applied, applied)
         });
         if !applied || handled.get() {

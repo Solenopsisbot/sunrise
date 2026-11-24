@@ -206,7 +206,10 @@ pub fn check_release(
     Ok(report)
 }
 
-fn require_release_signer(attested: Attested, repository: Option<u64>) -> Result<Attested, String> {
+pub(crate) fn require_release_signer(
+    attested: Attested,
+    repository: Option<u64>,
+) -> Result<Attested, String> {
     const WORKFLOW: &str = "sunrise-org/sunrise-mods/.github/workflows/release.yml";
     // The shared workflow's tags are `release-v<number>` (sunrise-mods registry/release-workflow.toml).
     const TAG_PREFIX: &str = "refs/tags/release-v";

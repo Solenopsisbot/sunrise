@@ -11,6 +11,10 @@
 //! bakes one of them or a vanilla layer (`EntityModelSet.bakeLayer`).
 
 use crate::RegisterLayerDefinitionsEvent;
+use std::borrow::Borrow;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::ops::Range;
 use sunrise_core::geometry::Direction;
 
 /// `CubeDeformation`: how far a box grows past its size on each side, in
@@ -713,25 +717,60 @@ impl ModelPart {
         self.load_pose(self.initial_pose);
     }
 
-    /// The path, by child index, selected by `ModelPart.createPartLookup`: `root` is this
-    /// part; other names use the first match, visiting each part's immediate children before
-    /// their descendants. `None` when no part has that name.
-    pub(crate) fn descendant_path(&self, name: &str) -> Option<Vec<u32>> {
-        if name == "root" {
-            return Some(Vec::new());
+    /// Every part under it by name (`createPartLookup`), to find a bone wherever it sits.
+    ///
+    /// `"root"` is this part. Then come its direct children, then each child's own
+    /// children and their subtrees in turn, child by child in drawing order: the
+    /// order vanilla's `addAllChildren` hands them to `putIfAbsent`. The first part
+    /// found under a name wins, so a direct child shadows a deeper part of the same
+    /// name, a part named `root` never replaces this one, and a part deep in the first
+    /// child's subtree shadows a shallower one under a later child.
+    ///
+    /// It is built once, here; [`PartLookup::get`] allocates nothing. To pose the
+    /// parts it finds, use [`Self::part_lookup_mut`].
+    pub fn part_lookup(&self) -> PartLookup<'_> {
+        PartLookup {
+            root: self,
+            paths: PartPaths::new(self, |name| name),
         }
-        if let Some(index) = self.children.iter().position(|(child, _)| child == name) {
-            return Some(vec![index as u32]);
-        }
-        self.children
-            .iter()
-            .enumerate()
-            .find_map(|(index, (_, child))| {
-                let mut path = child.descendant_path(name)?;
-                path.insert(0, index as u32);
-                Some(path)
-            })
     }
+
+    /// [`Self::part_lookup`] for posing: the same names in the same order, each part
+    /// reached mutably by [`PartLookupMut::get_mut`]. It copies the names once, here;
+    /// [`PartLookupMut::get_mut`] allocates nothing.
+    pub fn part_lookup_mut(&mut self) -> PartLookupMut<'_> {
+        let paths = PartPaths::new(self, str::to_owned);
+        PartLookupMut { root: self, paths }
+    }
+
+    /// `addAllChildren`: each direct child with its path by child index, then each
+    /// child's own children the same way, child by child.
+    fn add_all_children<'a>(
+        &'a self,
+        path: &mut Vec<u32>,
+        accept: &mut impl FnMut(&'a str, &[u32]),
+    ) {
+        for (index, (name, _)) in self.children.iter().enumerate() {
+            path.push(index as u32);
+            accept(name, path);
+            path.pop();
+        }
+        for (index, (_, child)) in self.children.iter().enumerate() {
+            path.push(index as u32);
+            child.add_all_children(path, accept);
+            path.pop();
+        }
+    }
+
+    /// The part at `path`, child index by child index.
+    fn descendant(&self, path: &[u32]) -> Option<&ModelPart> {
+        let mut part = self;
+        for &index in path {
+            part = &part.children.get(index as usize)?.1;
+        }
+        Some(part)
+    }
+
     /// The part at `path`, child index by child index.
     pub(crate) fn descendant_mut(&mut self, path: &[u32]) -> Option<&mut ModelPart> {
         let mut part = self;
@@ -783,6 +822,82 @@ impl ModelPart {
         self.x_scale += by[0];
         self.y_scale += by[1];
         self.z_scale += by[2];
+    }
+}
+
+/// Each name of a [`ModelPart::part_lookup`] and the path, by child index, to the
+/// part it selects; the paths share one list of steps.
+#[derive(Clone, Debug)]
+struct PartPaths<K> {
+    paths: HashMap<K, Range<usize>>,
+    steps: Vec<u32>,
+}
+
+impl<K: Borrow<str> + Eq + Hash> PartPaths<K> {
+    /// `createPartLookup`'s map: `root` first, then `addAllChildren` through `putIfAbsent`.
+    fn new<'a>(root: &'a ModelPart, key: impl Fn(&'a str) -> K) -> Self {
+        let mut paths = HashMap::new();
+        let mut steps = Vec::new();
+        paths.insert(key("root"), 0..0);
+        root.add_all_children(&mut Vec::new(), &mut |name, path| {
+            if !paths.contains_key(name) {
+                let start = steps.len();
+                steps.extend_from_slice(path);
+                paths.insert(key(name), start..steps.len());
+            }
+        });
+        Self { paths, steps }
+    }
+
+    /// The steps to the part named `name`.
+    fn path(&self, name: &str) -> Option<&[u32]> {
+        self.paths.get(name).map(|range| &self.steps[range.clone()])
+    }
+}
+
+/// The parts under a [`ModelPart`] by name, from [`ModelPart::part_lookup`]
+/// (the function vanilla's `createPartLookup()` returns).
+#[derive(Clone, Debug)]
+// exhaustive: its fields are private, so mods cannot build or destructure it
+// no wire: borrows the model it looks parts up in.
+pub struct PartLookup<'a> {
+    root: &'a ModelPart,
+    paths: PartPaths<&'a str>,
+}
+
+impl<'a> PartLookup<'a> {
+    /// The part named `name`, as [`ModelPart::part_lookup`] orders them: `"root"`
+    /// is the part it was made from. `None` when no part has that name.
+    pub fn get(&self, name: &str) -> Option<&'a ModelPart> {
+        self.root.descendant(self.paths.path(name)?)
+    }
+
+    /// The path, by child index, to the part named `name`.
+    pub(crate) fn path(&self, name: &str) -> Option<&[u32]> {
+        self.paths.path(name)
+    }
+}
+
+/// [`PartLookup`] to pose parts through, from [`ModelPart::part_lookup_mut`].
+#[derive(Debug)]
+// exhaustive: its fields are private, so mods cannot build or destructure it
+// no wire: borrows the model it looks parts up in.
+pub struct PartLookupMut<'a> {
+    root: &'a mut ModelPart,
+    paths: PartPaths<String>,
+}
+
+impl PartLookupMut<'_> {
+    /// The part named `name`, as [`PartLookup::get`] selects it.
+    pub fn get(&self, name: &str) -> Option<&ModelPart> {
+        self.root.descendant(self.paths.path(name)?)
+    }
+
+    /// The part named `name`, to pose it. The lookup keeps the places it found
+    /// when made: replacing a part whole through this method changes what the
+    /// names under it find (another child at the same place, or `None`).
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut ModelPart> {
+        self.root.descendant_mut(self.paths.path(name)?)
     }
 }
 
@@ -1085,5 +1200,61 @@ mod tests {
         let mut empty = value;
         empty["parts"] = serde_json::json!([]);
         assert!(serde_json::from_value::<MeshDefinition>(empty).is_err());
+    }
+
+    #[test]
+    fn part_lookup_takes_direct_children_before_deeper_parts_in_vanilla_order() {
+        // createPartLookup: put("root", this), then addAllChildren into putIfAbsent.
+        fn part(x: f32, children: Vec<(&str, ModelPart)>) -> ModelPart {
+            let children = children
+                .into_iter()
+                .map(|(n, c)| (n.to_owned(), c))
+                .collect();
+            ModelPart::new(Vec::new(), children, PartPose::offset(x, 0.0, 0.0))
+        }
+        let mut model = part(
+            1.0,
+            vec![
+                (
+                    "body",
+                    part(
+                        2.0,
+                        vec![
+                            ("head", part(3.0, vec![])),
+                            ("arm", part(4.0, vec![("tail", part(5.0, vec![]))])),
+                            ("root", part(6.0, vec![])),
+                        ],
+                    ),
+                ),
+                ("head", part(7.0, vec![("tail", part(8.0, vec![]))])),
+            ],
+        );
+
+        let parts = model.part_lookup();
+        assert_eq!(parts.get("root").map(|p| p.x), Some(1.0));
+        // The direct child, not body's child that comes first in drawing order.
+        assert_eq!(parts.get("head").map(|p| p.x), Some(7.0));
+        assert_eq!(parts.get("arm").map(|p| p.x), Some(4.0));
+        // body's whole subtree comes before head's children.
+        assert_eq!(parts.get("tail").map(|p| p.x), Some(5.0));
+        assert_eq!(parts.path("tail"), Some(&[0, 1, 0][..]));
+        assert!(parts.get("leg").is_none());
+
+        let mut parts = model.part_lookup_mut();
+        assert_eq!(parts.get("root").map(|p| p.x), Some(1.0));
+        parts.get_mut("head").unwrap().x_rot = 0.5;
+        parts.get_mut("tail").unwrap().x_rot = 0.25;
+        assert!(parts.get_mut("leg").is_none());
+        assert_eq!(model.get_child("head").unwrap().x_rot, 0.5);
+        let body = model.get_child("body").unwrap();
+        assert_eq!(body.get_child("head").unwrap().x_rot, 0.0);
+        assert_eq!(
+            body.get_child("arm")
+                .unwrap()
+                .get_child("tail")
+                .unwrap()
+                .x_rot,
+            0.25
+        );
     }
 }

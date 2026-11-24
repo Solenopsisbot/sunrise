@@ -1,5 +1,5 @@
 //! The world's datafix chain applied to one saved compound, without a chunk or level.
-use super::{CURRENT, Ty, dynamic, identifier, key, schema, tables, update};
+use super::{CURRENT, Ty, dynamic, identifier, key, schema, source_schema_key, tables, try_update};
 use mod_api::{NbtDataType, NbtUpgradeError};
 use sunrise_core::nbt::{Compound, JavaString, Tag};
 
@@ -10,19 +10,13 @@ use sunrise_core::nbt::{Compound, JavaString, Tag};
 /// and never limits fixing or writing it.
 pub const MAX_DEPTH: usize = 512;
 
-/// `DataFixers.addFixers` starts with schema V99. World loaders can infer a missing version;
-/// a caller supplying a standalone compound needs to select an actual source schema.
-const FIRST_SCHEMA: i32 = 99;
-
 /// `DataFixer.update` at one vanilla root reference. No world context is added or used.
 pub fn upgrade_compound(
     kind: NbtDataType,
     data_version: i32,
     tag: Compound,
 ) -> Result<Compound, NbtUpgradeError> {
-    let refusal = if data_version < FIRST_SCHEMA {
-        Some(NbtUpgradeError::UnsupportedVersion(data_version))
-    } else if data_version > CURRENT {
+    let refusal = if data_version > CURRENT {
         Some(NbtUpgradeError::FutureVersion(data_version))
     } else {
         (!within_depth(&tag)).then_some(NbtUpgradeError::TooDeep)
@@ -38,7 +32,7 @@ pub fn upgrade_compound(
         NbtDataType::Entity => Ty::Entity,
         NbtDataType::EntityTree => Ty::EntityTree,
     };
-    let from = key(data_version as u32, 0);
+    let from = source_schema_key(data_version);
     // BlockStateFieldNamesFix (V5006) renamed `Name` to `id`.
     let discriminator = if root == Ty::BlockState && from < key(5006, 0) {
         "Name"
@@ -50,7 +44,7 @@ pub fn upgrade_compound(
         Some(Tag::String(name)) if !name.0.is_empty() => Some(name),
         // V99's item name is a number or a string. `ItemIdFix` removes the numeric form in V102.
         Some(id)
-            if root == Ty::ItemStack && data_version < 102 && dynamic::as_number(id).is_some() =>
+            if root == Ty::ItemStack && from < key(102, 0) && dynamic::as_number(id).is_some() =>
         {
             None
         }
@@ -69,24 +63,24 @@ pub fn upgrade_compound(
     }
     let mut value = Tag::Compound(tag);
     let mut prefix = None;
-    let run = std::panic::AssertUnwindSafe(|| {
-        if root == Ty::BlockEntity && !schema::block_entity_known(&value, from)
+    let mut run = || -> tables::Result {
+        if root == Ty::BlockEntity && !schema::block_entity_known(&value, from)?
             || matches!(root, Ty::Entity | Ty::EntityTree)
                 && from < schema::flat::END
-                && !schema::flat::entity_tree_known(&value, from)
+                && !schema::flat::entity_tree_known(&value, from)?
         {
-            return;
+            return Ok(());
         }
         // `Type.readAndWrite` lays the fixed keys over the source codec's remainder.
         // Tagged-choice roots leave the original compound there; the other roots don't.
         if tagged_choice {
             prefix = Some(value.clone());
         }
-        update(root, &mut value, data_version, CURRENT);
-    });
-    if let Err(error) = tables::standalone(run) {
+        try_update(root, &mut value, data_version, CURRENT)
+    };
+    if run().is_err() {
         dismantle(value);
-        return Err(error);
+        return Err(NbtUpgradeError::LegacyTablesUnavailable);
     }
     let Tag::Compound(mut upgraded) = value else {
         dismantle(value);

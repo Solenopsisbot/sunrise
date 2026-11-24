@@ -443,6 +443,27 @@ impl LiveFeatures {
             }
         }
     }
+    /// A structure piece's feature: [`Self::place_configured`] or
+    /// [`Self::place_placed`]. An unknown id, and any placement error,
+    /// report failure.
+    pub fn place_for_piece<W: FeatureWorld + PlacementContext>(
+        &self,
+        feature: super::structure::jigsaw::FeatureKey<'_>,
+        world: &mut W,
+        random: &mut impl RandomSource,
+        origin: [i32; 3],
+    ) -> bool
+    where
+        W::Error: std::fmt::Display,
+    {
+        use super::structure::jigsaw::FeatureKey;
+        match feature {
+            FeatureKey::Configured(name) => self.place_configured(name, world, random, origin),
+            FeatureKey::Placed(name) => self
+                .place_placed(name, world, random, origin)
+                .unwrap_or(false),
+        }
+    }
     /// Temperature settings of a biome.
     pub fn biome_temperature(
         &self,

@@ -23,7 +23,7 @@ use std::collections::HashSet;
 use std::fmt::Write;
 
 use naga::ShaderStage;
-use naga::front::glsl::{Frontend, Options};
+use naga::front::glsl::{Frontend, InterfaceLimits, Options};
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 mod glsl_fixups;
@@ -43,6 +43,15 @@ pub const SAMPLERS: [(&str, u32); 3] = [("Sampler0", 4), ("Sampler1", 6), ("Samp
 /// `#ifdef OIT`): fine while the preprocessor drops them, an error when a stage uses one.
 const OTHER_BINDINGS: u32 = 16;
 
+/// A device's stage interface limits, as naga's GLSL front end takes them: its
+/// `max_inter_stage_shader_variables` and `max_vertex_attributes`.
+pub fn interface_limits(limits: &wgpu::Limits) -> InterfaceLimits {
+    InterfaceLimits {
+        inter_stage_variables: limits.max_inter_stage_shader_variables,
+        vertex_attributes: limits.max_vertex_attributes,
+    }
+}
+
 /// What the caller's pipeline gives the pack's vertex shader.
 pub struct Glue<'a> {
     /// The inputs of the pipeline's vanilla vertex format: name and GLSL type.
@@ -55,6 +64,8 @@ pub struct Glue<'a> {
     pub finish: &'a str,
     /// The expression the pack's `gl_VertexID` and `gl_VertexIndex` read.
     pub vertex_id: &'a str,
+    /// The stage interface limits the stages are translated with ([`sunrise_shaders::DEVICELESS_INTERFACE_LIMITS`]).
+    pub interface: InterfaceLimits,
 }
 
 /// A pipeline's two stages, validated.
@@ -330,14 +341,22 @@ pub fn translate_core_at(
         .map_err(|e| format!("vertex shader: {e}"))?;
     let fragment_code = rewrite(&fragment_text, ShaderStage::Fragment, glue, &mut names)
         .map_err(|e| format!("fragment shader: {e}"))?;
-    let vertex = compile(ShaderStage::Vertex, &vertex_code, defines, &names, provided)
-        .map_err(|e| format!("vertex shader: {e}"))?;
+    let vertex = compile(
+        ShaderStage::Vertex,
+        &vertex_code,
+        defines,
+        &names,
+        provided,
+        glue.interface,
+    )
+    .map_err(|e| format!("vertex shader: {e}"))?;
     let fragment = compile(
         ShaderStage::Fragment,
         &fragment_code,
         defines,
         &names,
         provided,
+        glue.interface,
     )
     .map_err(|e| format!("fragment shader: {e}"))?;
     let given = locations(&vertex.0, false);
@@ -458,9 +477,17 @@ fn program_defines<'a>(defines: &[&'a str]) -> Vec<&'a str> {
 }
 
 /// naga's options for one `stage` of a program with the pipeline's `defines`: the backend's
-/// first ([`program_defines`]). The core shaders' and the post shaders' one way in.
-pub(crate) fn glsl_options(stage: ShaderStage, defines: &[&str]) -> Options {
-    let mut options = Options::from(stage);
+/// first ([`program_defines`]), and the device's stage interface `limits`. The core shaders' and
+/// the post shaders' one way in.
+pub(crate) fn glsl_options(
+    stage: ShaderStage,
+    defines: &[&str],
+    limits: InterfaceLimits,
+) -> Options {
+    let mut options = Options {
+        interface_limits: limits,
+        ..Options::from(stage)
+    };
     for define in program_defines(defines) {
         let (name, value) = define.split_once(' ').unwrap_or((define, ""));
         options.defines.insert(name.to_owned(), value.to_owned());
@@ -1033,8 +1060,9 @@ fn compile(
     defines: &[&str],
     names: &Names,
     provided: &dyn Fn(&str) -> bool,
+    limits: InterfaceLimits,
 ) -> Result<(naga::Module, naga::valid::ModuleInfo), String> {
-    let options = glsl_options(stage, defines);
+    let options = glsl_options(stage, defines, limits);
     let module = Frontend::default().parse(&options, code).map_err(|e| {
         e.errors
             .iter()
@@ -1141,6 +1169,7 @@ mod tests {
         setup: "Position = vec3(hz_pos, 0.0); Color = hz_color; UV0 = hz_uv;",
         finish: "gl_Position.z = 0.5 * gl_Position.w;",
         vertex_id: "hz_vertex_id()",
+        interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
     };
 
     /// 26.3's `text.vsh` and `text.fsh` in shape: `#include`, explicit locations, an extension.
@@ -1453,6 +1482,33 @@ mod tests {
         assert_eq!(block_name("uniform Globals"), Some("Globals"));
         assert_eq!(block_name("uniform float x;"), None);
         assert_eq!(block_name("uniform sampler2D Sampler0;"), None);
+    }
+
+    /// An array too large to lay out (#4134) is the shader's error at its line, not a panic.
+    #[test]
+    fn an_array_too_large_to_lay_out_is_an_error() {
+        let vsh = "#version 330\nout vec4 vertexColor;\nvoid main() { vertexColor = vec4(1.0); }\n";
+        let fsh = "#version 330\nin vec4 vertexColor;\nfloat big[0x7fffffff];\nout vec4 fragColor;\n\
+            void main() { fragColor = vertexColor; }\n";
+        let error = translate_core(vsh, fsh, &[], &include, &GLUE).unwrap_err();
+        assert!(error.starts_with("fragment shader: line "), "{error}");
+        assert!(error.contains("(float big[0x7fffffff];)"), "{error}");
+    }
+
+    /// An output array whose second element would take location 2^32 (#4912) is the shader's
+    /// error at its line, not an overflow.
+    #[test]
+    fn an_output_whose_locations_pass_u32_is_an_error() {
+        let vsh = "#version 330\nout vec4 vertexColor;\nvoid main() { vertexColor = vec4(1.0); }\n";
+        let fsh = "#version 330\nin vec4 vertexColor;\nout vec4 fragColor;\n\
+            layout(location = 4294967295u) out vec4 extra[2];\n\
+            void main() { fragColor = vertexColor; extra[0] = vertexColor; extra[1] = vertexColor; }\n";
+        let error = translate_core(vsh, fsh, &[], &include, &GLUE).unwrap_err();
+        assert!(error.starts_with("fragment shader: line "), "{error}");
+        assert!(
+            error.contains("(layout(location = 4294967295u) out vec4 extra[2];)"),
+            "{error}"
+        );
     }
 
     #[test]

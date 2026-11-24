@@ -200,6 +200,12 @@ pub struct DimensionSettings {
     /// schedule only, no clock), `end` (the End's timeline and clock) or `none`. They set the
     /// level's sky over the day, whether monsters burn in daylight, and the clock `/time` reads.
     pub day_cycle: String,
+    /// The `WorldClock` the dimension type names as `default_clock` in place of `day_cycle`'s:
+    /// one a mod registered with [`register_world_clock`](crate::Registrar::register_world_clock)
+    /// (`mymod:dungeon`), or `minecraft:overworld` or `minecraft:the_end`. Every level of the
+    /// dimension type follows it: its time (`level.clock_time`), and what `/time` and
+    /// `level.clock(host)` set there. None keeps `day_cycle`'s clock.
+    pub clock: Option<String>,
 }
 
 impl Default for DimensionSettings {
@@ -249,6 +255,7 @@ impl Default for DimensionSettings {
             fog_color: None,
             cloud_height: None,
             day_cycle: "overworld".into(),
+            clock: None,
         }
     }
 }
@@ -421,6 +428,17 @@ pub(crate) struct DimensionInfo {
     pub(crate) mod_id: &'static str,
     pub(crate) id: Box<str>,
     pub(crate) settings: DimensionSettings,
+}
+
+/// The world clocks registered at startup (`register_world_clock`), as `namespace:path` ids in
+/// registration order, for the game's `minecraft:world_clock` registry.
+// hidden: the game's registry reads the registered clocks; mods declare them through the registrar.
+#[doc(hidden)]
+pub fn world_clock_declarations() -> Vec<String> {
+    crate::parts::installed_world_clock_list()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// The dimensions registered at startup, for the game's pack-entry adapter.

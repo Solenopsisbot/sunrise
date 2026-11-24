@@ -119,6 +119,32 @@ impl SizeAnswer {
     pub fn effective(&self) -> [f32; 3] {
         self.size.unwrap_or(self.vanilla)
     }
+    /// The box of an entity whose pose doesn't size it, at `position`: `vanilla_box`, the one
+    /// its kind makes for its vanilla size `vanilla`, unless `answer` resized it and still
+    /// holds for that size. Then `EntityDimensions.makeBoundingBox` of the answer, on the same
+    /// bottom (a wind charge's sits below its position).
+    pub fn sized_box(
+        answer: Option<Self>,
+        vanilla: [f32; 3],
+        position: Vec3,
+        vanilla_box: Aabb,
+    ) -> Aabb {
+        let Some([width, height, _]) =
+            answer.and_then(|answer| answer.size.filter(|_| answer.vanilla == vanilla))
+        else {
+            return vanilla_box;
+        };
+        let half = f64::from(width / 2.0);
+        let bottom = vanilla_box.min_position().y;
+        Aabb::new(
+            Vec3::new(position.x - half, bottom, position.z - half),
+            Vec3::new(
+                position.x + half,
+                bottom + f64::from(height),
+                position.z + half,
+            ),
+        )
+    }
 }
 impl Dimensions {
     pub fn to_array(self) -> [f32; 3] {

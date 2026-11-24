@@ -146,7 +146,7 @@ impl Game<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::game) mod tests {
     use super::*;
 
     #[test]
@@ -205,6 +205,10 @@ mod tests {
     #[test]
     #[ignore = "run by tools/test_camera_parity.py"]
     fn interaction_unsynced_default_sync_and_pose_sync_seat_height_26_3() {
+        run_interaction_unsynced_default_sync_and_pose_sync_seat_height_26_3();
+    }
+
+    pub(in crate::game) fn run_interaction_unsynced_default_sync_and_pose_sync_seat_height_26_3() {
         let witness = parity_witness();
         let life = &witness["interaction_lifecycle"];
 
@@ -236,6 +240,10 @@ mod tests {
     #[test]
     #[ignore = "run by tools/test_camera_parity.py"]
     fn interaction_negative_height_bounds_invert_downward_26_3() {
+        run_interaction_negative_height_bounds_invert_downward_26_3();
+    }
+
+    pub(in crate::game) fn run_interaction_negative_height_bounds_invert_downward_26_3() {
         let witness = parity_witness();
         let life = &witness["interaction_lifecycle"];
         for (case_name, width, height) in [

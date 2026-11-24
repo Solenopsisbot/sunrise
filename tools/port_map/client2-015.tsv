@@ -85,7 +85,7 @@ AdvancementsScreen.repositionElements	skip:ui		layout only: window position
 AdvancementsScreen.removed	missing		minor: the server is not sent the closed-screen packet when the advancements screen closes
 AdvancementsScreen.tick	port	crates/sunrise-client/src/game/interface/advancements_screen.rs::Game::adv_tick_hover	hover tracking and card fade; gap: minor: runs from the frame, not the 20 Hz tick
 AdvancementsScreen.mouseClicked	port	crates/sunrise-client/src/game/interface/advancements_screen.rs::Game::advancements_mouse	left click selects a tab, Done closes; gap: minor: tab pages are not filtered
-AdvancementsScreen.keyPressed	port	crates/sunrise-client/src/game/interface/play_keys.rs::Game::key_pressed	the advancements key (L) closes the screen
+AdvancementsScreen.keyPressed	port	crates/sunrise-client/src/game.rs::Game::screen_key_response	the bound Advancements key closes the screen, consumed before KeyPressed.Post
 AdvancementsScreen.extractRenderState	port	crates/sunrise-client/src/game/interface/advancements_screen.rs::Game::draw_advancements	window, tabs and contents; gap: minor: no 'page / pages' text
 AdvancementsScreen.mouseDragged	port	crates/sunrise-client/src/game/interface/advancements_screen.rs::Game::advancements_drag	first movement starts scrolling, later ones move the tree
 AdvancementsScreen.mouseScrolled	port	crates/sunrise-client/src/game/interface/advancements_screen.rs::Game::advancements_scroll	wheel scrolls 16 px per step

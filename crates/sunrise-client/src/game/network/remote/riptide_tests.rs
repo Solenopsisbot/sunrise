@@ -9,11 +9,20 @@ use sunrise_protocol::{buf::Reader, connection::ConnReader};
 const OWNER: u32 = 12;
 const START: Vec3 = Vec3::new(4.5, 64.0, 4.5);
 
+/// The arena's one chunk carries plains in every quart `BiomeManager.getBiome` can pick for
+/// the blocks `Entity.isInRain` samples at either start height: the feet blocks (4, 64, 4) and
+/// (4, 65, 4) and the tops (4, 65, 4) and (4, 66, 4), whose corners are the quarts with x and
+/// z in {0, 1} and y in 15..=17.
 fn arena(game: &mut Game<'_>, roof: bool) {
     let plains = game.res.biomes().id("minecraft:plains");
     let mut chunk = Chunk::empty(0, 0);
-    for z in 1..=3 {
-        chunk.set_biome_cell(1, (64 - game.world.bottom_y()) >> 2, z, plains);
+    let bottom = game.world.bottom_y() >> 2;
+    for x in 0..=1 {
+        for y in 15..=17 {
+            for z in 0..=1 {
+                chunk.set_biome_cell(x, y - bottom, z, plains);
+            }
+        }
     }
     game.streaming.insert_remote(&mut game.world, chunk);
     let registry = game.pack.assets.registry;

@@ -17,6 +17,15 @@ impl PartRegistrar {
                     dimension.mod_id, dimension.id
                 ));
             }
+            if let Some(clock) = &dimension.settings.clock
+                && !VANILLA_CLOCKS.contains(&clock.as_str())
+                && !self.world_clocks.iter().any(|c| **c == **clock)
+            {
+                self.refused.push(format!(
+                    "{} registered dimension {} with the unknown world clock {clock:?}",
+                    dimension.mod_id, dimension.id
+                ));
+            }
             if let Some(source) = &dimension.settings.mod_biome_source
                 && !self.biome_sources.iter().any(|s| *s.id == **source)
             {
@@ -29,7 +38,39 @@ impl PartRegistrar {
     }
 }
 
+/// The world clocks vanilla's registry has (`WorldClocks`).
+const VANILLA_CLOCKS: [&str; 2] = ["minecraft:overworld", "minecraft:the_end"];
+
 impl DimensionsRegistrar for PartRegistrar {
+    fn add_world_clock(&mut self, name: &str) {
+        let id = match self.owned_declaration_id(name) {
+            Ok(id) => id,
+            Err(reason) => {
+                self.refused.push(reason);
+                return;
+            }
+        };
+        let refusal = if !valid_level_id(&id) {
+            Some(format!(
+                "{} registered world clock {id:?}, whose name must be lowercase letters, digits                  and _ . - with / between segments, none empty, `.` or `..`",
+                self.mod_id
+            ))
+        } else if VANILLA_CLOCKS.contains(&id.as_str()) {
+            Some(format!(
+                "{} registered world clock {id}, which is a vanilla clock",
+                self.mod_id
+            ))
+        } else if self.world_clocks.iter().any(|c| **c == *id) {
+            Some(format!("{} registered world clock {id} twice", self.mod_id))
+        } else {
+            None
+        };
+        match refusal {
+            Some(refusal) => self.refused.push(refusal),
+            None => self.world_clocks.push(id.into()),
+        }
+    }
+
     fn add_dimension(&mut self, name: &str, settings: crate::DimensionSettings) {
         let id = match self.owned_declaration_id(name) {
             Ok(id) => id,

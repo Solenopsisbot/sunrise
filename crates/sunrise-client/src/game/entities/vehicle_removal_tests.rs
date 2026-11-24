@@ -358,6 +358,10 @@ fn wind_charged_mob_removal_cannot_reenter_through_its_own_burst() {
 #[test]
 #[ignore = "daily"]
 fn mob_removal_order_witness() {
+    run_mob_removal_order_witness();
+}
+
+pub(in crate::game) fn run_mob_removal_order_witness() {
     let observation = Arc::new(Observation::default());
     with_removal_test_hooks(Observe(observation.clone()), |game| {
         game.boats

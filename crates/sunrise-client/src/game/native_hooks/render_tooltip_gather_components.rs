@@ -14,7 +14,7 @@ impl Game<'_> {
     /// frame the tooltip shows, never for one the stack hides. Client-side.
     pub(in crate::game) fn native_render_tooltip_gather_components(
         &self,
-        stack: &ItemStack,
+        stack: &mod_api::ItemStack,
         screen_width: i32,
         screen_height: i32,
         elements: &mut Vec<TooltipElement>,

@@ -1319,14 +1319,11 @@ impl Game<'_> {
                             destroyed = item.health <= 0;
                             if destroyed {
                                 let at = item.position;
-                                // Health was already reduced above. Run the shared
-                                // onDestroyed path without applying damage twice.
-                                destroyed_contents.extend(
-                                    item.hurt(0)
-                                        .unwrap_or_default()
-                                        .into_iter()
-                                        .map(|stack| (stack, at)),
-                                );
+                                // Health was already reduced above. Fire `ItemStack.onDestroyed`
+                                // with the original intact stack before spilling and discarding.
+                                let spilled = self.destroy_item_entity_drops(i, damage_type);
+                                destroyed_contents
+                                    .extend(spilled.into_iter().map(|stack| (stack, at)));
                             }
                         }
                     }
@@ -2221,7 +2218,7 @@ fn blast_resistance(base: f32, cap: Option<f32>, kept: bool) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::game) mod tests {
     use super::*;
 
     #[test]
@@ -2621,6 +2618,10 @@ mod tests {
     #[test]
     #[ignore = "requires prepared resources; tools/test_explosion_items_parity.py"]
     fn explosion_items_parity_fixture() {
+        run_explosion_items_parity_fixture();
+    }
+
+    pub(in crate::game) fn run_explosion_items_parity_fixture() {
         let directory = std::env::var_os("SUNRISE_EXPLOSION_ITEMS_FIXTURE")
             .expect("set SUNRISE_EXPLOSION_ITEMS_FIXTURE to the fixture directory");
         crate::game::native_entity_refs::tests::with_game(|game| {

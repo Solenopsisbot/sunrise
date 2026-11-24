@@ -13,6 +13,22 @@ pub trait PlayerSessionBackend {
     /// borrows the host; copy it only to keep it beyond that borrow.
     fn player_address(&self, player: PlayerRef) -> Option<&str>;
     /// Side: server.
+    /// The client-supplied host and port from this connection's login handshake,
+    /// distinct from the peer IP, after any `player_handshake` rewrite. Only the host text
+    /// before the first NUL is kept.
+    /// A transfer uses the new connection's handshake. Displaced online players
+    /// keep this value. It borrows the host; clone it if it must outlive that
+    /// borrow. This is not a verified destination or necessarily the name the
+    /// player originally entered.
+    ///
+    /// The host may be empty, as `ClientIntentionPacket` allows. The window's own player on an
+    /// integrated server reports its memory connection's handshake: port 0, as in vanilla's
+    /// `Minecraft.doWorldLoad`, and the host `local`, which stands for the local address
+    /// (vanilla sends `LocalAddress.toString()`, `local:` plus a channel id; Sunrise has no such id).
+    ///
+    /// `None` on a client, for a stale or unavailable player, or for a fake player.
+    fn player_virtual_host(&self, player: PlayerRef) -> Option<&VirtualHost>;
+    /// Side: server.
     /// The stable name of a connected or acting player, borrowed from the host.
     /// None for a stale or unavailable player; displaced online players retain their identity.
     fn player_name(&self, player: PlayerRef) -> Option<&str>;

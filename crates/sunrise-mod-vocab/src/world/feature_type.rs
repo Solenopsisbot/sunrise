@@ -20,7 +20,7 @@
 //! Feature types run on the worldgen workers.
 use crate::world::datapack_registry::{DatapackEntry, DatapackField};
 use crate::world::structure_type::HeightmapType;
-use crate::{BlockKey, BlockMetadata, BlockState, BlockUpdateFlags, RandomSource};
+use crate::{BiomeKey, BlockKey, BlockMetadata, BlockState, BlockUpdateFlags, RandomSource};
 use std::sync::Arc;
 use sunrise_core::nbt::Compound;
 
@@ -102,6 +102,15 @@ pub trait FeatureContext {
     /// `BlockState.is(tag)` of the block at `pos`: whether it is in block tag `tag`
     /// (`minecraft:leaves`), or `None` where the level can't be read.
     fn block_in_tag(&mut self, pos: [i32; 3], tag: &str) -> Option<bool>;
+    /// `WorldGenLevel.getBiome(pos)` (`LevelReader.getBiome`), as vanilla's
+    /// `SnowAndFreezeFeature` reads it and NeoForge mods read it the same way: the biome the
+    /// level holds at `pos`, the noise biome of the quart the biome zoom picks for that block,
+    /// the same read the game's own features make. `None` where the level can't be read, as
+    /// [`block`](Self::block) answers: in decoration, outside the 3×3 chunks around the one
+    /// being decorated. The key is of the world's current data load, equal to what
+    /// [`KeysHost::biome_key`](crate::KeysHost::biome_key) gives for the same id; a key kept
+    /// from before a reload equals none.
+    fn biome(&mut self, pos: [i32; 3]) -> Option<BiomeKey>;
     /// `LevelWriter.setBlock(pos, state, flags)`, as `Feature.setBlock` (flags
     /// `BlockUpdateFlags::NEIGHBORS | CLIENTS`) and the tree features (`| KNOWN_SHAPE`) call it:
     /// whether it will be written.

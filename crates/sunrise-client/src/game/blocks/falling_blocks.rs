@@ -75,7 +75,7 @@ impl Game<'_> {
         if f.ground.on_ground {
             self.falling_block_impact(&mut f);
             if f.fall_distance > 0.0 {
-                let bounds = sunrise_client::falling_block::bounds(f.position);
+                let bounds = f.bounds();
                 self.post_landing_event(f.position, bounds, false);
             }
             f.fall_distance = 0.0;
@@ -213,7 +213,7 @@ impl Game<'_> {
         let movement = sunrise_client::move_gate::entities_resolve_with_context(
             &mut gate,
             &mut collisions,
-            sunrise_client::falling_block::bounds(f.position),
+            f.bounds(),
             wanted,
             0.0,
             false,
@@ -240,10 +240,7 @@ impl Game<'_> {
         if !gate.skipped() {
             body.record_move(
                 sunrise_client::motion::BodyCollision {
-                    footprint: (
-                        f.position,
-                        sunrise_client::falling_block::bounds(f.position),
-                    ),
+                    footprint: (f.position, f.bounds()),
                     movement: (wanted, movement),
                     authoritative: !self.options.execution_role.is_client(),
                     context,
@@ -260,11 +257,7 @@ impl Game<'_> {
         if !self.options.execution_role.is_client() && f.ground.on_ground {
             self.falling_block_impact(f);
             if f.fall_distance > 0.0 {
-                self.post_landing_event(
-                    f.position,
-                    sunrise_client::falling_block::bounds(f.position),
-                    false,
-                );
+                self.post_landing_event(f.position, f.bounds(), false);
             }
             f.fall_distance = 0.0;
         }
@@ -285,15 +278,8 @@ impl Game<'_> {
         let side = game_side!(self);
         let body = self.body_motion(&side);
         body.apply_block_speed(f.position, &mut f.velocity);
-        let writes = self.body_step_on(
-            entity,
-            (
-                f.position,
-                sunrise_client::falling_block::bounds(f.position),
-            ),
-            &f.ground,
-            &mut f.velocity,
-        );
+        let writes =
+            self.body_step_on(entity, (f.position, f.bounds()), &f.ground, &mut f.velocity);
         super::entity::apply_contact_writes(
             writes,
             &mut f.velocity,
@@ -373,13 +359,7 @@ impl Game<'_> {
         for pos in tops {
             self.bubble_column_particles(pos);
         }
-        self.entity_powder_snow_particles(
-            from,
-            f.position,
-            sunrise_client::falling_block::bounds(f.position),
-            f.velocity,
-            false,
-        );
+        self.entity_powder_snow_particles(from, f.position, f.bounds(), f.velocity, false);
         // FallingBlockEntity.tick handles its portal after the move's block
         // effects, before placing/dropping on the floor under an End portal.
         let teleported = self.falling_through_portal(f);

@@ -2435,10 +2435,10 @@ mod allay_owner_damage_tests {
 
 #[cfg(test)]
 #[path = "registered_damage_tests.rs"]
-mod registered_damage_tests;
+pub(in crate::game) mod registered_damage_tests;
 
 #[cfg(test)]
-mod datapack_damage_tests {
+pub(in crate::game) mod datapack_damage_tests {
     use crate::game::{commands::Target, native_entity_refs::tests::with_game};
     use sunrise_client::mobs::Mob;
     use sunrise_core::geometry::Vec3;
@@ -2502,6 +2502,10 @@ mod datapack_damage_tests {
     #[test]
     #[ignore = "daily"]
     fn a_datapack_damage_type_hurts_a_mob() {
+        run_a_datapack_damage_type_hurts_a_mob();
+    }
+
+    pub(in crate::game) fn run_a_datapack_damage_type_hurts_a_mob() {
         with_game(|game| {
             with_pack(game);
             pig(game, 1, Vec3::new(0.5, 64.0, 0.5));
@@ -2520,6 +2524,10 @@ mod datapack_damage_tests {
     #[test]
     #[ignore = "daily"]
     fn a_datapack_types_tags_reach_the_mob_hurt_path() {
+        run_a_datapack_types_tags_reach_the_mob_hurt_path();
+    }
+
+    pub(in crate::game) fn run_a_datapack_types_tags_reach_the_mob_hurt_path() {
         with_game(|game| {
             with_pack(game);
             pig(game, 1, Vec3::new(0.5, 64.0, 0.5));
@@ -2561,6 +2569,11 @@ mod datapack_damage_tests {
     #[test]
     #[ignore = "daily"]
     fn a_datapack_explosion_type_removes_a_crystal_quietly_and_hurts_the_dragon() {
+        run_a_datapack_explosion_type_removes_a_crystal_quietly_and_hurts_the_dragon();
+    }
+
+    pub(in crate::game) fn run_a_datapack_explosion_type_removes_a_crystal_quietly_and_hurts_the_dragon()
+     {
         with_game(|game| {
             with_pack(game);
             let crystal = |game: &mut crate::game::Game<'_>, id: u32| {

@@ -152,9 +152,7 @@ impl Game<'_> {
                 forgotten_credits.push(item.into_event_credit());
                 continue;
             }
-            sunrise_client::spans::time("pr_forget", || {
-                self.forget_remote_columns(&mut forgotten, true)
-            });
+            sunrise_client::spans::time("pr_forget", || self.forget_remote_packets(&mut forgotten));
             forgotten_credits.clear();
             let chunk = matches!(item, Received::Chunk(_, _));
             if chunk && !overdue && !before_tick && *chunks >= CHUNK_PACKETS_PER_FRAME {
@@ -241,9 +239,7 @@ impl Game<'_> {
             return Ok(());
         }
         if self.remote.is_some() {
-            sunrise_client::spans::time("pr_forget", || {
-                self.forget_remote_columns(&mut forgotten, true)
-            });
+            sunrise_client::spans::time("pr_forget", || self.forget_remote_packets(&mut forgotten));
         }
         if let Some(r) = self.remote.as_mut() {
             r.backlog_since = if events.is_empty() {

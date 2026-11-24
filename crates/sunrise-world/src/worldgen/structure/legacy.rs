@@ -32,18 +32,16 @@ pub type Result<T> = std::result::Result<T, PlacementQueryError>;
 /// Data markers of a placed template: (metadata, absolute position).
 pub type Markers = Vec<(String, [i32; 3])>;
 
-/// The random draws legacy pieces make.
-pub trait PieceRandom: ProcessorRandom {
+/// The random draws pieces and pool elements make, from any random.
+pub trait PieceDraws: ProcessorRandom {
     fn boolean(&mut self) -> bool;
     fn double(&mut self) -> f64;
     /// `nextInt()`.
     fn int_unbounded(&mut self) -> i32;
     /// `nextGaussian`.
     fn gaussian(&mut self) -> f64;
-    /// The concrete random, for callers that need all of `RandomSource`.
-    fn as_any(&mut self) -> &mut dyn std::any::Any;
 }
-impl<R: RandomSource + 'static> PieceRandom for R {
+impl<R: RandomSource> PieceDraws for R {
     fn boolean(&mut self) -> bool {
         self.next_boolean()
     }
@@ -56,6 +54,13 @@ impl<R: RandomSource + 'static> PieceRandom for R {
     fn gaussian(&mut self) -> f64 {
         self.next_gaussian()
     }
+}
+/// The random a piece places with.
+pub trait PieceRandom: PieceDraws {
+    /// The concrete random, for callers that need all of `RandomSource`.
+    fn as_any(&mut self) -> &mut dyn std::any::Any;
+}
+impl<R: RandomSource + 'static> PieceRandom for R {
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -104,6 +109,33 @@ pub trait PieceWorld {
         random: &mut dyn ProcessorRandom,
         flags: i32,
     ) -> Result<bool>;
+    /// `ConfiguredFeature.place` or `PlacedFeature.place` of `feature` at `pos`
+    /// with the piece's random, as `FeaturePoolElement.place` places its feature.
+    /// Only a generating structure's pieces place features; elsewhere this is
+    /// refused.
+    fn place_feature(
+        &mut self,
+        _random: &mut dyn PieceRandom,
+        _feature: super::jigsaw::FeatureKey<'_>,
+        _pos: [i32; 3],
+    ) -> Result<bool> {
+        Err(PlacementQueryError::Failed(
+            "features are placed only while a structure generates".into(),
+        ))
+    }
+    /// `StructurePoolElement.place` of `element` with the piece's random, as a
+    /// pool piece places it. Only a generating structure's pieces place
+    /// elements; elsewhere this is refused.
+    fn place_element(
+        &mut self,
+        _random: &mut dyn PieceRandom,
+        _element: &super::jigsaw::PoolElement,
+        _at: super::jigsaw::ElementAt,
+    ) -> Result<bool> {
+        Err(PlacementQueryError::Failed(
+            "pool elements are placed only while a structure generates".into(),
+        ))
+    }
 }
 impl<W: FeatureWorld + PlacementContext> PieceWorld for W {
     fn block(&mut self, pos: [i32; 3]) -> Result<BlockStateId> {

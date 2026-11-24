@@ -7,6 +7,7 @@ fn mod_screen_data_is_its_windows_only() {
             window: 4,
             generation: 1,
             name: "gtmod:menu".into(),
+            title: None,
             block: Some("gtmod:machine".into()),
             pos: None,
             mod_type: None,
@@ -20,6 +21,7 @@ fn mod_screen_data_is_its_windows_only() {
             mod_api::MenuScreen::new(mod_api::MenuScreenLayout::default()),
         ),
         shown: true,
+        detached: false,
     };
     assert!(s.set_data(4, 1, 7));
     assert!(!s.set_data(3, 1, 99));

@@ -162,11 +162,11 @@ impl Codec<NumberFormat> for NumberFormat {
             NumberFormat::Blank => w.varint(0),
             NumberFormat::Styled(t) => {
                 w.varint(1);
-                w.nbt(t);
+                TrustedStyle::write(t, w);
             }
             NumberFormat::Fixed(t) => {
                 w.varint(2);
-                w.nbt(t);
+                TrustedComponent::write(t, w);
             }
         }
     }
@@ -214,7 +214,7 @@ impl Codec<SetObjective> for SetObjective {
         w.i8(v.method);
         if v.method == 0 || v.method == 2 {
             let (name, render, format) = v.display.clone().unwrap_or((Tag::End, 0, None));
-            w.nbt(&name);
+            TrustedComponent::write(&name, w);
             w.varint(render);
             <Opt<NumberFormat>>::write(&format, w);
         }

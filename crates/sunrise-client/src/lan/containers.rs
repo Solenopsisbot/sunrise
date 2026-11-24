@@ -85,6 +85,12 @@ impl PreparedClick {
     }
 }
 
+/// Items detached from a closing hub menu that the game returns to the player or drops.
+pub struct ClosedHubMenu {
+    pub carried: Option<ItemStack>,
+    pub processing_inputs: Vec<ItemStack>,
+}
+
 impl Hub {
     /// `RemoteSampleLogger.useSample`: a tick-time sample to every player who asked for
     /// `dedicated_server_tick_time` (registry id 0) and passes
@@ -444,6 +450,11 @@ impl Hub {
                 title,
             }));
             let mod_type = crate::containers::mod_menu_type(menu_kind);
+            let slot_changed_seen = mod_type.map(|t| {
+                let mut seen = items.clone();
+                seen.resize(t.slots, None);
+                seen
+            });
             g.menu = Some(Menu {
                 window,
                 kind,
@@ -463,6 +474,7 @@ impl Hub {
                 links: Vec::new(),
                 asks_still_valid: super::menu::asks_still_valid(mod_type, menu_kind),
                 opening_item: None,
+                slot_changed_seen,
             });
             window
         });
@@ -518,6 +530,7 @@ impl Hub {
                 links: Vec::new(),
                 asks_still_valid: false,
                 opening_item: None,
+                slot_changed_seen: None,
             });
             window
         });
@@ -676,12 +689,19 @@ impl Hub {
         &mut self,
         i: usize,
         window: i32,
-    ) -> Option<(Option<ItemStack>, Option<NativeMenuEvent>)> {
+    ) -> Option<(ClosedHubMenu, Option<NativeMenuEvent>)> {
         self.guests.update(i, |g| {
             let menu = g.menu.take_if(|m| m.window == window)?;
             let carried = g.close_menu_cursor(menu.window);
+            let processing_inputs = menu.take_processing_inputs(&mut g.native_menu);
             let closed = menu.native_closed(g.uuid, g.menu_generation, &mut g.native_menu);
-            Some((carried, closed))
+            Some((
+                ClosedHubMenu {
+                    carried,
+                    processing_inputs,
+                },
+                closed,
+            ))
         })
     }
 
@@ -689,18 +709,26 @@ impl Hub {
         let Some(window) = self.guests[i].menu.as_ref().map(|menu| menu.window) else {
             return;
         };
-        let Some((carried, closed)) = self.take_hub_menu(i, window) else {
+        let Some((closed_menu, closed)) = self.take_hub_menu(i, window) else {
             return;
         };
         let guest = &self.guests[i];
         guest.send(&C::ContainerClose(play::ContainerClose {
             container: window,
         }));
-        if let Some(item) = carried {
+        if let Some(item) = closed_menu.carried {
             self.native_menu_events
                 .push(NativeMenuEvent::ReturnCarried {
                     conn: guest.conn,
                     item,
+                });
+        }
+        if !closed_menu.processing_inputs.is_empty() {
+            self.native_menu_events
+                .push(NativeMenuEvent::ReturnProcessingInputs {
+                    conn: guest.conn,
+                    items: closed_menu.processing_inputs,
+                    drop_instead: guest.dead,
                 });
         }
         self.native_menu_events.extend(closed);
@@ -729,12 +757,40 @@ impl Hub {
             })
     }
 
-    /// The client closed its window. Return the closing cursor to the game for removal.
-    pub fn container_closed(&mut self, conn: u32, window: i32) -> Option<ItemStack> {
+    /// Take processing-menu input returns queued by a hub-side window close, split into
+    /// `(to_return, to_drop)` according to whether the player was dead or disconnecting.
+    pub fn take_closed_processing_inputs(&mut self, conn: u32) -> (Vec<ItemStack>, Vec<ItemStack>) {
+        let mut to_return = Vec::new();
+        let mut to_drop = Vec::new();
+        for event in self.native_menu_events.extract_if(.., move |event| {
+            matches!(
+                event,
+                NativeMenuEvent::ReturnProcessingInputs { conn: owner, .. } if *owner == conn
+            )
+        }) {
+            if let NativeMenuEvent::ReturnProcessingInputs {
+                items,
+                drop_instead,
+                ..
+            } = event
+            {
+                if drop_instead {
+                    to_drop.extend(items);
+                } else {
+                    to_return.extend(items);
+                }
+            }
+        }
+        (to_return, to_drop)
+    }
+
+    /// The client closed its window. Return the closing cursor and any processing inputs to the
+    /// game for removal.
+    pub fn container_closed(&mut self, conn: u32, window: i32) -> Option<ClosedHubMenu> {
         let i = self.guests.connection_index(conn)?;
-        let (carried, closed) = self.take_hub_menu(i, window)?;
+        let (closed_menu, closed) = self.take_hub_menu(i, window)?;
         self.native_menu_events.extend(closed);
-        carried
+        Some(closed_menu)
     }
 
     /// Project one live stack for a click claim. Reuse its admissions for the hash and

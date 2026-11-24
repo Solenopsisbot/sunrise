@@ -1100,41 +1100,14 @@ fn item_hdr_light(state: &ItemRenderState, light: u32) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+#[path = "spawn_border_tests.rs"]
+mod spawn_border_tests;
+
+#[cfg(test)]
+pub(in crate::game) mod tests {
     use super::*;
     use mod_api::ClientHost;
     use serde_json::json;
-
-    /// `ClientLevel.setRespawnData`: the client keeps the packet's level beside its position,
-    /// so the spawn compass's target names the level the world spawn is in.
-    #[test]
-    #[ignore = "daily"]
-    fn the_spawn_compass_target_keeps_the_world_spawn_level() {
-        use sunrise_protocol::{
-            connection::Pipe,
-            packets::play::{self, Clientbound as C},
-        };
-        super::super::native_entity_refs::tests::with_client_game(|game| {
-            let (client, _server) = Pipe::pair();
-            game.connect_local(client, "spawn-compass").unwrap();
-            for (dimension, pos) in [
-                ("minecraft:the_nether", [3, 40, 9]),
-                ("minecraft:overworld", [-7, 90, 12]),
-            ] {
-                game.handle_packet(C::SetDefaultSpawnPosition(play::SetDefaultSpawnPosition {
-                    pos: play::GlobalPos {
-                        dimension: dimension.into(),
-                        pos,
-                    },
-                    yaw: 0.0,
-                    pitch: 0.0,
-                }))
-                .unwrap();
-                let respawn = game.level_state_now("minecraft:overworld").respawn.unwrap();
-                assert_eq!((respawn.dimension.as_str(), respawn.pos), (dimension, pos));
-            }
-        });
-    }
 
     /// The resolver skips a mod that leaves `item_model_property` at its default;
     /// a mod that implements it is asked on every resolve.
@@ -1725,6 +1698,11 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn item_display_end_crystal_world_submit_uses_vanilla_glint_scale_and_atlas_uv_26_3() {
+        run_item_display_end_crystal_world_submit_uses_vanilla_glint_scale_and_atlas_uv_26_3();
+    }
+
+    pub(in crate::game) fn run_item_display_end_crystal_world_submit_uses_vanilla_glint_scale_and_atlas_uv_26_3()
+     {
         crate::game::in_own_process(
             "game::item_draw::tests::item_display_end_crystal_world_submit_uses_vanilla_glint_scale_and_atlas_uv_26_3",
             || {

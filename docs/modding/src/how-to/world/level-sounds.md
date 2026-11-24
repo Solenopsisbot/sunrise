@@ -60,6 +60,21 @@ Outside a transaction, a queued level sound draws its seed at the call even if a
 one, it draws a seed only when the resolved sound is published. A directed play request draws from the request
 level's random when published. The `HitHost::play_sound_at` and `play_sound_from` calls below always queue at the call.
 
+### Sound seeds
+
+A level sound's seed picks which of its variants the clients play. Vanilla's `Level.playSound` draws it from the
+level's `soundSeedGenerator` and then calls `playSeededSound` with it; a mod can take those two steps apart:
+
+- `LevelRef::next_sound_seed(host)` draws the next seed of the stream `play_sound` takes its seeds from, without
+  playing anything.
+- `LevelRef::play_seeded_sound(host, sound, at, source, volume, pitch, except, seed)` is
+  `ServerLevel.playSeededSound(except, x, y, z, ...)`, and `EntityRef::play_seeded_bound_sound(host, sound, source,
+  volume, pitch, except, seed)` its entity-bound overload. They send `seed` as given and draw nothing.
+
+Draw first and play second to model a `playSound` call whose sound may still be refused after the draw: the stream
+moves as vanilla's does whether the sound plays or not. Inside a transaction the draw happens at the call and stays
+drawn if the transaction aborts, while a held `play_sound` draws only when it is published at commit.
+
 ## Engine playback and live parameters
 
 `play_sound` also observes transient playback updates. `event.starting` is true for a

@@ -611,7 +611,7 @@ mod enchantment_conflict_tests {
 }
 
 #[cfg(test)]
-mod item_resource_property_tests {
+pub(in crate::game) mod item_resource_property_tests {
     fn engine(resource: &mod_api::ItemResource, count: u32) -> sunrise_items::items::ItemStack {
         super::super::api_values::stack_value(&resource.to_stack(count).unwrap()).unwrap()
     }
@@ -626,6 +626,10 @@ mod item_resource_property_tests {
     #[test]
     #[ignore = "daily"]
     fn effective_resource_properties_match_vanilla() {
+        run_effective_resource_properties_match_vanilla();
+    }
+
+    pub(in crate::game) fn run_effective_resource_properties_match_vanilla() {
         let inputs = std::env::var("SUNRISE_ITEM_PROPERTIES_CASES")
             .map(|path| std::fs::read_to_string(path).unwrap())
             .unwrap_or_else(|_| {
@@ -704,6 +708,10 @@ mod item_resource_property_tests {
     #[test]
     #[ignore = "daily"]
     fn item_resource_changed_defaults_and_consumption() {
+        run_item_resource_changed_defaults_and_consumption();
+    }
+
+    pub(in crate::game) fn run_item_resource_changed_defaults_and_consumption() {
         use mod_api::{ComponentId, ItemResource, Tag};
         use serde_json::json;
         use std::{fs, path::Path};

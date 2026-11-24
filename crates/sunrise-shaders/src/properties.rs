@@ -104,6 +104,12 @@ impl Properties {
         self.entries.iter().find(|e| e.key == key)
     }
 
+    /// `separateAo = true`: terrain vertices give their ambient occlusion in the colour's
+    /// alpha instead of multiplying it into the colour. Anything else, or no key, is `false`.
+    pub fn separate_ao(&self) -> bool {
+        self.get("separateAo").is_some_and(|v| v.trim() == "true")
+    }
+
     fn insert(&mut self, entry: Entry) {
         if let Some(at) = self.entries.iter().position(|e| e.key == entry.key) {
             let first = self.entries.remove(at).line;

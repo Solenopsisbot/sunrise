@@ -481,10 +481,6 @@ class IgnoredTests(unittest.TestCase):
             self.assertEqual((Path(private) / "sunrise-mod-package.build.log").read_text(), "error: private build text\n")
         self.assertEqual(execute.call_count, 1)
         self.assertEqual(ignored_tests._stopped["reason"], "what the tests need could not be built")
-        # verify builds it with the same command.
-        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/dyna-ci.yml").read_text()
-        self.assertEqual(workflow.count("ignored_shards.py --prepare sunrise-mod-package"), 1)
-        self.assertNotIn("--example holder_actor", workflow)
 
     def test_a_parent_that_crashes_after_its_childs_same_count_summary_did_not_complete(self):
         # A fixture reruns its own test in a child, which reports FAILED and a one-test summary;

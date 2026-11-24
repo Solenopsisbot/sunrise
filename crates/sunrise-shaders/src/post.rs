@@ -706,6 +706,24 @@ pub fn dimension_folder_named(pack: &Pack, id: &str, legacy_id: i32) -> String {
     }
 }
 
+/// The stage interface limits to translate with where there is no device: core shaders, which
+/// load with the resource packs, before and apart from any device, and the shader fuzzer. It is
+/// no device's own limit but the largest that wgpu-hal 30's backends give for real devices: a
+/// bound on the translation's work, while pipeline creation still applies the device's own limit.
+/// - Inter-stage variables: D3D12 31 (`D3D12_VS_OUTPUT_REGISTER_COUNT - 1`,
+///   `dx12/adapter.rs:933`); Metal 31 or 30 (`metal/adapter.rs:989`); Vulkan
+///   `min(maxVertexOutputComponents, maxFragmentInputComponents) / 4 - 1`
+///   (`vulkan/adapter.rs:1731`), 31 for Mesa 26.3 RADV's 128; GLES `MAX_VARYING_COMPONENTS / 4`
+///   (`gles/adapter.rs:856`), 32 for Mesa 26.3 radeonsi's 128. The largest: 32.
+/// - Vertex attributes: D3D12 30 (`dx12/adapter.rs:928`); Metal 31 (`metal/adapter.rs:1441`);
+///   Vulkan `maxVertexInputAttributes` (`vulkan/adapter.rs:1729`), 32 for RADV; GLES
+///   `MAX_VERTEX_ATTRIBS` (`gles/adapter.rs:817`), 16 for radeonsi. The largest: 32.
+pub const DEVICELESS_INTERFACE_LIMITS: naga::front::glsl::InterfaceLimits =
+    naga::front::glsl::InterfaceLimits {
+        inter_stage_variables: 32,
+        vertex_attributes: 32,
+    };
+
 /// The game's geometry a pack may draw with its gbuffers programs: each kind's vertex inputs,
 /// when the game can draw it with a pack.
 #[derive(Clone, Debug, Default)]
@@ -733,6 +751,10 @@ pub struct GameInputs {
     pub terrain_geometry: Option<crate::GeometryInputs>,
     /// Entities and block entities read vertex by vertex, for the same.
     pub entity_geometry: Option<crate::GeometryInputs>,
+    /// The device's stage interface limits (`wgpu::Limits::max_inter_stage_shader_variables` and
+    /// `max_vertex_attributes`): a program whose varyings or vertex inputs take more is refused
+    /// with a note, as the device could never build its pipeline. Default: wgpu's defaults.
+    pub interface_limits: naga::front::glsl::InterfaceLimits,
 }
 
 /// Loads the post-processing programs of `folder` and, for the geometry `inputs` describes, the
@@ -765,6 +787,7 @@ pub fn load_post(
     macros: &Macros,
     inputs: &GameInputs,
 ) -> Post {
+    let limits = inputs.interface_limits;
     let mut post = Post {
         folder: folder.to_owned(),
         programs: Vec::new(),
@@ -861,6 +884,7 @@ pub fn load_post(
         switches: crate::switches_on(pack),
         options,
         geometry: None,
+        limits: inputs.interface_limits,
         post: &mut post,
     };
     for (group, base) in GROUPS {
@@ -876,8 +900,9 @@ pub fn load_post(
             _ => Target::Buffers,
         };
         for name in names {
-            if let Some(mut p) = loader.load(name, group, |v, f| translate_composite(v, f, target))
-            {
+            if let Some(mut p) = loader.load(name, group, |v, f| {
+                translate_composite(v, f, target, limits)
+            }) {
                 // `blend.<program>` blends every buffer the program writes. Iris 1.11.7, probed:
                 // it applies to begin, prepare, deferred and composite programs, and
                 // `blend.<program>.<buffer>` doesn't apply to deferred and composite ones; the
@@ -908,7 +933,7 @@ pub fn load_post(
                 }
             }
             loader.load(name.to_string(), group, |v, f| {
-                translate_gbuffers(v, f, Target::Buffers, &inputs)
+                translate_gbuffers(v, f, Target::Buffers, &inputs, limits)
             })
         })
     };
@@ -1245,9 +1270,10 @@ fn load_shadow(
     }
     let names =
         std::iter::once("shadowcomp".to_owned()).chain((1..=99).map(|n| format!("shadowcomp{n}")));
+    let limits = loader.limits;
     for name in names {
         let program = loader.load(name, Group::ShadowComp, |v, f| {
-            translate_composite(v, f, Target::Buffers)
+            translate_composite(v, f, Target::Buffers, limits)
         });
         loader.post.shadow_comp.extend(program);
     }
@@ -1275,7 +1301,7 @@ fn load_shadow(
                     g
                 });
                 let p = loader.load(name.to_string(), Group::Shadow, |v, f| {
-                    translate_shadow(v, f, &inputs)
+                    translate_shadow(v, f, &inputs, limits)
                 });
                 p.map(|mut p| {
                     p.blend = blend(properties, &p.name).flatten();
@@ -1315,12 +1341,29 @@ fn load_shadow(
     let shadow_block = (keep("shadowBlockEntities") || only_lit)
         .then(|| load(&["shadow_block", "shadow"], entities, false, true))
         .flatten();
-    let water_plain = water
-        .as_ref()
-        .and_then(|_| load(&["shadow_water", "shadow"], terrain, true, false));
+    // Loaded with the patched one, for a GPU that refuses that at pipeline creation; and without
+    // it, when the patched one takes more of the stage interface than the device has (the
+    // patches' output is one more than a pack writing as many as the GPU takes has room for).
+    let water_plain = (keep("shadowTranslucent"))
+        .then(|| load(&["shadow_water", "shadow"], terrain, true, false))
+        .flatten();
     // The plain one's notes are the patched one's again: each once.
     let mut seen = std::collections::HashSet::new();
     loader.post.notes.retain(|n| seen.insert(n.clone()));
+    // Said as what it is, not as a program skipped: the plain one draws translucent terrain.
+    if let Some(name) = water_plain
+        .as_ref()
+        .filter(|_| water.is_none())
+        .map(|p| &p.name)
+    {
+        let skipped = format!("{name}: skipped");
+        if let Some(n) = loader.post.notes.iter_mut().rev().find(|n| **n == skipped) {
+            *n = format!(
+                "{name}: translucent terrain without the boats' water patches, as the device's stage \
+                 interface has no room for them"
+            );
+        }
+    }
     if shadow.is_none() && terrain.is_some() {
         loader
             .post
@@ -1347,6 +1390,8 @@ struct Loader<'a> {
     options: Macros,
     /// The game's geometry read vertex by vertex, while loading shadow programs.
     geometry: Option<crate::GeometryInputs>,
+    /// The device's stage interface limits ([`GameInputs::interface_limits`]).
+    limits: naga::front::glsl::InterfaceLimits,
     post: &'a mut Post,
 }
 
@@ -1614,7 +1659,7 @@ impl Loader<'_> {
         }
         let [vertex, geometry, fragment] = &stages;
         let (program, triangles) =
-            match crate::translate_geometry(vertex, geometry, fragment, inputs) {
+            match crate::translate_geometry(vertex, geometry, fragment, inputs, self.limits) {
                 Ok(p) => p,
                 Err(errors) => {
                     notes.extend(
@@ -3401,6 +3446,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             terrain_one_pass: None,
             terrain_geometry: None,
             entity_geometry: None,
+            interface_limits: Default::default(),
         };
         let post = load_post(&pack, "", &Properties::default(), &macros, &inputs);
         let (terrain, water) = (post.terrain.unwrap(), post.water.unwrap());

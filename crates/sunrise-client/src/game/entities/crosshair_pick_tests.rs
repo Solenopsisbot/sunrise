@@ -555,6 +555,10 @@ fn check_case_hit(game: &Game<'_>, tc: &Value, failures: &mut Vec<String>) {
 #[test]
 #[ignore = "daily"]
 fn primed_tnt_and_falling_blocks_match_26_3_witness() {
+    run_primed_tnt_and_falling_blocks_match_26_3_witness();
+}
+
+pub(in crate::game) fn run_primed_tnt_and_falling_blocks_match_26_3_witness() {
     in_own_process(
         "game::crosshair_pick_tests::primed_tnt_and_falling_blocks_match_26_3_witness",
         || {
@@ -638,6 +642,10 @@ fn primed_tnt_and_falling_blocks_match_26_3_witness() {
 #[test]
 #[ignore = "daily"]
 fn nested_ride_root_vehicle_exclusion_matches_26_3_witness() {
+    run_nested_ride_root_vehicle_exclusion_matches_26_3_witness();
+}
+
+pub(in crate::game) fn run_nested_ride_root_vehicle_exclusion_matches_26_3_witness() {
     in_own_process(
         "game::crosshair_pick_tests::nested_ride_root_vehicle_exclusion_matches_26_3_witness",
         || {
@@ -668,6 +676,10 @@ fn nested_ride_root_vehicle_exclusion_matches_26_3_witness() {
 #[test]
 #[ignore = "daily"]
 fn review_parity_cases_match_26_3_witness() {
+    run_review_parity_cases_match_26_3_witness();
+}
+
+pub(in crate::game) fn run_review_parity_cases_match_26_3_witness() {
     in_own_process(
         "game::crosshair_pick_tests::review_parity_cases_match_26_3_witness",
         || {
@@ -715,6 +727,10 @@ fn review_parity_cases_match_26_3_witness() {
 #[test]
 #[ignore = "daily"]
 fn middle_click_sends_pick_item_from_entity_for_tnt_and_falling_block() {
+    run_middle_click_sends_pick_item_from_entity_for_tnt_and_falling_block();
+}
+
+pub(in crate::game) fn run_middle_click_sends_pick_item_from_entity_for_tnt_and_falling_block() {
     in_own_process(
         "game::crosshair_pick_tests::middle_click_sends_pick_item_from_entity_for_tnt_and_falling_block",
         || {
@@ -781,6 +797,10 @@ fn middle_click_sends_pick_item_from_entity_for_tnt_and_falling_block() {
 #[test]
 #[ignore = "daily"]
 fn dynamic_redirectable_tag_controls_arrow_pick_and_in_ground_stops_it() {
+    run_dynamic_redirectable_tag_controls_arrow_pick_and_in_ground_stops_it();
+}
+
+pub(in crate::game) fn run_dynamic_redirectable_tag_controls_arrow_pick_and_in_ground_stops_it() {
     in_own_process(
         "game::crosshair_pick_tests::dynamic_redirectable_tag_controls_arrow_pick_and_in_ground_stops_it",
         || {
@@ -836,6 +856,11 @@ fn dynamic_redirectable_tag_controls_arrow_pick_and_in_ground_stops_it() {
 #[test]
 #[ignore = "daily"]
 fn singleplayer_and_unstored_pick_share_unified_query_and_root_exclusion_26_3() {
+    run_singleplayer_and_unstored_pick_share_unified_query_and_root_exclusion_26_3();
+}
+
+pub(in crate::game) fn run_singleplayer_and_unstored_pick_share_unified_query_and_root_exclusion_26_3()
+ {
     in_own_process(
         "game::crosshair_pick_tests::singleplayer_and_unstored_pick_share_unified_query_and_root_exclusion_26_3",
         || {
@@ -868,6 +893,7 @@ fn singleplayer_and_unstored_pick_share_unified_query_and_root_exclusion_26_3() 
                 game.world.set(0, 65, 4, stone).unwrap();
                 let tnt_pos = Vec3::new(0.5, 65.1, 2.5);
                 game.tnts.push(PrimedTnt {
+                    size_answer: None,
                     attachment_lifetime: Default::default(),
                     rotation: [0.0, 0.0],
                     join: Default::default(),
@@ -913,6 +939,7 @@ fn singleplayer_and_unstored_pick_share_unified_query_and_root_exclusion_26_3() 
                 game.tnts.clear();
                 let fb_pos = Vec3::new(0.5, 65.1, 2.5);
                 game.falling.push(FallingBlock {
+                    size_answer: None,
                     attachment_lifetime: Default::default(),
                     rotation: [0.0, 0.0],
                     join: Default::default(),
@@ -999,6 +1026,7 @@ fn singleplayer_and_unstored_pick_share_unified_query_and_root_exclusion_26_3() 
                 game.mobs.push(husk);
                 let behind_tnt = Vec3::new(0.5, 65.3, 2.5);
                 game.tnts.push(PrimedTnt {
+                    size_answer: None,
                     attachment_lifetime: Default::default(),
                     rotation: [0.0, 0.0],
                     join: Default::default(),
@@ -1048,6 +1076,7 @@ fn singleplayer_and_unstored_pick_share_unified_query_and_root_exclusion_26_3() 
                 game.interactions.insert(113, inter);
                 let behind_fb = Vec3::new(0.5, 66.1, 2.9);
                 game.falling.push(FallingBlock {
+                    size_answer: None,
                     attachment_lifetime: Default::default(),
                     rotation: [0.0, 0.0],
                     join: Default::default(),
@@ -1096,6 +1125,7 @@ fn singleplayer_and_unstored_pick_share_unified_query_and_root_exclusion_26_3() 
                 game.world.set(0, 65, 4, chest).unwrap();
                 let far_tnt = Vec3::new(0.5, 65.1, 4.19);
                 game.tnts.push(PrimedTnt {
+                    size_answer: None,
                     attachment_lifetime: Default::default(),
                     rotation: [0.0, 0.0],
                     join: Default::default(),
@@ -1142,6 +1172,7 @@ fn singleplayer_and_unstored_pick_share_unified_query_and_root_exclusion_26_3() 
                 game.mobs.push(zombie);
                 let shield_tnt = Vec3::new(0.5, 65.1, 1.8);
                 game.tnts.push(PrimedTnt {
+                    size_answer: None,
                     attachment_lifetime: Default::default(),
                     rotation: [0.0, 0.0],
                     join: Default::default(),
@@ -1169,6 +1200,7 @@ fn singleplayer_and_unstored_pick_share_unified_query_and_root_exclusion_26_3() 
                 );
                 game.tnts.clear();
                 game.falling.push(FallingBlock {
+                    size_answer: None,
                     attachment_lifetime: Default::default(),
                     rotation: [0.0, 0.0],
                     join: Default::default(),

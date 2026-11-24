@@ -1893,6 +1893,12 @@ fn told_since(game: &super::Game<'_>, before: usize) -> bool {
         .any(|p| matches!(p, C::SystemChat(_)))
 }
 
+fn with_command_guests(name: &str, body: impl FnOnce(&mut super::Game<'_>)) {
+    crate::game::in_own_process(&format!("game::native_guest_turn_tests::{name}"), || {
+        with_guests(body);
+    });
+}
+
 /// `withPermission(level)`: the line is checked at the level the mod gives, whatever the
 /// entity's own (a guest's is 0 here), with no ceiling. `TickCommand` needs admins (3), so game
 /// masters (2) are refused it and admins run it; `GiveCommand` needs game masters.
@@ -1901,17 +1907,17 @@ fn told_since(game: &super::Game<'_>, before: usize) -> bool {
 fn run_command_checks_the_line_at_the_level_given() {
     use mod_api::PermissionLevel::{Admins, All, Gamemasters, Owners};
 
-    with_guests(|game| {
+    with_command_guests("run_command_checks_the_line_at_the_level_given", |game| {
         game.build_registries();
         let a = game.player(12).unwrap().entity();
-        assert!(!a.run_command(game, "give @s minecraft:diamond 1", All));
-        assert!(a.run_command(game, "give @s minecraft:diamond 1", Gamemasters));
-        assert!(!a.run_command(game, "tick query", Gamemasters));
-        assert!(a.run_command(game, "tick query", Admins));
-        assert!(a.run_command(game, "tick query", Owners));
+        assert!(!a.run_command(game, "give @s minecraft:diamond 1", All, false));
+        assert!(a.run_command(game, "give @s minecraft:diamond 1", Gamemasters, false));
+        assert!(!a.run_command(game, "tick query", Gamemasters, false));
+        assert!(a.run_command(game, "tick query", Admins, false));
+        assert!(a.run_command(game, "tick query", Owners, false));
         let stand = summon_stand(game);
-        assert!(!stand.run_command(game, "tick query", Gamemasters));
-        assert!(stand.run_command(game, "tick query", Admins));
+        assert!(!stand.run_command(game, "tick query", Gamemasters, false));
+        assert!(stand.run_command(game, "tick query", Admins, false));
     });
 }
 
@@ -1925,7 +1931,7 @@ fn run_command_runs_as_the_entity_from_where_it_is() {
     use mod_api::PermissionLevel::Gamemasters;
     use sunrise_client::items::ItemStack;
 
-    with_guests(|game| {
+    with_command_guests("run_command_runs_as_the_entity_from_where_it_is", |game| {
         game.build_registries();
         let a = game.player(12).unwrap().entity();
         let b = game.player(13).unwrap().entity();
@@ -1939,15 +1945,15 @@ fn run_command_runs_as_the_entity_from_where_it_is() {
             game.lan.as_ref().unwrap().hub.guest(conn).unwrap().position
         };
 
-        assert!(stand.run_command(game, "/tp @s ~2 ~ ~-1", Gamemasters));
+        assert!(stand.run_command(game, "/tp @s ~2 ~ ~-1", Gamemasters, false));
         assert_eq!(stand.position(game), Some([3.5, 70.0, 0.5]));
         assert_eq!(guest(game, 12), [3.0, 64.0, 5.0]);
         assert_eq!(guest(game, 13), [3.0, 64.0, 5.0]);
 
-        assert!(a.run_command(game, "give @s minecraft:diamond 1", Gamemasters));
+        assert!(a.run_command(game, "give @s minecraft:diamond 1", Gamemasters, false));
         game.as_guest(12, |game| {
-            assert!(a.run_command(game, "give @s minecraft:apple 1", Gamemasters));
-            assert!(b.run_command(game, "give @s minecraft:stick 1", Gamemasters));
+            assert!(a.run_command(game, "give @s minecraft:apple 1", Gamemasters, false));
+            assert!(b.run_command(game, "give @s minecraft:stick 1", Gamemasters, false));
         })
         .unwrap();
         assert!(holds(game, 12, "minecraft:diamond"));
@@ -1966,17 +1972,18 @@ fn run_command_runs_as_the_entity_from_where_it_is() {
 fn run_command_answers_a_player_and_no_one_for_another_entity() {
     use mod_api::PermissionLevel::Admins;
 
-    with_guests(|game| {
+    let name = "run_command_answers_a_player_and_no_one_for_another_entity";
+    with_command_guests(name, |game| {
         game.build_registries();
         let a = game.player(12).unwrap().entity();
         let stand = summon_stand(game);
         game.as_guest(12, |game| {
             for (line, ran) in [("tick query", true), ("kill @e[type=minecraft:pig]", false)] {
                 let before = game.guest_packets.len();
-                assert_eq!(a.run_command(game, line, Admins), ran, "{line}");
+                assert_eq!(a.run_command(game, line, Admins, false), ran, "{line}");
                 assert!(told_since(game, before), "the player is told: {line}");
                 let before = game.guest_packets.len();
-                assert_eq!(stand.run_command(game, line, Admins), ran, "{line}");
+                assert_eq!(stand.run_command(game, line, Admins, false), ran, "{line}");
                 assert!(!told_since(game, before), "no one is told: {line}");
             }
         })
@@ -1991,7 +1998,8 @@ fn run_command_answers_a_player_and_no_one_for_another_entity() {
 fn run_command_answers_false_for_a_bad_line_or_a_stale_handle() {
     use mod_api::PermissionLevel::Owners;
 
-    with_guests(|game| {
+    let name = "run_command_answers_false_for_a_bad_line_or_a_stale_handle";
+    with_command_guests(name, |game| {
         game.build_registries();
         let a = game.player(12).unwrap().entity();
         let stand = summon_stand(game);
@@ -2004,13 +2012,13 @@ fn run_command_answers_false_for_a_bad_line_or_a_stale_handle() {
                 "tp @s ~ ~ ~ ~ ~ ~ ~",
                 "kill @e[type=minecraft:pig]",
             ] {
-                assert!(!entity.run_command(game, line, Owners), "{line:?}");
+                assert!(!entity.run_command(game, line, Owners, false), "{line:?}");
             }
         }
         let stale = mod_api::EntityRef::new(mod_api::WorldEpoch::new(a.epoch().get() + 1), a.id());
-        assert!(!stale.run_command(game, "tick query", Owners));
-        assert!(stand.run_command(game, "kill @s", Owners));
-        assert!(!stand.run_command(game, "tick query", Owners));
+        assert!(!stale.run_command(game, "tick query", Owners, false));
+        assert!(stand.run_command(game, "kill @s", Owners, false));
+        assert!(!stand.run_command(game, "tick query", Owners, false));
     });
 }
 
@@ -2025,7 +2033,8 @@ fn run_command_refuses_a_player_whose_level_is_parked() {
     use mod_api::PermissionLevel::Owners;
     use sunrise_client::{gamerules::vanilla::SEND_COMMAND_FEEDBACK, items::ItemStack};
 
-    with_guests(|game| {
+    let name = "run_command_refuses_a_player_whose_level_is_parked";
+    with_command_guests(name, |game| {
         game.build_registries();
         let b = game.player(13).unwrap().entity();
         let move_to = |game: &mut super::Game<'_>, dimension: &str| {
@@ -2044,13 +2053,13 @@ fn run_command_refuses_a_player_whose_level_is_parked() {
         assert!(game.ui.rules.bool_at(SEND_COMMAND_FEEDBACK));
 
         move_to(game, "minecraft:the_nether");
-        assert!(!b.run_command(game, "give @s minecraft:stick 1", Owners));
-        assert!(!b.run_command(game, "gamerule send_command_feedback false", Owners));
+        assert!(!b.run_command(game, "give @s minecraft:stick 1", Owners, false));
+        assert!(!b.run_command(game, "gamerule send_command_feedback false", Owners, false));
         assert!(game.ui.rules.bool_at(SEND_COMMAND_FEEDBACK));
 
         move_to(game, "minecraft:overworld");
         assert!(!has_stick(game));
-        assert!(b.run_command(game, "give @s minecraft:stick 1", Owners));
+        assert!(b.run_command(game, "give @s minecraft:stick 1", Owners, false));
         assert!(has_stick(game));
     });
 }
@@ -2066,7 +2075,8 @@ fn run_command_runs_from_the_players_own_place_inside_an_outer_command() {
     use super::commands::execute::Source;
     use mod_api::PermissionLevel::Gamemasters;
 
-    with_guests(|game| {
+    let name = "run_command_runs_from_the_players_own_place_inside_an_outer_command";
+    with_command_guests(name, |game| {
         game.build_registries();
         let a = game.player(12).unwrap().entity();
         let b = game.player(13).unwrap().entity();
@@ -2082,9 +2092,9 @@ fn run_command_runs_from_the_players_own_place_inside_an_outer_command() {
             ..game.server_source()
         };
         game.with_source(outer, |game| {
-            assert!(b.run_command(game, "tp @s ~1 ~ ~ ~10 ~", Gamemasters));
+            assert!(b.run_command(game, "tp @s ~1 ~ ~ ~10 ~", Gamemasters, false));
             game.as_guest(12, |game| {
-                assert!(a.run_command(game, "tp @s ~1 ~ ~ ~10 ~", Gamemasters));
+                assert!(a.run_command(game, "tp @s ~1 ~ ~ ~10 ~", Gamemasters, false));
             })
             .unwrap();
         });

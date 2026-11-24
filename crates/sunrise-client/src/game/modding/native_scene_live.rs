@@ -456,6 +456,7 @@ impl Game<'_> {
             creaking_active: false,
             sky_darken: 0,
             marker: None,
+            ambient_particles: None,
             model_offset: &model_offset,
             gateway_particles: &|_, _| 0,
             thundering: false,

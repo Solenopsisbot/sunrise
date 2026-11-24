@@ -59,8 +59,8 @@ def main():
                             '-cp', str(classes) + os.pathsep + cp, 'dev.sunriselab.parity.' + ORACLE,
                             scratch, vanilla], cwd=scratch, env=env, stdout=log,
                            stderr=subprocess.STDOUT, timeout=180, check=True)
-        oracle_harness.run_logged(['cargo', 'test', '--locked', '-p', 'sunrise-client', '--lib',
-                                   TEST, '--', '--exact', '--ignored', '--nocapture'],
+        oracle_harness.run_logged([lab.parity_fixtures(),
+                                   TEST, '--exact', '--ignored', '--nocapture'],
                                   build, 'rust', env=env)
     expected, actual = (json.loads(path.read_text(encoding='utf-8')) for path in (vanilla, rust))
     names = {f'{group}/{name}' for group, cases in CASES.items() for name in cases}

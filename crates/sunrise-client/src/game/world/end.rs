@@ -2,7 +2,7 @@
 //! gateway travel, the obsidian arrival platform, the exit portal and the End
 //! sky. The dragon fight itself lives in game/mobs/dragon.rs: the podium is
 //! inactive until the dragon dies.
-use super::{Dim, Game};
+use super::{Dim, Game, Resources, remote::Remote};
 use sunrise_client::{
     Result,
     containers::BlockEntity,
@@ -445,15 +445,19 @@ impl Game<'_> {
 
     /// The environment attributes of the current dimension.
     pub(super) fn dim_environment(&self) -> &Environment {
+        Self::level_environment(self.remote.as_ref(), &self.res, &self.dimension_type().id)
+    }
+
+    /// A field-level borrow for the client tick, which also mutably borrows its particles.
+    pub(super) fn level_environment<'a>(
+        remote: Option<&'a Remote>,
+        resources: &'a Resources,
+        dimension_type: &str,
+    ) -> &'a Environment {
         // A client of a server takes the type the server sent, built-in levels included.
-        if let Some(own) = self
-            .remote
-            .as_ref()
+        remote
             .and_then(|r| r.level_environment.as_deref())
-        {
-            return own;
-        }
-        self.res.environment_of(&self.dimension_type().id)
+            .unwrap_or_else(|| resources.environment_of(dimension_type))
     }
 
     /// SkyRenderer.renderEndFlash, drawn after the renderer's resident sky mesh: its quad, if
@@ -2135,4 +2139,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "end/gateway_cooldown_tests.rs"]
-mod cooldown_tests;
+pub(in crate::game) mod cooldown_tests;

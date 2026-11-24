@@ -62,6 +62,10 @@ fn snapshot(game: &mut Game<'_>) -> Vec<i32> {
 #[test]
 #[ignore = "daily"]
 fn chunk_loaded_families_keep_vanilla_lookup_and_save_order() {
+    run_chunk_loaded_families_keep_vanilla_lookup_and_save_order();
+}
+
+pub(in crate::game) fn run_chunk_loaded_families_keep_vanilla_lookup_and_save_order() {
     with_game(|game| {
         let a = (0, 0);
         let b = (1, 0);
@@ -197,6 +201,11 @@ fn chunk_loaded_families_keep_vanilla_lookup_and_save_order() {
 #[test]
 #[ignore = "daily"]
 fn a_crossing_without_a_listener_saves_after_the_entity_already_in_the_section() {
+    run_a_crossing_without_a_listener_saves_after_the_entity_already_in_the_section();
+}
+
+pub(in crate::game) fn run_a_crossing_without_a_listener_saves_after_the_entity_already_in_the_section()
+ {
     with_game(|game| {
         assert!(!mod_api::__private::listened(
             mod_api::HookId::EntityEnteringSection

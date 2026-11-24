@@ -114,6 +114,28 @@ impl Game<'_> {
             MenuReplace::InPlace => self.guest_close_all(conn),
         }
     }
+    /// `ServerPlayer.containerCounter`: the window id the player's last opened menu took.
+    pub(super) fn player_container_counter(&self, player: mod_api::PlayerRef) -> Option<i32> {
+        if !self.is_logical_server() {
+            return None;
+        }
+        Some(self.online_player_record(player)?.next_window)
+    }
+    /// `ServerPlayer.nextContainerCounter` with no menu after it: the counter moves as an open
+    /// moves it, and nothing opens or closes.
+    pub(super) fn player_next_container_counter(
+        &mut self,
+        player: mod_api::PlayerRef,
+    ) -> Option<i32> {
+        if !self.is_logical_server() {
+            return None;
+        }
+        let conn = self.online_player_record(player)?.conn;
+        self.lan
+            .as_mut()?
+            .hub
+            .update_guest(conn, |guest| guest.next_container_counter())
+    }
     /// `ServerPlayer.openMenu(provider, extraDataWriter)` for a content mod menu type and no
     /// block: the type's container slots show empty and their clicks reach the mods, as
     /// `open_menu`'s do; `extra` and `pos` go first in its `sunrise:menu_extra` payload, and
@@ -140,8 +162,8 @@ impl Game<'_> {
         let id = mod_api::__private::menu_key_id(menu).ok_or(OpenMenuError::NotModMenu)?;
         let kind =
             sunrise_client::containers::mod_menu_type(&id).ok_or(OpenMenuError::NotModMenu)?;
-        if kind.owned_slots.is_some() && (!kind.results.is_empty() || kind.crafting.is_some()) {
-            return Err(OpenMenuError::OwnedSlotsWithResults);
+        if kind.owned_slots.is_some() && kind.crafting.is_some() {
+            return Err(OpenMenuError::OwnedSlotsWithCrafting);
         }
         if extra.len() > menu_extra::MAX_DATA {
             return Err(OpenMenuError::TooLarge);
@@ -479,6 +501,23 @@ impl Game<'_> {
                         self.lan_place_back(gi, vec![item]);
                     }
                 }
+                NativeMenuEvent::ReturnProcessingInputs {
+                    conn,
+                    items,
+                    drop_instead,
+                } => {
+                    if let Some(gi) = self.guest_index(conn) {
+                        let dead = self
+                            .lan
+                            .as_ref()
+                            .is_some_and(|host| host.hub.guests[gi].dead);
+                        if drop_instead || dead {
+                            self.drop_guest_items(gi, items);
+                        } else {
+                            self.lan_place_back(gi, items);
+                        }
+                    }
+                }
                 NativeMenuEvent::Closed {
                     uuid,
                     window,
@@ -504,6 +543,10 @@ impl Game<'_> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "native_menus/container_counter_tests.rs"]
+mod container_counter_tests;
 
 #[cfg(test)]
 #[path = "native_menus/owned_slots_tests.rs"]

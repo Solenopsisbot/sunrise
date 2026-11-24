@@ -28,12 +28,14 @@ by this scale, rounding up, for the GUI-scaled width and height (`Window.getGuiS
 (`Window.getWidth`, `Window.getHeight`), whatever the GUI scale, or `None` without a window. Read it
 at any time, not only in `window_resize`: that hook reports this same size, so the two always agree.
 
-`LevelRef::brightness(host, layer, pos)` (`getBrightness`, the stored light 0 to 15) reads on a client too: the
-light of the level the client shows, as the server sent it for a chunk the client holds. It is `None` for a
-chunk the client does not hold and before login. `LevelRef::block_face_sturdy(host, pos, face, support)` uses
-that level's local shapes for a loaded block inside build height. `LevelRef::can_see_sky(host, pos)` reads
-its published sky light, even outside build height or in an unloaded column. See
-[Level hosts](../../concepts/hooks-and-the-host.md#level-hosts) for the boundary rules.
+`LevelRef::brightness(host, layer, pos)` (`BlockAndLightGetter.getBrightness`) reads the stored light
+(0 to 15) for the selected sky or block layer. On a client it reads what the server sent for the level
+named by the handle, whether shown or [open for viewing](#viewed-levels). It returns `None` before
+login, for a closed view or stale handle, or for a position outside build height or in an unloaded
+chunk. It never loads chunks. `LevelRef::block_face_sturdy(host, pos, face, support)` uses the current
+level's local shapes for a loaded block inside build height. On a client, `LevelRef::can_see_sky(host, pos)`
+only reads the shown level's published sky light, even outside build height or in an unloaded column.
+See [Level hosts](../../concepts/hooks-and-the-host.md#level-hosts) for the boundary rules.
 
 `ClientHost::playing()` is true while the player is in the world with nothing over it: no screen, title, sign
 editor or book, so keys and zoom apply. A HUD or screen hook can read held state, the current binding,
@@ -123,7 +125,8 @@ entity in water, drowning, swimming, the sculk vibrations' water test) don't rea
 
 A client map or minimap keeps its own picture of the terrain and only has to redraw what changed.
 `client_chunk_load(dimension, chunk)` and `client_chunk_unload(dimension, chunk)` tell whole columns
-arriving and leaving; `client_block_changed(dimension, pos, old, new, predicted)` tells each block of a
+arriving and leaving (a column that merely leaves the view stays loaded, out of view, and is told only
+once its data is freed); `client_block_changed(dimension, pos, old, new, predicted)` tells each block of a
 held column that changes state, after the write, so `host.level(dimension)` already reads `new` there:
 
 ```rust
@@ -151,16 +154,18 @@ as Immersive Portals' `ClientWorldLoader` keeps a `ClientLevel` per dimension). 
 open. Its block reads read the viewed level's own world, never the player's: `block_state`, `block`,
 `block_property`, `clip`, `collision_boxes`, `has_collisions`, and the fluid reads built on
 `block_state` (`fluid_shape`, `fluid_height`, `fluid_height_for_camera`, `fluid_can_be_replaced_with`).
-So a mod can aim a ray or collide a box through a portal. They never write and never load a column: a
-column the client doesn't hold is `None`, for a collision box as soon as its walk reaches one. `clip`
-keeps its traversal limit and `collision_boxes` its cell cap.
+So a mod can aim a ray or collide a box through a portal. `brightness` also reads the viewed level's
+own sky or block light, as sent by the server, not the light of the shown level. These reads never
+write or load a column: a column the client doesn't hold is `None`, for a collision box as soon as
+its walk reaches one. `clip` keeps its traversal limit and `collision_boxes` its cell cap.
 
-The handle is `None` while the server has the level closed. If the server closes the level and opens it
-again within the same client level, the old handle reads again. A login, a reconfiguration or a respawn
-into another level replaces the client level: the old handle stays stale for good, and the mod calls
-`host.level` again once the server reopens the level. A respawn in the same level drops the viewed
-levels too, but keeps the client level, so the old handle reads again after the reopen. Writes,
-server-only reads and the other level reads refuse viewed levels. In particular,
+`host.level` returns `None` while the server has the level closed, and reads from a retained handle
+return `None`. If the server reopens the level within the same client level, the old handle reads
+again. A login, a reconfiguration or a respawn into another level replaces the client level: the old
+handle stays stale, and the mod calls `host.level` again once the server reopens the level. A respawn
+in the same level drops the viewed levels too, but keeps the client level, so the old handle reads
+again after the reopen. Writes, server-only reads and the other level reads refuse viewed levels.
+In particular,
 `visit_entities_in` and `ray_trace_nearest_entity` return `Err(LevelReadError::Unavailable)`
 for a current handle to an open viewed level; they do not query the displayed level instead.
 

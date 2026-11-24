@@ -931,6 +931,7 @@ mod tests {
                         game.armor_stands.push(ArmorStand::new(id, Vec3::ZERO, 0.0));
                     } else {
                         game.others.push(super::super::commands::OtherEntity {
+                            size_answer: None,
                             attachment_lifetime: Default::default(),
                             knot_check: None,
                             eye: None,
@@ -1928,6 +1929,7 @@ mod tests {
             // A marker has a zero-sized box. Entity's default dismount answer is
             // still its position with the box's top as Y, even without a current ride.
             game.others.push(super::super::commands::OtherEntity {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 knot_check: None,
                 eye: None,

@@ -159,11 +159,13 @@ fn parse_data(lines: &[&str]) -> std::io::Result<Data> {
     })
 }
 
-pub fn data() -> &'static Data {
+pub(super) fn data() -> super::tables::Result<&'static Data> {
     use super::tables;
-    static DATA: OnceLock<std::io::Result<Data>> = OnceLock::new();
-    let data = DATA.get_or_init(|| parse_data(tables::block_state_data()));
-    tables::required(data.as_ref())
+    static DATA: OnceLock<tables::Result<Data>> = OnceLock::new();
+    let lines = tables::block_state_data()?;
+    DATA.get_or_init(|| Ok(parse_data(lines)?))
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 impl Data {
@@ -181,43 +183,45 @@ impl Data {
 }
 
 /// `BlockStateData.getTag`.
-pub fn get_tag(id: i32) -> Tag {
-    let d = data();
-    d.state(d.instance(id)).to_tag()
+pub(super) fn get_tag(id: i32) -> super::tables::Result<Tag> {
+    let d = data()?;
+    Ok(d.state(d.instance(id)).to_tag())
 }
 
 /// `BlockStateData.upgradeBlockStateTag`.
-pub fn upgrade_block_state_tag(old: &Tag) -> Tag {
-    let d = data();
-    match State::from_tag(old).and_then(|s| d.id_by_old.get(&s).copied()) {
-        Some(id) if (0..4096).contains(&id) => match d.map[id as usize] {
-            Some(i) => d.state(i).to_tag(),
-            None => old.clone(),
+pub(super) fn upgrade_block_state_tag(old: &Tag) -> super::tables::Result<Tag> {
+    let d = data()?;
+    Ok(
+        match State::from_tag(old).and_then(|s| d.id_by_old.get(&s).copied()) {
+            Some(id) if (0..4096).contains(&id) => match d.map[id as usize] {
+                Some(i) => d.state(i).to_tag(),
+                None => old.clone(),
+            },
+            _ => old.clone(),
         },
-        _ => old.clone(),
-    }
+    )
 }
 
 /// `BlockStateData.upgradeBlock(String)`.
-pub fn upgrade_block_name(old: &str) -> String {
-    let d = data();
-    match d.id_by_old_name.get(old) {
+pub(super) fn upgrade_block_name(old: &str) -> super::tables::Result<String> {
+    let d = data()?;
+    Ok(match d.id_by_old_name.get(old) {
         Some(&id) if (0..4096).contains(&id) => match d.map[id as usize] {
             Some(i) => d.state(i).name.clone(),
             None => old.to_owned(),
         },
         _ => old.to_owned(),
-    }
+    })
 }
 
 /// `BlockStateData.upgradeBlock(int)`.
-pub fn upgrade_block_id(id: i32) -> String {
-    let d = data();
-    match usize::try_from(id).ok().filter(|i| *i < 4096) {
+pub(super) fn upgrade_block_id(id: i32) -> super::tables::Result<String> {
+    let d = data()?;
+    Ok(match usize::try_from(id).ok().filter(|i| *i < 4096) {
         Some(i) => match d.map[i] {
             Some(inst) => d.state(inst).name.clone(),
             None => "minecraft:air".to_owned(),
         },
         None => "minecraft:air".to_owned(),
-    }
+    })
 }

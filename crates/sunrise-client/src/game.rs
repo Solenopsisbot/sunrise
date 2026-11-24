@@ -198,7 +198,7 @@ mod block_entity_anims;
 mod block_entity_part_state_tests;
 #[cfg(test)]
 #[path = "game/blocks/block_entity_reach_draw_tests.rs"]
-mod block_entity_reach_draw_tests;
+pub(in crate::game) mod block_entity_reach_draw_tests;
 #[path = "game/blocks/block_entity_ticks.rs"]
 mod block_entity_ticks;
 #[path = "game/blocks/block_items.rs"]
@@ -444,6 +444,8 @@ mod decorated_pot;
 pub(crate) mod dedicated;
 #[path = "game/items/deflect.rs"]
 mod deflect;
+#[path = "game/interface/demo_intro.rs"]
+mod demo_intro;
 #[path = "game/interface/developer_launch.rs"]
 mod developer_launch;
 #[path = "game/interface/dialogs.rs"]
@@ -1613,6 +1615,8 @@ mod native_player_visibility;
 #[cfg(test)]
 #[path = "game/modding/native_player_visibility_tests.rs"]
 mod native_player_visibility_tests;
+#[path = "game/modding/native_pool_elements.rs"]
+mod native_pool_elements;
 #[path = "game/modding/native_portal_destination.rs"]
 mod native_portal_destination;
 #[path = "game/modding/native_profiles.rs"]
@@ -1657,7 +1661,7 @@ mod native_registry_ids_tests;
 mod native_registry_processor_tests;
 #[cfg(test)]
 #[path = "game/modding/native_render_pair_tests.rs"]
-mod native_render_pair_tests;
+pub(in crate::game) mod native_render_pair_tests;
 #[path = "game/modding/native_render_visibility.rs"]
 mod native_render_visibility;
 #[cfg(test)]
@@ -1709,6 +1713,9 @@ mod native_small_reads_tests;
 mod native_smoke_source_tests;
 #[path = "game/modding/native_sound_refs.rs"]
 mod native_sound_refs;
+#[cfg(test)]
+#[path = "game/modding/native_sound_seed_tests.rs"]
+mod native_sound_seed_tests;
 #[path = "game/modding/native_special_renderers.rs"]
 mod native_special_renderers;
 #[cfg(test)]
@@ -1805,6 +1812,9 @@ mod owner_link;
 mod pack_clouds_frame_tests;
 #[path = "game/modding/pack_finders/mod.rs"]
 mod pack_finders;
+#[cfg(test)]
+#[path = "game/interface/pack_sources_tests.rs"]
+mod pack_sources_tests;
 #[path = "game/world/packs/mod.rs"]
 mod packs;
 #[path = "game/interface/pad/mod.rs"]
@@ -1819,6 +1829,9 @@ mod pad_menu;
 mod paintings;
 #[path = "game/mobs/pandas.rs"]
 mod pandas;
+#[cfg(sunrise_parity_fixtures)]
+#[path = "game/parity_fixtures.rs"]
+pub mod parity_fixtures;
 #[path = "game/modding/part_admission.rs"]
 mod part_admission;
 #[cfg(test)]
@@ -2100,6 +2113,9 @@ mod server_travel;
 #[cfg(test)]
 #[path = "game/administration/setblock_order_tests.rs"]
 mod setblock_order_tests;
+#[cfg(test)]
+#[path = "game/interface/shader_pack_switch_tests.rs"]
+mod shader_pack_switch_tests;
 #[path = "game/interface/shader_packs.rs"]
 mod shader_packs;
 #[cfg(test)]
@@ -2115,6 +2131,8 @@ mod shield;
 mod shoulders;
 #[path = "game/interface/sign_edit.rs"]
 mod sign_edit;
+#[path = "game/modding/slot_changes.rs"]
+mod slot_changes;
 #[cfg(test)]
 #[path = "game/modding/slot_pickup_tests.rs"]
 mod slot_pickup_tests;
@@ -2144,7 +2162,7 @@ mod spawn_yaw_tests;
 mod spawner;
 #[cfg(test)]
 #[path = "game/mobs/spawner_client_tick_tests.rs"]
-mod spawner_client_tick_tests;
+pub(in crate::game) mod spawner_client_tick_tests;
 #[path = "game/items/spear.rs"]
 mod spear;
 #[path = "game/items/spear_players.rs"]
@@ -2312,7 +2330,7 @@ mod using_item;
 mod vault;
 #[cfg(test)]
 #[path = "game/entities/vehicle_removal_tests.rs"]
-mod vehicle_removal_tests;
+pub(in crate::game) mod vehicle_removal_tests;
 #[path = "game/entities/vehicle_teleport.rs"]
 mod vehicle_teleport;
 #[cfg(test)]
@@ -2540,6 +2558,8 @@ enum Screen {
     ServerLinks,
     /// ConfirmLinkScreen for a server link (game/network/server_links.rs).
     ConfirmLink,
+    /// Parentless PopupScreen opened by the server's demo event.
+    DemoIntro,
     /// DialogScreen.WarningScreen: the note about custom screens.
     DialogWarning,
     /// WinScreen: the end poem and the credits (game/interface/win.rs).
@@ -2575,6 +2595,7 @@ impl Screen {
             Screen::BlockEditor => "block_editor",
             Screen::ServerLinks => "server_links",
             Screen::ConfirmLink => "confirm_link",
+            Screen::DemoIntro => "demo_intro",
             Screen::DialogWarning => "dialog_warning",
             Screen::Win => "win",
             Screen::DebugOptions => "debug_options",
@@ -2735,6 +2756,8 @@ struct GameLevel<'w> {
     /// (`Entity.isIgnoringBlockTriggers`).
     trigger_extras: Vec<Aabb>,
     biomes: &'w Biomes,
+    /// `BiomeManager`'s zoom over this level's seed, for `biome_name`.
+    biome_zoom: sunrise_core::biome::BiomeZoom,
     seed: i64,
     behaviours: &'w Behaviours,
     items: &'w Items,
@@ -2924,7 +2947,7 @@ impl<'w> entity::EntityLists<'w> {
                 self.falling
                     .iter()
                     .filter(|f| f.blocks_building)
-                    .map(|f| sunrise_client::falling_block::bounds(f.position)),
+                    .map(FallingBlock::bounds),
             )
     }
 }
@@ -2978,10 +3001,25 @@ struct FallingBlock {
     damage: sunrise_client::falling_block::Damage,
     /// The UUID and compound it was loaded with, kept while it moves.
     saved: Option<Box<([i32; 4], sunrise_core::nbt::Tag)>>,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub(super) size_answer: Option<sunrise_client::pose::SizeAnswer>,
 }
 sunrise_mod_runtime::impl_attachment_lifetime!(FallingBlock);
 
 impl FallingBlock {
+    /// `EntityType.FALLING_BLOCK.getDimensions()`: width, height and eye height.
+    const DIMENSIONS: [f32; 3] = [0.98, 0.98, 0.833_000_06];
+    /// Its box (`falling_block::bounds`), or its `entity_size` answer's.
+    fn bounds(&self) -> sunrise_core::geometry::Aabb {
+        let vanilla = sunrise_client::falling_block::bounds(self.position);
+        sunrise_client::pose::SizeAnswer::sized_box(
+            self.size_answer,
+            Self::DIMENSIONS,
+            self.position,
+            vanilla,
+        )
+    }
     /// Where `FallingBlockRenderer` draws the block's model corner, `alpha`
     /// into the tick: centred on the entity, then moved by `offset`, the
     /// block's random model offset (`ModelBlockRenderer.tesselateBlock`:
@@ -3359,6 +3397,7 @@ struct Game<'a> {
     view_arrival: sunrise_client::streaming::ViewArrival,
     options: Options,
     player: Option<PlayerMotion>,
+    drop_spam_throttler: sunrise_client::menu::DropSpamThrottler,
     spawn: Option<Vec3>,
     clock: FixedStep,
     previous_position: Vec3,
@@ -3630,8 +3669,6 @@ struct Game<'a> {
     was_fall_flying: bool,
     /// Bees whose buzz is playing, and whether it is the aggressive one.
     bee_sounds: HashMap<u32, bool>,
-    /// Guardians whose attack hum is playing.
-    guardian_sounds: HashSet<u32>,
     /// Remote guardian eye targets reused between ticks.
     guardian_look_scratch: Vec<(usize, [f64; 3])>,
     dropped: sunrise_client::join_seq::JoinList<ItemEntity>,
@@ -3848,6 +3885,7 @@ struct Game<'a> {
     end_portal_travel: bool,
     /// The open WinScreen (game/interface/win.rs).
     win: Option<win::Win>,
+    demo_intro: Option<demo_intro::DemoIntro>,
     end: end::EndState,
     block_ticks: Ticks,
     tick_scratch: TickScratch,
@@ -4006,6 +4044,8 @@ struct Game<'a> {
     transactions: transactions::OpenTransactions,
     /// The source of the running dispenser behaviour, including across mod callbacks.
     dispense_source: Option<dispenser::DispenseSource>,
+    /// Open mod menus whose `menu_slot_changed` dispatch is currently on the call stack.
+    slot_changed_active: Vec<slot_changes::SlotChangedTarget>,
     /// Backing blocks whose contents notice is on the call stack, innermost last.
     contents_changing: Vec<(mod_api::LevelRef, BlockPos)>,
     /// The mod screen of a menu open on this client (`native_screen`).
@@ -5597,6 +5637,7 @@ impl Game<'_> {
             building_player_boxes,
             player_collision,
             biomes: world_biomes!(self),
+            biome_zoom: self.streaming.biome_zoom,
             seed: self.level.seed,
             behaviours: self.res.behaviours(),
             items: world_items!(self),
@@ -6340,6 +6381,7 @@ impl Game<'_> {
                     );
                     self.next_entity += 1;
                     self.falling.push(FallingBlock {
+                        size_answer: None,
                         attachment_lifetime: Default::default(),
                         rotation: [0.0, 0.0],
                         join: Default::default(),
@@ -7913,6 +7955,7 @@ impl Game<'_> {
             Screen::Social => self.draw_social_screen(&mut batch),
             Screen::ServerLinks => self.draw_server_links(&mut batch),
             Screen::ConfirmLink => self.draw_confirm_link(&mut batch),
+            Screen::DemoIntro => self.draw_demo_intro(&mut batch),
             Screen::DialogWarning => self.draw_dialog_warning(&mut batch),
             Screen::CommandBlock => self.draw_command_block(&mut batch),
             Screen::BlockEditor => self.draw_block_editor(&mut batch),
@@ -11088,7 +11131,8 @@ impl Game<'_> {
                     .solid_render);
         // The bounded section graph runs on its worker while the frame is prepared, even when
         // smart culling is off (`SectionOcclusionGraph.runUpdates`).
-        let effective_detail_distance = (self.effective_render_distance() * 16) as f32;
+        let effective_render_distance = self.effective_render_distance();
+        let effective_detail_distance = (effective_render_distance * 16) as f32;
         if self.title.is_none()
             && let Some(renderer) = self.renderer.as_mut()
         {
@@ -11187,7 +11231,7 @@ impl Game<'_> {
             (*temperature, *downfall) = (info.temperature, info.downfall);
             (*frame_rain, *frame_thunder) = (rain, thunder);
             (*game_time, *day_time) = (self.world.game_time, self.view_day_time());
-            *render_distance = self.streaming.radius;
+            *render_distance = effective_render_distance;
             *sky_type = match self.dimension_type().skybox {
                 sunrise_world::dimension_type::Skybox::Overworld => 1,
                 sunrise_world::dimension_type::Skybox::End => 2,
@@ -11656,8 +11700,8 @@ impl Game<'_> {
             shadow_scene_revision: (self.world.revision, self.world.chunks.membership_revision()),
             shadow_cache: self.settings.sunrise.shadow_cache,
             distance,
-            detail_distance: (self.effective_render_distance() * 16) as f32,
-            shadow_distance: Some((self.streaming.radius * 16) as f32),
+            detail_distance: effective_detail_distance,
+            shadow_distance: Some(effective_detail_distance),
             depth_far,
             underwater,
             water_plane: if title
@@ -11999,6 +12043,7 @@ impl Game<'_> {
             self.physical_buttons.clear();
             self.drag_button = None;
             self.container_buttons.clear();
+            self.mod_browser_focus_lost();
         }
         if let WindowEvent::ModifiersChanged(m) = event {
             self.update_modifiers(m.state());
@@ -12386,6 +12431,7 @@ impl Game<'_> {
             }
             Screen::HudEditor if left => self.hud_editor_release(),
             Screen::ConfirmLink if left_press => self.confirm_link_click(),
+            Screen::DemoIntro if left_press => self.demo_intro_click(),
             Screen::DialogWarning if left_press => self.dialog_warning_click()?,
             Screen::WorldOptions if left => self.world_options_release(),
             Screen::Friends if left_press => self.friends_screen_click(),
@@ -12539,13 +12585,17 @@ impl Game<'_> {
                         if delta != [0.0; 2]
                             && let Some(button) = button
                         {
-                            let handled = self.observed_screen_view().is_some()
-                                && self.mounted_widget_mouse_dragged(
-                                    self.cursor(),
-                                    glfw_button(button),
-                                    delta,
-                                    glfw_modifiers(self.modifiers),
-                                );
+                            // A press on the item panel's list is the panel's until its
+                            // release: no widget, menu or slot hears the drag.
+                            let panel = self.mod_browser_drag_move();
+                            let handled = panel
+                                || (self.observed_screen_view().is_some()
+                                    && self.mounted_widget_mouse_dragged(
+                                        self.cursor(),
+                                        glfw_button(button),
+                                        delta,
+                                        glfw_modifiers(self.modifiers),
+                                    ));
                             let handled = handled
                                 || (self.screen_state.screen_instance == initial_instance
                                     && self.screen_drag_response(overlay, button, size, (w, h))?);
@@ -12767,6 +12817,9 @@ impl Game<'_> {
                     if !synthetic {
                         self.track_drag_button(button, pressed);
                     }
+                    if pressed {
+                        self.mod_browser_other_press(button == MouseButton::Left);
+                    }
                     if let Some(receiver) = &receiver {
                         let mut canceled = false;
                         if pressed {
@@ -12786,6 +12839,11 @@ impl Game<'_> {
                             );
                         }
                         if canceled {
+                            // A vetoed release of a press on the item panel
+                            // drops its item, sending nothing.
+                            if !pressed && button == MouseButton::Left {
+                                self.mod_browser_release_vetoed();
+                            }
                             if self.screen_state.screen_instance == initial_instance
                                 && let Some(millis) = press_millis
                             {
@@ -12799,8 +12857,13 @@ impl Game<'_> {
                             return Ok(());
                         }
                     }
-                    let mut handled = owned_release;
-                    if self.screen_state.screen_instance == initial_instance {
+                    // The left release of a press on the item panel's list is
+                    // the panel's, even once its menu closed or was replaced:
+                    // no screen, mounted widget or container hook hears it.
+                    let panel_release =
+                        !pressed && button == MouseButton::Left && self.mod_browser_release();
+                    let mut handled = owned_release || panel_release;
+                    if !panel_release && self.screen_state.screen_instance == initial_instance {
                         let inventory_release = !pressed
                             && matches!(self.screen, Screen::Inventory | Screen::Creative)
                             && self.observed_overlay_now().is_none()
@@ -13300,6 +13363,7 @@ impl Game<'_> {
                             | Screen::CommandBlock
                             | Screen::BlockEditor
                             | Screen::DebugOptions
+                            | Screen::DemoIntro
                             | Screen::Win
                     ))))
     }
@@ -13334,6 +13398,15 @@ impl Game<'_> {
         }
         if self.screen_state.screen_instance != instance {
             return Ok(false);
+        }
+        // AdvancementsScreen.keyPressed consumes its own binding before its children.
+        if self.screen == Screen::Advancements
+            && self.observed_overlay_now().is_none()
+            && sunrise_client::keybinds::key_name(key)
+                == Some(self.settings.keys.get("key.advancements"))
+        {
+            self.close_advancements();
+            return Ok(true);
         }
         if key == KeyCode::Escape
             && self.screen == Screen::Mod
@@ -13681,6 +13754,7 @@ impl<'a> Game<'a> {
             view_arrival: Default::default(),
             options,
             player: None,
+            drop_spam_throttler: Default::default(),
             spawn: None,
             clock: FixedStep::default(),
             previous_position: Vec3::ZERO,
@@ -13837,7 +13911,6 @@ impl<'a> Game<'a> {
             riding_sound: None,
             was_fall_flying: false,
             bee_sounds: HashMap::new(),
-            guardian_sounds: HashSet::new(),
             guardian_look_scratch: Vec::new(),
             dropped: Default::default(),
             next_entity: 0,
@@ -13946,6 +14019,7 @@ impl<'a> Game<'a> {
             respawn_config: None,
             end_portal_travel: false,
             win: None,
+            demo_intro: None,
             end: Default::default(),
             block_ticks: Ticks::new(0),
             tick_scratch: TickScratch::default(),
@@ -14049,6 +14123,7 @@ impl<'a> Game<'a> {
             hoppers: HashMap::new(),
             transactions: Default::default(),
             dispense_source: None,
+            slot_changed_active: Vec::new(),
             contents_changing: Vec::new(),
             mod_screen: None,
             mod_container_viewers: HashMap::new(),
@@ -14413,6 +14488,14 @@ pub(crate) fn run_with(
         .is_err()
         {
             log::warn!("Mod structure types already installed; keeping the first table");
+        }
+        // Their pool element types, before any world decodes its template pools.
+        if sunrise_world::worldgen::structure::mod_elements::install_mod_pool_element_types(
+            native_pool_elements::installed_pool_element_types(),
+        )
+        .is_err()
+        {
+            log::warn!("Mod pool element types already installed; keeping the first table");
         }
         // Their feature types, before any world decodes its configured features.
         if sunrise_world::worldgen::mod_features::install_mod_feature_types(

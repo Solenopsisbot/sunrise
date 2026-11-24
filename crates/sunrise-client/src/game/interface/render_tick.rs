@@ -11,7 +11,9 @@ use sunrise_client::assets::Properties;
 use sunrise_client::camera::NearPlane;
 use sunrise_client::fog::{FogData, FogInputs, FogType, settle_rain_fog, update_rain_fog};
 use sunrise_client::{
-    animate_tick::{AnimateContext, AnimateSampling, campfire_particles, marker_particle_target},
+    animate_tick::{
+        AnimateContext, AnimateSampling, AnimateStep, campfire_particles, marker_particle_target,
+    },
     blocks::{BlockFacts, Fluid},
     containers::BlockEntity,
     mobs::Mob,
@@ -31,7 +33,11 @@ use sunrise_core::{
 };
 use sunrise_world::dimension_type::{CardinalLight, Skybox};
 use sunrise_world::{
-    heightmap::HeightmapType, registry::BlockStateId, worldgen::terrain::TerrainBlockStates,
+    environment_attributes::{AMBIENT_PARTICLES, Value as AttributeValue, attribute},
+    heightmap::HeightmapType,
+    particle_options::{ParticleOptions as PersistentOptions, block_state_id},
+    registry::BlockStateId,
+    worldgen::terrain::TerrainBlockStates,
 };
 
 /// `ScreenEffectRenderer.submit`'s block overlays in the order it draws them, which
@@ -792,7 +798,8 @@ impl Game<'_> {
         laps.lap("tp_fx");
         self.particles.particle_level = self.settings.particles;
         self.particles.camera = cam_pos;
-        let (rain, _) = self.weather_levels(1.0);
+        let (rain, thunder) = self.weather_levels(1.0);
+        let ambient_attribute = attribute(AMBIENT_PARTICLES).expect("registered ambient particles");
         let marker = marker_particle_target(self.mode, self.stack_in(self.selected));
         // The day timeline: firefly bush sounds from 12600 to 23400.
         let firefly_bush_sounds = self.dimension_type().has_timeline("minecraft:day")
@@ -826,6 +833,46 @@ impl Game<'_> {
             let world = &self.world;
             let facts = self.res.facts();
             let biomes = world_biomes!(self);
+            let environment =
+                Self::level_environment(self.remote.as_ref(), &self.res, &self.dimension_type().id);
+            let ui = &self.ui;
+            let remote = self.remote.as_ref();
+            let clock = |name: &str| {
+                if let Some(remote) = remote {
+                    return remote.named_clock_time(name);
+                }
+                let active = if ui.active_clock.is_empty() {
+                    "minecraft:overworld"
+                } else {
+                    &ui.active_clock
+                };
+                if name == active {
+                    world.day_time
+                } else if name == "minecraft:the_end" {
+                    world.end_clock
+                } else {
+                    ui.command_clocks.get(name).map_or(0, |c| c.0)
+                }
+            };
+            let ambient_particles = |[x, y, z]: [i32; 3]| {
+                // AMBIENT_PARTICLES isn't spatially interpolated and reads the noise biome.
+                let biome = world
+                    .noise_biome(x, y, z)
+                    .map(|id| &biomes.get(id).attributes);
+                let sample = sunrise_client::environment::Sample {
+                    day_time: world.day_time,
+                    rain,
+                    thunder,
+                    biome,
+                    ..Default::default()
+                };
+                let Some(AttributeValue::AmbientParticles(entries)) =
+                    environment.value_at(ambient_attribute, &sample, &clock)
+                else {
+                    unreachable!("ambient particles have an empty list as their default")
+                };
+                entries
+            };
             let properties = &self.pack.assets.properties;
             let raining = rain > 0.2;
             let raining_at = |p: [i32; 3]| {
@@ -862,6 +909,7 @@ impl Game<'_> {
                 creaking_active,
                 sky_darken,
                 marker: marker.map(|name| (name, &marker_options as &dyn Fn(_) -> _)),
+                ambient_particles: Some(&ambient_particles),
                 model_offset: &model_offset,
                 gateway_particles: &gateway_particles,
                 thundering,
@@ -878,12 +926,11 @@ impl Game<'_> {
                         registry.set_biomes(biomes);
                     }
                 }
-                if let Some((state, pos)) =
-                    sampling.run(self.res.animate(), &mut self.particles, &ctx)
-                {
-                    // `Block.animateTick` of the picked block's parts, inside its pick: after the
-                    // block's own effects, before its fluid's and the next pick.
-                    self.mod_animate_tick(state, pos);
+                if let Some(step) = sampling.run(self.res.animate(), &mut self.particles, &ctx) {
+                    match step {
+                        AnimateStep::BlockPart(state, pos) => self.mod_animate_tick(state, pos),
+                        AnimateStep::Ambient(options, at) => self.emit_model_ambient(&options, at),
+                    }
                     continue;
                 }
                 laps.lap("tp_animate");
@@ -1001,6 +1048,40 @@ impl Game<'_> {
             }
             laps.lap("tp_rain_campfire");
             break;
+        }
+    }
+
+    /// The ambient options whose providers need the game's model or overlay state.
+    fn emit_model_ambient(&mut self, particle: &PersistentOptions, at: [f64; 3]) {
+        let override_limiter = match particle {
+            PersistentOptions::Block(ty, _) => ty.override_limiter(),
+            PersistentOptions::Item(_) => ParticleType::Item.override_limiter(),
+            PersistentOptions::ElderGuardian => true,
+            _ => unreachable!("directly drawable ambient options are handled by sampling"),
+        };
+        if !self
+            .particles
+            .admit_particle_at(at, override_limiter, false)
+        {
+            return;
+        }
+        let options = match particle {
+            PersistentOptions::Block(ty, state) => block_state_id(self.pack.assets.registry, state)
+                .and_then(|state| {
+                    self.block_provider_options(*ty, state, at.map(|x| x.floor() as i32))
+                }),
+            PersistentOptions::Item(tag) => sunrise_items::item_nbt::item_from_nbt(tag)
+                .filter(|stack| self.items().get(&stack.item).is_some())
+                .map(|stack| self.item_particle(&stack)),
+            PersistentOptions::ElderGuardian => {
+                self.particles.elder_guardian();
+                return;
+            }
+            _ => unreachable!(),
+        };
+        if let Some(options) = options {
+            self.particles
+                .add_admitted_with_world(Some(&self.world), &options, at, [0.0; 3]);
         }
     }
 
@@ -1466,3 +1547,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "tests/ambient_particle_tests.rs"]
+mod ambient_particle_tests;

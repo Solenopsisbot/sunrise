@@ -329,6 +329,7 @@ fn prepare(
     let crate_name = cargo.crate_name();
     let registry = matches!(Route::of(&[cargo]), Route::Registry);
     let side = sunrise_native_build::prebuilt::side(target.into());
+    let cache = cache_dir()?;
     let dependencies = libraries::Libraries::read(
         &bundle.manifest,
         with,
@@ -336,8 +337,8 @@ fn prepare(
             contract::TargetName::Client => sunrise_mod_package::manifest::Side::Client,
             contract::TargetName::Server => sunrise_mod_package::manifest::Side::Server,
         },
+        &cache,
     )?;
-    let cache = cache_dir()?;
     let work = cache.join("work").join(&id);
     fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     let work = dunce::canonicalize(&work).map_err(|e| format!("{}: {e}", work.display()))?;

@@ -28,6 +28,10 @@ impl Commands for Game<'_> {
         self.native_feedback(sunrise_client_lib::api_text::to_serialized_engine(&line)?);
         Ok(())
     }
+    fn failure(&mut self, line: Text) -> Result<(), mod_api::text::TextFormError> {
+        self.native_failure(sunrise_client_lib::api_text::to_serialized_engine(&line)?);
+        Ok(())
+    }
     fn run_command(&mut self, line: &str) -> bool {
         self.native_run_command(line)
     }

@@ -862,10 +862,12 @@ impl Game<'_> {
                 if let Some(key) = vehicle {
                     self.close_guest_vehicle_menu(conn, key);
                 }
-                if let Some(carried) =
+                if let Some(closed) =
                     self.with_own_record(gi, |host, _| host.hub.container_closed(conn, p.container))
                 {
-                    self.lan_place_back(gi, vec![carried]);
+                    // A live close: a dead player's packets are not handled, and its menus
+                    // close on its tick as killed (`lan_containers_tick`).
+                    self.settle_closed_hub_menu(conn, closed, MenuRemoval::Live);
                 }
                 if closing {
                     self.player_menu_closing(conn);

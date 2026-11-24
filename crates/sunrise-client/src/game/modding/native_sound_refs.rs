@@ -117,6 +117,37 @@ impl Game<'_> {
         volume: f32,
         pitch: f32,
     ) -> bool {
+        self.native_bound_sound(entity, sound, source, volume, pitch, None, None)
+    }
+    /// `ServerLevel.playSeededSound(except, entity, sound, source, volume, pitch, seed)`:
+    /// [`Self::entity_play_bound_sound`] leaving out `except`'s client, with the caller's seed.
+    pub(super) fn entity_play_seeded_bound_sound(
+        &mut self,
+        entity: EntityRef,
+        sound: &str,
+        source: SoundSource,
+        volume: f32,
+        pitch: f32,
+        except: Option<PlayerRef>,
+        seed: i64,
+    ) -> bool {
+        let Some(except) = self.native_sound_except(except) else {
+            return false;
+        };
+        self.native_bound_sound(entity, sound, source, volume, pitch, except, Some(seed))
+    }
+    /// A sound bound to `entity` from where it is now, leaving out connection `except`, with
+    /// `seed` as [`NativeSoundRequest`](super::native_level_effects::NativeSoundRequest) says.
+    fn native_bound_sound(
+        &mut self,
+        entity: EntityRef,
+        sound: &str,
+        source: SoundSource,
+        volume: f32,
+        pitch: f32,
+        except: Option<u32>,
+        seed: Option<i64>,
+    ) -> bool {
         let Some(target) = self.native_entity_target(entity) else {
             return false;
         };
@@ -134,8 +165,9 @@ impl Game<'_> {
             source,
             volume,
             pitch,
-            except: None,
+            except,
             entity: Some(id),
+            seed,
         })
     }
 }
@@ -358,6 +390,7 @@ pub(super) mod tests {
                         pitch: 1.0,
                         except: None,
                         entity: None,
+                        seed: None,
                     },
                 ));
             }

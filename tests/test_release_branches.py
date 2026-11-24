@@ -3,18 +3,20 @@ run, the stable tags and their order, and the commits the nightly and stable bui
 import io
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
 import yaml
 
 from tools import release_file
 from tools import release_train as train
 from tools.ci import nightly
 
-ROOT = Path(__file__).resolve().parents[1]
 MAIN, NIGHTLY, RELEASE = "refs/heads/main", "refs/heads/nightly/26.3", "refs/heads/release/26.3"
 REPO, DISPATCH = "sunrise-org/sunrise", "workflow_dispatch"
 WORKFLOWS = ROOT / ".github/workflows"

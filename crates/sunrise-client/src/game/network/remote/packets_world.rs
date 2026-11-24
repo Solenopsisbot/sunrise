@@ -4,7 +4,8 @@ impl Game<'_> {
     /// `C::ForgetLevelChunk`: its arms of `apply_packet`, guard and order kept.
     pub(super) fn apply_forget_level_chunk_packet(&mut self, p: play::ForgetLevelChunk) {
         // `poll_remote` forgets a run of them at once.
-        self.forget_remote_columns(&mut [(p.pos[0], p.pos[1])].into_iter().collect(), true);
+        let [x, z] = p.pos;
+        self.forget_remote_packets(&mut [(x, z)].into_iter().collect());
     }
 
     /// `C::BlockDestruction`: its arms of `apply_packet`, guard and order kept.
@@ -100,14 +101,35 @@ impl Game<'_> {
             .lerp_between(p.old_size, p.new_size, p.lerp_time);
     }
 
-    /// `C::SetDefaultSpawnPosition`: its arms of `apply_packet`, guard and order kept.
+    /// `ClientPacketListener.handleSetSpawn` / `ClientLevel.setRespawnData`: store the
+    /// border-adjusted spawn position with the packet's dimension for the compass.
     pub(super) fn apply_set_default_spawn_position_packet(
         &mut self,
         p: play::SetDefaultSpawnPosition,
     ) {
-        // handleSetSpawn: ClientLevel.setRespawnData, which spawn compasses point at: the
-        // position with the level it is in, which the compass compares with its own.
-        let [x, y, z] = p.pos.pos;
+        let [mut x, mut y, mut z] = p.pos.pos;
+        // Level.getWorldBorderAdjustedRespawnData tests the integer BlockPos against
+        // the active level's border, even when the packet names a different level.
+        if let Some(remote) = &self.remote
+            && !self
+                .border
+                .geometry()
+                .is_within_bounds(f64::from(x), f64::from(z), 0.0)
+        {
+            [x, z] = self.border.center().map(sunrise_core::mth::floor);
+            // Level.getHeight: the horizontal range is half-open; outside it use
+            // this level's sea level, and for missing chunks use its build minimum.
+            const WORLD_RANGE: std::ops::Range<i32> = -30_000_000..30_000_000;
+            y = if WORLD_RANGE.contains(&x) && WORLD_RANGE.contains(&z) {
+                self.world
+                    .chunks
+                    .get(&(x >> 4, z >> 4))
+                    .and_then(|chunk| chunk.packet_motion_blocking_height(x, z))
+                    .unwrap_or(remote.dimension.min_y)
+            } else {
+                remote.sea_level.wrapping_add(1)
+            };
+        }
         self.spawn = Some(Vec3::new(
             f64::from(x) + 0.5,
             f64::from(y),
@@ -183,6 +205,8 @@ impl Game<'_> {
             4 if self.screen != Screen::Win => {
                 self.open_win_screen(true, super::super::win::Finish::RemoteRespawn);
             }
+            // DEMO_EVENT: a parentless popup or a client-system hint.
+            5 => self.apply_demo_event(p.param),
             // START_RAINING, STOP_RAINING, RAIN_LEVEL_CHANGE and THUNDER_LEVEL_CHANGE.
             event @ (1 | 2 | 7 | 8) => self.world.weather.game_event(event, p.param),
             3 => {

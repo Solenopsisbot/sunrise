@@ -268,6 +268,11 @@ impl Game<'_> {
         if !self.world.loaded(x, z) || self.world.set(x, y, z, state).is_err() {
             return None;
         }
+        if previous != state
+            && let Some(chunk) = self.world.chunks.get_mut(&(x >> 4, z >> 4))
+        {
+            Arc::make_mut(chunk).update_packet_motion_blocking(pos, &self.pack.assets.properties);
+        }
         // LevelChunk.setBlockState drops the old pot only when the block changes;
         // a new state of the same pot keeps its event-driven wobble.
         if self.be_anims.pots.contains_key(&pos)

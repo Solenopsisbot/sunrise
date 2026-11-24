@@ -13,6 +13,9 @@
 //! game's own: the set's spacing, the structure's biomes and its
 //! `terrain_adaptation`, and the pieces ride the one piece mechanism the game
 //! has, next to a fortress piece's.
+use super::pool_element::{
+    ElementContext, ElementPlacement, PoolElementRef, PoolPiece, TemplatePool,
+};
 use crate::{BlockKey, BlockMetadata, BlockState, RandomSource};
 use std::sync::Arc;
 pub use sunrise_core::position::ChunkPos;
@@ -42,12 +45,17 @@ impl From<(crate::Identifier, String)> for StructureError {
 /// What [`StructureType::find_generation_point`](StructureType::find_generation_point)
 /// found: the start's position (vanilla's `Structure.findGenerationPoint`
 /// answer) and its pieces (`Structure.generatePieces`). The start holds the
-/// pieces [`GenerationContext::assemble_jigsaw`] laid out first, then these;
-/// it needs at least one piece in all.
+/// pieces [`GenerationContext::assemble_jigsaw`] laid out first, then
+/// `pool_pieces`, then `pieces`; it needs at least one piece in all.
+#[derive(Default)]
 // exhaustive: mods build it themselves as find_generation_point's answer
 pub struct FoundStructure {
     /// Where the start sits, in world blocks.
     pub position: [i32; 3],
+    /// Pool element pieces the type laid out itself, from the pools
+    /// [`GenerationContext::template_pool`] reads. The game keeps, saves and
+    /// places them as it does `assemble_jigsaw`'s pieces.
+    pub pool_pieces: Vec<PoolPiece>,
     /// The type's own pieces, shared with the game, which keeps them in its start.
     pub pieces: Vec<Arc<dyn StructurePiece>>,
 }
@@ -131,7 +139,7 @@ pub struct DimensionPadding {
 }
 
 /// `LiquidSettings`: whether a placed piece's blocks take on the water there.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
 // exhaustive: vanilla's LiquidSettings has these two values.
 pub enum LiquidSettings {
     /// `apply_waterlogging`: waterloggable blocks placed in water are waterlogged.
@@ -414,6 +422,14 @@ pub trait GenerationContext {
         settings: &JigsawSettings,
         position: [i32; 3],
     ) -> Option<JigsawLayout>;
+    /// The data pack's template pool `name`, as `Registry.get` of
+    /// `TEMPLATE_POOL` finds it: `None` for a pool the data pack lacks or one
+    /// left out because an element failed to decode. Aliases are not applied:
+    /// a type that uses `pool_aliases` looks the aliased name up itself.
+    fn template_pool(&mut self, name: &crate::Identifier) -> Option<TemplatePool>;
+    /// Element reads for laying pieces out by hand: any element's jigsaws and
+    /// box.
+    fn elements(&self) -> &dyn ElementContext;
 }
 
 /// The placement context a piece's
@@ -457,6 +473,30 @@ pub trait PieceContext {
     /// `WorldGenLevel.setBlockEntity` at `pos`: the block entity's saved NBT
     /// (its `id` and fields).
     fn block_entity(&mut self, pos: [i32; 3], nbt: Compound);
+    /// `ConfiguredFeature.place` of the data pack's configured feature
+    /// `feature` at `pos`, drawing from [`random`](Self::random), with no
+    /// placement modifiers (as `/place feature` places one). Whether it placed anything;
+    /// `Ok(false)` also for a feature the data pack lacks. The feature writes
+    /// through the level, so its writes are not clipped to `chunk_box`.
+    fn place_feature(&mut self, feature: &str, pos: [i32; 3]) -> Result<bool, StructureError>;
+    /// `PlacedFeature.place` of the data pack's placed feature
+    /// `placed_feature` at `pos`: its placement modifiers, then its feature,
+    /// drawing from [`random`](Self::random), as a `FeaturePoolElement`
+    /// places its feature. Whether it placed anything;
+    /// `Ok(false)` also for a placed feature the data pack lacks.
+    fn place_placed_feature(
+        &mut self,
+        placed_feature: &str,
+        pos: [i32; 3],
+    ) -> Result<bool, StructureError>;
+    /// `StructurePoolElement.place` of any element, vanilla's or a mod's, in
+    /// this chunk, drawing from [`random`](Self::random). This is how an
+    /// element that wraps another places it. Whether it placed anything.
+    fn place_element(
+        &mut self,
+        element: &PoolElementRef,
+        placement: &ElementPlacement,
+    ) -> Result<bool, StructureError>;
 }
 
 /// A registered API behaviour; the game builds its engine adapter at startup.

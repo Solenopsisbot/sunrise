@@ -136,6 +136,7 @@ impl OverworldGenerator {
         Ok(Self {
             pipeline: Arc::new(pipeline),
             noise_clamped: None,
+            mod_biome_keys: Default::default(),
         })
     }
 }

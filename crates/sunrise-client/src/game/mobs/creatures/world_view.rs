@@ -65,6 +65,10 @@ impl Game<'_> {
                 .ui
                 .rules
                 .bool_at(sunrise_client::gamerules::vanilla::MOB_DROPS),
+            pvp: self
+                .ui
+                .rules
+                .bool_at(sunrise_client::gamerules::vanilla::PVP),
             max_entity_cramming: self
                 .ui
                 .rules

@@ -7,6 +7,10 @@ use sunrise_client::chunk::Chunk;
 #[test]
 #[ignore = "needs explicit SUNRISE_TEST_RESOURCES and SUNRISE_PORTAL_REFERENCE"]
 fn portal_contact_and_waiting_handoff_match_vanilla_counters() {
+    run_portal_contact_and_waiting_handoff_match_vanilla_counters();
+}
+
+pub(in crate::game) fn run_portal_contact_and_waiting_handoff_match_vanilla_counters() {
     let reference: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(std::env::var_os("SUNRISE_PORTAL_REFERENCE").unwrap()).unwrap(),
     )

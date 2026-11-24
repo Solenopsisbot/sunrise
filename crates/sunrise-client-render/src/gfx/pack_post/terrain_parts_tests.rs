@@ -113,6 +113,7 @@ fn strips_of(
                 material_maps: false,
                 ids: None,
                 cull: false,
+                pages: false,
             }),
             block_ids: &[],
             sprite_rects: &[],

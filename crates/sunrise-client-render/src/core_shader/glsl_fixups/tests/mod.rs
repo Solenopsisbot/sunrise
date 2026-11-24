@@ -192,6 +192,7 @@ fn translate(fsh: &str) -> Result<crate::core_shader::CoreProgram, String> {
         setup: "Position = hz_position;",
         finish: "",
         vertex_id: "int(gl_VertexIndex)",
+        interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
     };
     crate::core_shader::translate_core(vsh, fsh, &[], &|_| None, &glue)
 }

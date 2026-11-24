@@ -20,6 +20,53 @@ pub const PAGE_BYTES: u64 = 256 << 20;
 /// wgpu-core adds to vertex buffers; the device's own limit still applies.
 pub const LARGE_PAGE_BYTES: u64 = (1 << 31) - (1 << 20);
 
+/// Bytes of a slot's source in a page's sidecar (`Page::sources`).
+const SOURCE_BYTES: u64 = std::mem::size_of::<crate::mesher::TerrainSource>() as u64;
+
+/// Where a range names its quads, for their sources (`Arena::write_sources`): quad `i` by the
+/// slot `step * i` of the range. A flat draw finds a quad's source at that slot
+/// (`pack_atlas`'s `hz_slot`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuadSlots {
+    quads: u64,
+    step: u64,
+}
+
+impl QuadSlots {
+    /// `vertices` as quads of four: each named by its first vertex.
+    pub fn vertices(vertices: u64) -> Self {
+        Self {
+            quads: vertices / 4,
+            step: 4,
+        }
+    }
+    /// A compact range of `quads` (`mesher::packed`): each named by its record, which sits at
+    /// its place in mesh order.
+    pub fn records(quads: u64) -> Self {
+        Self { quads, step: 1 }
+    }
+    /// `sources` by slot of a range of `slots` into `out`: each quad's at the slot naming it,
+    /// unknown (zero) between. False, `out` untouched, unless there are quads, one source
+    /// per quad, and every quad's slot is in the range.
+    pub fn lay_out(
+        self,
+        sources: &[crate::mesher::TerrainSource],
+        slots: u64,
+        out: &mut Vec<crate::mesher::TerrainSource>,
+    ) -> bool {
+        let quads = sources.len() as u64;
+        if quads == 0 || quads != self.quads || quads * self.step > slots {
+            return false;
+        }
+        out.clear();
+        out.resize((self.quads * self.step) as usize, Default::default());
+        for (to, source) in out.iter_mut().step_by(self.step as usize).zip(sources) {
+            *to = *source;
+        }
+        true
+    }
+}
+
 /// Free vertex ranges: start -> length, never adjacent.
 #[derive(Debug, PartialEq)]
 struct FreeList(BTreeMap<u64, u64>);
@@ -85,7 +132,8 @@ impl FreeList {
 /// One vertex buffer of the arena; only the newest page grows.
 struct Page {
     buffer: wgpu::Buffer,
-    /// Optional shader-pack source records, indexed by the vertex index / 4.
+    /// Optional shader-pack source records, one per vertex slot: a quad's sits at the slot
+    /// that names it (`QuadSlots`), the others are zero.
     sources: Option<wgpu::Buffer>,
     /// Capacity in vertices.
     capacity: u64,
@@ -126,7 +174,12 @@ pub struct Arena {
     closing: Option<u32>,
     /// A page had to go to system memory (logged once).
     spilled: bool,
+    /// Flat draws read its sources (`read_sources`): a `shaders/` pack draws terrain from it.
+    sources_read: bool,
+    /// Its pages have sidecars: a mesh with sources came while they are read.
     sources_enabled: bool,
+    /// `write_sources`'s range of sources by slot, kept between uploads.
+    source_slots: Vec<crate::mesher::TerrainSource>,
     /// Tests: GPU-local pages fail as if video memory were full.
     #[cfg(test)]
     video_memory_full: bool,
@@ -196,14 +249,7 @@ impl Arena {
         usage: wgpu::BufferUsages,
         page_bytes: u64,
     ) -> Self {
-        // Pages of `page_bytes`, or less where the device's buffers (or the
-        // storage bindings that read them whole) are smaller.
-        let limits = device.limits();
-        let mut bytes = limits.max_buffer_size.min(page_bytes);
-        if usage.contains(wgpu::BufferUsages::STORAGE) {
-            bytes = bytes.min(limits.max_storage_buffer_binding_size);
-        }
-        let page_limit = (bytes / stride) / GRAIN * GRAIN;
+        let page_limit = Self::page_limit(&device.limits(), stride, usage, page_bytes);
         let capacity = capacity.next_multiple_of(GRAIN).min(page_limit);
         Self {
             pages: Vec::new(),
@@ -214,10 +260,27 @@ impl Arena {
             usage,
             closing: None,
             spilled: false,
+            sources_read: false,
             sources_enabled: false,
+            source_slots: Vec::new(),
             #[cfg(test)]
             video_memory_full: false,
         }
+    }
+    /// Vertices of `stride` bytes a page of `usage` holds on a device of `limits`: pages of
+    /// `page_bytes`, or less where the device's buffers (or the storage bindings that read them
+    /// whole) are smaller.
+    pub(super) fn page_limit(
+        limits: &wgpu::Limits,
+        stride: u64,
+        usage: wgpu::BufferUsages,
+        page_bytes: u64,
+    ) -> u64 {
+        let mut bytes = limits.max_buffer_size.min(page_bytes);
+        if usage.contains(wgpu::BufferUsages::STORAGE) {
+            bytes = bytes.min(limits.max_storage_buffer_binding_size);
+        }
+        (bytes / stride) / GRAIN * GRAIN
     }
     /// A buffer of `capacity` vertices in video memory or, when that is full,
     /// `spill` allows it and so does the device, in system memory: Vulkan
@@ -302,19 +365,47 @@ impl Arena {
     }
 
     fn source_buffer(device: &wgpu::Device, capacity: u64) -> Option<wgpu::Buffer> {
-        if capacity / 4 * 8 > device.limits().max_storage_buffer_binding_size {
+        // Flat draws bind it whole (`pack_atlas`'s `hz_sources`).
+        if capacity * SOURCE_BYTES > device.limits().max_storage_buffer_binding_size {
             return None;
         }
         try_create(
             device,
             "Terrain quad sources",
-            capacity / 4 * 8,
+            capacity * SOURCE_BYTES,
             wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
         )
     }
 
+    /// Whether flat draws read its sources (`read_sources`).
+    pub fn sources_read(&self) -> bool {
+        self.sources_read
+    }
+
+    /// Whether flat draws read its sources from now on: while they don't, sources are not kept
+    /// and its pages have no sidecars. Turning it off gives back their buffers, for a
+    /// [`Graveyard`].
+    pub fn read_sources(&mut self, on: bool) -> Vec<wgpu::Buffer> {
+        self.sources_read = on;
+        if on {
+            return Vec::new();
+        }
+        self.sources_enabled = false;
+        self.source_slots = Vec::new();
+        let mut released = Vec::new();
+        for p in self.pages.iter_mut().flatten() {
+            if let Some(buffer) = p.sources.take() {
+                self.page_bytes -= buffer.size();
+                released.push(buffer);
+            }
+        }
+        released
+    }
+
+    /// The sources of the range of `slots` at `start` of `page`, one per quad as `names` says
+    /// where each quad is named, kept only while flat draws read them (`read_sources`).
     /// Native meshes allocate no sidecar. Once needed, existing pages also get a zeroed
     /// sidecar so moves can retain sources. Failure leaves geometry intact and attributes
     /// unknown; a later source upload may retry its page.
@@ -323,11 +414,13 @@ impl Arena {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         uploads: &mut super::upload::Uploads,
-        page: u32,
-        start: u64,
-        vertices: u64,
+        (page, start, slots): (u32, u64, u64),
+        names: QuadSlots,
         sources: &[crate::mesher::TerrainSource],
     ) {
+        if !self.sources_read {
+            return;
+        }
         if !sources.is_empty() && !self.sources_enabled {
             self.sources_enabled = true;
             for p in self.pages.iter_mut().flatten() {
@@ -341,17 +434,17 @@ impl Arena {
             self.page_bytes += p.sources.as_ref().map_or(0, wgpu::Buffer::size);
         }
         if let Some(buffer) = &p.sources {
-            let bytes = vertices / 4 * 8;
+            let bytes = slots * SOURCE_BYTES;
             if bytes > 0 {
                 // Recycled ranges must never keep another mesh's identity, even for a
                 // missing or incomplete sidecar. Zero records have no valid bit.
-                encoder.clear_buffer(buffer, start / 4 * 8, Some(bytes));
-                if sources.len() as u64 == vertices / 4 {
+                encoder.clear_buffer(buffer, start * SOURCE_BYTES, Some(bytes));
+                if names.lay_out(sources, slots, &mut self.source_slots) {
                     uploads.buffer(
                         encoder,
                         buffer,
-                        start / 4 * 8,
-                        bytemuck::cast_slice(sources),
+                        start * SOURCE_BYTES,
+                        bytemuck::cast_slice(&self.source_slots),
                     );
                 }
             }
@@ -571,17 +664,17 @@ impl Arena {
             vertices * self.stride,
         );
         if let Some(to_sources) = self.sources(to.0) {
-            let bytes = vertices / 4 * 8;
+            let bytes = vertices * SOURCE_BYTES;
             if bytes > 0 {
                 match self.sources(from.0) {
                     Some(from_sources) => encoder.copy_buffer_to_buffer(
                         from_sources,
-                        from.1 / 4 * 8,
+                        from.1 * SOURCE_BYTES,
                         to_sources,
-                        to.1 / 4 * 8,
+                        to.1 * SOURCE_BYTES,
                         bytes,
                     ),
-                    None => encoder.clear_buffer(to_sources, to.1 / 4 * 8, Some(bytes)),
+                    None => encoder.clear_buffer(to_sources, to.1 * SOURCE_BYTES, Some(bytes)),
                 }
             }
         }

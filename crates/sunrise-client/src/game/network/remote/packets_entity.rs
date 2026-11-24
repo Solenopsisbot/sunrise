@@ -105,7 +105,22 @@ impl Game<'_> {
                     m.custom_name_text = Some(text);
                 }
                 (3, Value::Bool(visible)) => m.name_visible = *visible,
+                // Entity.DATA_NO_GRAVITY: `isNoGravity` in the client's own travel.
+                (5, Value::Bool(no_gravity)) => m.no_gravity = *no_gravity,
                 _ => {}
+            }
+        }
+        // Entity.DATA_NO_GRAVITY of an item, which may come before its stack
+        // (`DATA_ITEM`, 8) and so before the item is made.
+        if let (5, Value::Bool(no_gravity)) = (index, value) {
+            if let Some(item) = self.dropped.iter_mut().find(|d| d.id == id as u32) {
+                item.no_gravity = *no_gravity;
+            } else if let Some(pending) = self
+                .remote
+                .as_mut()
+                .and_then(|r| r.pending_items.get_mut(&id))
+            {
+                pending.no_gravity = *no_gravity;
             }
         }
         self.remote_mob_data(id, single);

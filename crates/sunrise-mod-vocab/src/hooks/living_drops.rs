@@ -21,7 +21,8 @@ pub trait Hooks {
     /// ticks, which is what lets a mob drop its equipment. An armor stand fires it from `brokenByAnything` with an
     /// empty list (its stand item and its equipment pop outside the list, as
     /// in vanilla). Experience orbs are not in the list
-    /// (`living_experience_drop`); a spectator, who drops nothing,
+    /// (`living_experience_drop`, heard just before this hook, as in
+    /// NeoForge; the orbs join the level after the items); a spectator, who drops nothing,
     /// doesn't call this. Each `ItemDrop` also sets the item entity's
     /// `thrower`, `target` (the only player who may pick it up), `no_gravity`
     /// and starting `age` (`ItemDrop::UNLIMITED_LIFETIME` never despawns); a

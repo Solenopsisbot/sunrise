@@ -139,7 +139,8 @@ mod tests {
                 game.mob_die(&mob);
                 assert_eq!(
                     *heard.lock().unwrap(),
-                    ["killed", "death", "loot", "xp", "post"]
+                    ["killed", "death", "xp", "loot", "post"],
+                    "NeoForge's dropAllDeathLoot: the experience, then the drop list"
                 );
                 {
                     let post = post.lock().unwrap();
@@ -252,8 +253,8 @@ mod tests {
 
                 assert_eq!(
                     *heard.lock().unwrap(),
-                    ["death", "xp", "post"],
-                    "the inventory drop, the message and the experience ran before it"
+                    ["death", "xp", "loot", "post"],
+                    "the message, the experience and then the inventory drop ran before it"
                 );
                 let post = post.lock().unwrap();
                 assert_eq!(post.entity, Some(id));

@@ -6,7 +6,7 @@
 
 use std::ops::Range;
 
-use sunrise_render_core::entity::{TEXT_NORMAL_SOLID_OVERLAY, TEXT_POLYGON_OFFSET_SOLID_OVERLAY};
+use sunrise_render_core::entity::TEXT_POLYGON_OFFSET_SOLID_OVERLAY;
 use sunrise_shaders::render_stage;
 
 // `FLUID_OVERLAY` and the terrain overlays are only read by the tests' probes.
@@ -246,6 +246,9 @@ pub struct Draw {
     /// A boat's water patch (`WATER_MASK_OVERLAY`): depth only, with the program's pipeline that
     /// writes no colour.
     pub water_mask: bool,
+    /// Polygon-offset sign text (`polygon_offset`): drawn with the program's pipeline that biases
+    /// depth as vanilla's `RenderPipelines.TEXT_POLYGON_OFFSET` does.
+    pub polygon_offset: bool,
 }
 
 /// Which entity runs a pack's shadow pass draws (2.4, 3.2).
@@ -477,6 +480,7 @@ impl PackEntities {
                     overlay,
                     false,
                     false,
+                    false,
                 );
             }
         }
@@ -485,7 +489,7 @@ impl PackEntities {
         let (mut other, mut portal_faces, mut beam_faces) = (Vec::new(), Vec::new(), Vec::new());
         let mut water_patches = Vec::new();
         let mut without_fluids = Vec::new();
-        for (span, range, material) in material_runs(entities, spans, drawn) {
+        for (span, range, material, offset) in material_runs(entities, spans, drawn) {
             let run_start = range.start as u32;
             let whole = &entities[range];
             // A native fluid carries sprite-array UVs, not shared-atlas UVs.
@@ -604,6 +608,7 @@ impl PackEntities {
                     overlay,
                     portal,
                     part == Part::WaterMask,
+                    offset && part == Part::Plain,
                 );
             }
         }
@@ -675,6 +680,7 @@ impl PackEntities {
         overlay: u32,
         portal: bool,
         water_mask: bool,
+        polygon_offset: bool,
     ) {
         let (entity_id, block_id) = match program {
             BLOCK | BLOCK_TRANSLUCENT => (0, span.id),
@@ -700,6 +706,7 @@ impl PackEntities {
             slot: self.draws.len() as u32,
             portal,
             water_mask,
+            polygon_offset,
         });
     }
 }
@@ -862,49 +869,54 @@ fn material_program(span: &EntitySpan, layer: u32, drawn: [bool; PROGRAMS]) -> O
     })
 }
 
-/// Split where a quad's program changes, keeping contiguous runs in vertex order.
+/// Whether a quad of overlay `layer` drawn by `program` takes the program's polygon-offset
+/// pipeline: sign text in `Font.DisplayMode.POLYGON_OFFSET` (`TEXT_POLYGON_OFFSET_SOLID_OVERLAY`),
+/// drawn by the block program (spec 2.3: `gbuffers_block` draws sign text) with the depth bias
+/// vanilla's `RenderPipelines.TEXT_POLYGON_OFFSET` gives it against the surface it lies on (the
+/// board, a terrain block model drawn before it). Its `NORMAL` outline copies
+/// (`TEXT_NORMAL_SOLID_OVERLAY`) keep the plain pipeline, as vanilla's `NORMAL` mode does.
+fn polygon_offset(program: Option<usize>, layer: u32) -> bool {
+    matches!(program, Some(BLOCK | BLOCK_TRANSLUCENT))
+        && layer & 0xffff == TEXT_POLYGON_OFFSET_SOLID_OVERLAY
+}
+
+/// One piece of a span's run (`material_runs`): its span, its vertices, the program that draws
+/// it and whether it takes that program's polygon-offset pipeline (`polygon_offset`).
+type MaterialRun = (EntitySpan, Range<usize>, Option<usize>, bool);
+
+/// Split where a quad's program or depth mode changes, keeping contiguous runs in vertex order.
 fn material_runs<'a>(
     vertices: &'a [Vertex],
     spans: &'a [EntitySpan],
     drawn: [bool; PROGRAMS],
-) -> impl Iterator<Item = (EntitySpan, Range<usize>, Option<usize>)> + 'a {
+) -> impl Iterator<Item = MaterialRun> + 'a {
     runs(vertices.len(), spans).flat_map(move |(span, range)| {
         let program = program_of(&span);
         let split =
             program == Some(BLOCK) || (program == Some(PARTICLE) && drawn[PARTICLE_TRANSLUCENT]);
         let program_at = move |i: usize| {
             let layer = vertices[i].layer;
-            // Both halves of sign text must reach the native text passes. The pack's
-            // block program does not distinguish normal and polygon-offset depth.
-            if program == Some(BLOCK)
-                && matches!(
-                    layer & 0xffff,
-                    TEXT_NORMAL_SOLID_OVERLAY | TEXT_POLYGON_OFFSET_SOLID_OVERLAY
-                )
-            {
-                None
-            } else {
-                material_program(&span, layer, drawn)
-            }
+            let material = material_program(&span, layer, drawn);
+            (material, polygon_offset(material, layer))
         };
         let mut start = range.start;
         std::iter::from_fn(move || {
             if start >= range.end {
                 return None;
             }
-            let program = program_at(start);
+            let (program, offset) = program_at(start);
             let end = if split {
                 (start..range.end)
                     .step_by(4)
                     .skip(1)
-                    .find(|&i| program_at(i) != program)
+                    .find(|&i| program_at(i) != (program, offset))
                     .unwrap_or(range.end)
             } else {
                 range.end
             };
             let run = start..end;
             start = end;
-            Some((span, run, program))
+            Some((span, run, program, offset))
         })
     })
 }
@@ -1267,6 +1279,7 @@ mod crack_projection_tests {
 #[cfg(test)]
 mod gpu_span_tests {
     use super::*;
+    use sunrise_render_core::entity::TEXT_NORMAL_SOLID_OVERLAY;
     use sunrise_render_core::{PosedModelRuns, SkinRunJob};
 
     #[test]
@@ -1349,58 +1362,93 @@ mod gpu_span_tests {
 
     #[test]
     #[ignore = "daily"]
-    fn sign_text_stays_native_while_model_uses_pack() {
+    fn sign_text_draws_in_the_block_program_in_order() {
         let _gpu = crate::test_gpu::lock();
         let adapter = crate::test_gpu::adapter().unwrap();
         let (device, queue) =
             pollster::block_on(adapter.request_device(&Default::default())).unwrap();
         let layout = crate::pack_draw::DrawUniforms::new(&device);
         let mut geometry = PackEntities::new(&device, &layout.layout);
-        // One sign span has a model quad, a normal outline quad and a biased face quad.
+        // One block-entity span: a model quad, a NORMAL outline quad, a POLYGON_OFFSET fill
+        // quad and another model quad; each at its own height so its place shows.
         let mixed = [
             0,
             TEXT_NORMAL_SOLID_OVERLAY,
             TEXT_POLYGON_OFFSET_SOLID_OVERLAY,
+            0,
         ]
         .into_iter()
-        .flat_map(|overlay| {
+        .enumerate()
+        .flat_map(|(i, overlay)| {
             [Vertex {
-                layer: overlay | 279 << 16,
+                pos: [0.0, i as f32 + 1.0, 0.0],
+                layer: overlay | 3 << 16,
                 uv: [0.25, 0.75],
                 ..bytemuck::Zeroable::zeroed()
             }; 4]
         })
         .collect::<Vec<_>>();
         let mut rest = Vec::new();
-        geometry.prepare(
-            &device,
-            &queue,
-            &layout.layout,
-            &mixed,
-            &[EntitySpan {
-                start: 0,
-                id: 77,
-                stage: render_stage("BLOCK_ENTITIES"),
-                ..Default::default()
-            }],
-            [true; PROGRAMS],
-            ([0.; 4], [1; 2]),
-            Casters {
-                blocks: true,
-                ..Default::default()
-            },
-            &mut rest,
-            None,
-            (&[], &[]),
-        );
-        assert_eq!(geometry.scratch.len(), 4, "only the model uses the pack");
-        assert_eq!(geometry.draws.len(), 1);
-        assert!(geometry.draws[0].pack);
-        assert_eq!(
-            bytemuck::cast_slice::<_, u8>(&rest),
-            bytemuck::cast_slice::<_, u8>(&mixed[4..]),
-            "both text modes reach the native draw in order, with UV and layer intact"
-        );
+        let mut no_block = [true; PROGRAMS];
+        no_block[BLOCK] = false;
+        // (pack has the block program, span hidden): draws (base, program, pack, shadow,
+        // polygon offset), and what Sunrise draws.
+        for (drawn, hidden) in [
+            ([true; PROGRAMS], false),
+            ([true; PROGRAMS], true),
+            (no_block, false),
+        ] {
+            geometry.prepare(
+                &device,
+                &queue,
+                &layout.layout,
+                &mixed,
+                &[EntitySpan {
+                    start: 0,
+                    id: 77,
+                    stage: render_stage("BLOCK_ENTITIES"),
+                    hidden,
+                    ..Default::default()
+                }],
+                drawn,
+                ([0.; 4], [1; 2]),
+                Casters {
+                    blocks: true,
+                    ..Default::default()
+                },
+                &mut rest,
+                None,
+                (&[], &[]),
+            );
+            let draws = (geometry.draws.iter())
+                .map(|d| (d.base, d.program, d.pack, d.shadow, d.polygon_offset))
+                .collect::<Vec<_>>();
+            let pack = drawn[BLOCK] && !hidden;
+            assert_eq!(
+                draws,
+                [
+                    (0, BLOCK, pack, true, false),
+                    (8, BLOCK, pack, true, true),
+                    (12, BLOCK, pack, true, false),
+                ],
+                "drawn {}, hidden {hidden}",
+                drawn[BLOCK]
+            );
+            assert_eq!(
+                bytemuck::cast_slice::<_, u8>(&geometry.scratch),
+                bytemuck::cast_slice::<_, u8>(&mixed),
+                "the text keeps its place, UV and layer among the model's quads"
+            );
+            if pack || hidden {
+                assert!(rest.is_empty(), "drawn {}, hidden {hidden}", drawn[BLOCK]);
+            } else {
+                assert_eq!(
+                    bytemuck::cast_slice::<_, u8>(&rest),
+                    bytemuck::cast_slice::<_, u8>(&mixed),
+                    "without a block program, Sunrise draws the model and the text together"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1847,6 +1895,7 @@ mod velocity_translate_tests {
                 &fsh,
                 sunrise_shaders::Target::Buffers,
                 &inputs,
+                naga::front::glsl::InterfaceLimits::WGPU_DEFAULT,
             )
             .unwrap_or_else(|e| panic!("{who}: {e:?}"));
             let previous = p
@@ -1898,6 +1947,7 @@ mod tier_translate_tests {
                 &fsh,
                 sunrise_shaders::Target::Buffers,
                 &inputs,
+                naga::front::glsl::InterfaceLimits::WGPU_DEFAULT,
             )
             .unwrap_or_else(|e| panic!("{who}: {e:?}"));
         }

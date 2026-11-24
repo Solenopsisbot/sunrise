@@ -59,6 +59,7 @@ READERS = {
     "sunrise-client": SUNRISE_CLIENT,
     # Shares sunrise-client's sources, so its unit tests run the same reads.
     "sunrise-client-lib": SUNRISE_CLIENT,
+    "sunrise-parity-fixtures": SUNRISE_CLIENT,
     # lang.rs embeds the bundled language files.
     "sunrise-client-core": ["crates/sunrise-client/assets/sunrise/lang"],
     "sunrise-client-render": [
@@ -112,7 +113,8 @@ SCANNED = {"sunrise-client-core": ["crates"]}
 # Literals the scan takes for a walk up to crates/ that are not one (a ".." among path-traversal checks).
 # "machines/.." in a test's sample paths, "mods/" in an instance's file names: no read either.
 NOT_READS = {
-    "sunrise-client": {"crates"}, "sunrise-client-lib": {"crates"}, "sunrise-mod-package": {"crates"},
+    "sunrise-client": {"crates"}, "sunrise-client-lib": {"crates"}, "sunrise-parity-fixtures": {"crates"},
+    "sunrise-mod-package": {"crates"},
     "sunrise-mod-vocab": {"."}, "sunrise-port-pack": {"mods"}, "sunrise-prepare": {"crates"},
     # A package's source-file names (`package::source_file`), never this checkout's lock.
     "sunrise-mod-source": {"Cargo.lock"},

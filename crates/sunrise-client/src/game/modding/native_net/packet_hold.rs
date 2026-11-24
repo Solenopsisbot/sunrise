@@ -156,35 +156,40 @@ impl Game<'_> {
     }
     /// The logical play packet already passed the client send hook. A cauldron
     /// continuation travels with its envelope; only a published packet expects a reply.
+    /// Returns true only when the packet was accepted by the active writer or hold queue.
     pub(in crate::game) fn send_or_hold_play(
         &self,
         packet: S,
         cauldron: Option<(i64, PendingCauldron)>,
-    ) {
+    ) -> bool {
         let Some(remote) = &self.remote else {
-            return;
+            return false;
         };
         let mut holds = self.native_net.holds.borrow_mut();
         holds.sync(self.hold_incarnation());
         let tracked = cauldron.is_some();
         if holds.active.is_none() && !tracked {
-            remote.session.send(packet);
-            return;
+            return remote.session.try_send(packet);
         }
         let Some(incarnation) = holds.incarnation else {
-            return;
+            return false;
         };
         match packet.try_encode() {
             Ok(body) => {
                 let result = holds.queue(HeldPlay { body, cauldron }, |packet| {
                     packet.publish(remote, incarnation)
                 });
-                if tracked && let Err(error) = result {
+                if tracked && let Err(error) = &result {
                     log::warn!("cauldron use request was not published: {error:?}");
                 }
+                result.is_ok()
             }
-            Err(error) if tracked => log::warn!("cauldron use request encoding failed: {error}"),
-            Err(_) => {}
+            Err(error) => {
+                if tracked {
+                    log::warn!("cauldron use request encoding failed: {error}");
+                }
+                false
+            }
         }
     }
     pub(in crate::game) fn publish_mod_held(
@@ -223,14 +228,14 @@ impl Game<'_> {
     }
 }
 impl Game<'_> {
-    /// `Connection.send` for the game's play packets. True if there is a remote
-    /// and `client_packet_send` did not cancel; publication can still be held or refused.
+    /// `Connection.send` for the game's play packets. True only if there is a remote,
+    /// `client_packet_send` did not cancel, and the packet was accepted by the active
+    /// play writer or hold queue.
     pub(in crate::game) fn send_play(&self, packet: S) -> bool {
-        let queued = self.remote.is_some() && !self.client_packet_send_canceled(&packet);
-        if queued {
-            self.send_or_hold_play(packet, None);
+        if self.remote.is_none() || self.client_packet_send_canceled(&packet) {
+            return false;
         }
-        queued
+        self.send_or_hold_play(packet, None)
     }
 }
 

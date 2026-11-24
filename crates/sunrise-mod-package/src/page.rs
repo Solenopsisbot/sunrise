@@ -297,7 +297,10 @@ pub fn check_screenshot(path: &Path, bytes: &[u8]) -> Result<(), String> {
         decoder
             .decode()
             .map_err(|e| format!("unreadable JPEG screenshot: {e}"))?;
-        return Ok(());
+        // The decoder recovers a scan cut short (zero bits for the blocks it lacks) and does not
+        // report it, so the scans are read as well: they cover the picture, and each holds all
+        // of its blocks.
+        return jpeg::check_complete(bytes).map_err(|e| format!("unreadable JPEG screenshot: {e}"));
     }
     Err("not a PNG or JPEG screenshot".into())
 }
@@ -397,6 +400,8 @@ impl Categories {
         toml::from_str(text).map_err(|e| format!("categories.toml: {e}"))
     }
 }
+
+mod jpeg;
 
 #[cfg(test)]
 mod tests;

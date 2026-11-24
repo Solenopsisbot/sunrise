@@ -42,7 +42,7 @@ pub use config::{
     draw_buffers, shadow_color,
 };
 pub use custom::{Custom, Val};
-pub use discover::{Found, discover};
+pub use discover::{Found, candidates, discover};
 pub use lang::Lang;
 pub use macros::{MC_VERSION, Macros, RENDER_STAGES, render_stage};
 pub use options::{
@@ -51,8 +51,8 @@ pub use options::{
 };
 pub use pack::{Pack, PackError};
 pub use post::{
-    Blend, BufferObject, BufferSize, CELESTIAL_BLEND, CustomImage, Factor, GameInputs, Group,
-    ImageSize,
+    Blend, BufferObject, BufferSize, CELESTIAL_BLEND, CustomImage, DEVICELESS_INTERFACE_LIMITS,
+    Factor, GameInputs, Group, ImageSize,
 };
 pub use post::{
     Post, PostProgram, STARS_BLEND, ShadowCulling, SkySwitches, TRANSLUCENT_BLEND,

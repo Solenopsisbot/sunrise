@@ -520,7 +520,18 @@ impl Game<'_> {
             self.guest_drop_carried(gi);
         } else if let Some(host) = self.lan.as_mut() {
             let returned = host.hub.take_closed_menu_cursors(conn).collect();
+            // Inputs of a processing menu the hub closed itself keep the drop decision made
+            // when it closed (a dead player's drop), even though this removal is live.
+            let (to_return, to_drop) = host.hub.take_closed_processing_inputs(conn);
             self.lan_place_back(gi, returned);
+            if let Some(gi) = self.guest_index(conn) {
+                self.lan_place_back(gi, to_return);
+            }
+            if !to_drop.is_empty()
+                && let Some(gi) = self.guest_index(conn)
+            {
+                self.drop_guest_items(gi, to_drop);
+            }
         }
         // Overflow listeners can open a menu. Remember the window we will
         // retire now, not the one that was open before returning cursors.
@@ -542,14 +553,10 @@ impl Game<'_> {
             // Returning queued cursors and closing a container can both call
             // listeners that remove another player, shifting the guest list.
             if let Some(gi) = self.guest_index(conn)
-                && let Some(carried) =
+                && let Some(closed) =
                     self.with_own_record(gi, |host, _| host.hub.container_closed(conn, window))
             {
-                if removal.drops_items() {
-                    self.drop_guest_items(gi, vec![carried]);
-                } else {
-                    self.lan_place_back(gi, vec![carried]);
-                }
+                self.settle_closed_hub_menu(conn, closed, removal);
             }
         }
         self.lan_merchant_removed(conn, None, removal);
@@ -559,6 +566,32 @@ impl Game<'_> {
         // `PlayerContainerEvent.Close`, after the menu's `removed`.
         self.player_menu_closing(conn);
         retired_window
+    }
+
+    /// `AbstractContainerMenu.removed` for a window the hub detached: the cursor, then a
+    /// processing menu's non-result inputs (`clearContainer`), each through
+    /// `dropOrPlaceInInventory`. A killed or disconnected player drops them; otherwise they go
+    /// back to the inventory, dropping what does not fit. A processing menu's results are
+    /// already discarded.
+    pub(super) fn settle_closed_hub_menu(
+        &mut self,
+        conn: u32,
+        closed: sunrise_client::lan::containers::ClosedHubMenu,
+        removal: MenuRemoval,
+    ) {
+        let carried: Vec<_> = closed.carried.into_iter().collect();
+        for stacks in [carried, closed.processing_inputs] {
+            // Returning stacks can call listeners that remove another player, shifting the
+            // guest list.
+            let Some(gi) = self.guest_index(conn).filter(|_| !stacks.is_empty()) else {
+                continue;
+            };
+            if removal.drops_items() {
+                self.drop_guest_items(gi, stacks);
+            } else {
+                self.lan_place_back(gi, stacks);
+            }
+        }
     }
 
     /// `ContainerEntity`'s `Container.stopOpen` when a vehicle menu closes

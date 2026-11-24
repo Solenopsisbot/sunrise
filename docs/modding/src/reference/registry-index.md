@@ -6,8 +6,8 @@ its pinned tool for versions of Sunrise that still use it. To release a content 
 [Publishing your mod](../how-to/publish.md) instead.
 
 Releases made that way are listed in the registry's schema-2 index,
-`https://sunrise-org.github.io/sunrise-mods/v2/index.json`, signed with minisign in `v2/index.json.minisig` by the
-key in the registry's [`registry/index-key.pub`](https://github.com/sunrise-org/sunrise-mods/blob/main/registry/index-key.pub).
+`https://sunrise-org.github.io/sunrise-mods/v2/index.signed`: the four lines of its minisign signature, then the
+index's exact bytes, signed by the key in the registry's [`registry/index-key.pub`](https://github.com/sunrise-org/sunrise-mods/blob/main/registry/index-key.pub).
 Its source files and fields are specified in the registry's
 [`docs/registry-v2.md`](https://github.com/sunrise-org/sunrise-mods/blob/main/docs/registry-v2.md).
 

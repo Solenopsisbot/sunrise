@@ -5,9 +5,12 @@ use super::{
     Game,
     api_values::{TryIntoApi, block_state},
 };
-use std::{cell::RefCell, collections::HashSet, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::Arc};
 use sunrise_core::position::BlockPos;
-use sunrise_world::{native_load_context::LoopContext, registry::BlockStateId};
+use sunrise_world::{
+    block_collision::BlockCollisionRegistry, native_load_context::LoopContext,
+    part_collision::InParts, registry::BlockStateId,
+};
 
 thread_local! {
     /// The parts of the level being ticked, kept between ticks so their answers' storage and the
@@ -84,38 +87,46 @@ fn disable(state: BlockStateId, fault: &str) {
     }
 }
 
+/// Marks the states of `collision` whose parts answer `collision_shape`, and only them.
+fn mark_part_states(collision: &BlockCollisionRegistry<'_>) {
+    collision.set_part_states(
+        (0..collision.registry().len())
+            .map(|id| BlockStateId(id as u32))
+            .filter(|state| block_state::block_listens(mod_api::HookId::CollisionShape, *state)),
+    );
+}
+
+/// The parts that answer collision queries on this thread for a tick of the level `context`
+/// belongs to, until the guard drops: none when no installed part answers them, so the tick pays
+/// nothing. `collision_shape` is a Part method only (no `Hooks` method subscribes a mod to it),
+/// so the gate is the part table's, as its dispatch's is, not a mod's subscription.
+fn enter_parts(context: &Arc<LoopContext>) -> Option<InParts> {
+    mod_api::__private::has_scoped_hook(mod_api::HookId::CollisionShape).then(|| {
+        let parts = PARTS.with_borrow_mut(|slot| {
+            let parts = slot.get_or_insert_with(|| {
+                Rc::new(sunrise_client::collision_parts::ModParts::new(Arc::clone(
+                    context,
+                )))
+            });
+            parts.begin_tick(context);
+            Rc::clone(parts)
+        });
+        InParts::enter(parts)
+    })
+}
+
 impl Game<'_> {
     /// Marks the states whose parts answer `collision_shape` in the collision tables, so scans
     /// keep them in the cells around their own. Between ticks, after the parts are resolved.
     pub(in crate::game) fn mark_collision_shape_states(&self) {
-        let registry = self.collision.registry();
-        self.collision.set_part_states(
-            (0..registry.len())
-                .map(|id| BlockStateId(id as u32))
-                .filter(|state| {
-                    block_state::block_listens(mod_api::HookId::CollisionShape, *state)
-                }),
-        );
+        mark_part_states(self.collision);
         DISABLED.with_borrow_mut(HashSet::clear);
     }
 
     /// The parts that answer this tick's collision queries, until the guard drops: none when no
     /// mod has a part that answers them, so the tick pays nothing.
-    pub(in crate::game) fn collision_parts(
-        &self,
-    ) -> Option<sunrise_world::part_collision::InParts> {
-        mod_api::__private::listened(mod_api::HookId::CollisionShape).then(|| {
-            let parts = PARTS.with_borrow_mut(|slot| {
-                let parts = slot.get_or_insert_with(|| {
-                    Rc::new(sunrise_client::collision_parts::ModParts::new(
-                        self.loop_context.clone(),
-                    ))
-                });
-                parts.begin_tick(&self.loop_context);
-                Rc::clone(parts)
-            });
-            sunrise_world::part_collision::InParts::enter(parts)
-        })
+    pub(in crate::game) fn collision_parts(&self) -> Option<InParts> {
+        enter_parts(&self.loop_context)
     }
 }
 
@@ -227,6 +238,206 @@ mod tests {
             assert_eq!(DISABLED.with_borrow(HashSet::len), 2);
             // A state with no part is not asked and keeps its shape.
             assert_eq!(ask(3), None);
+        });
+    }
+
+    /// `minecraft:air` (state 0) and `minecraft:stone` (state 1, a full cube) as the registry and
+    /// the collision tables have them.
+    fn stone_tables() -> (
+        sunrise_world::registry::BlockRegistry,
+        sunrise_core::nbt::Tag,
+    ) {
+        use sunrise_core::{
+            geometry::{Axis, VoxelShape},
+            nbt::Tag,
+        };
+        let names = || {
+            ["minecraft:air", "minecraft:stone"]
+                .map(|name| Tag::String(name.into()))
+                .to_vec()
+        };
+        let registry = sunrise_world::registry::BlockRegistry::from_nbt(&Tag::compound([
+            ("DataVersion", Tag::Int(sunrise_world::DATA_VERSION)),
+            ("states", Tag::List(names())),
+            (
+                "defaults",
+                Tag::compound([
+                    ("minecraft:air", Tag::Int(0)),
+                    ("minecraft:stone", Tag::Int(1)),
+                ]),
+            ),
+        ]))
+        .unwrap();
+        let empty = VoxelShape::empty();
+        let (min, max) = empty.discrete_bounds();
+        let axes = empty.cube_coordinate_axes();
+        let bits = |axis| {
+            Tag::LongArray(
+                empty
+                    .coordinates(axis)
+                    .iter()
+                    .map(|n| n.to_bits() as i64)
+                    .collect(),
+            )
+        };
+        let air = Tag::compound([
+            ("canonical", Tag::Byte(0)),
+            ("cube", Tag::Byte(i8::from(empty.is_cube()))),
+            (
+                "cube_axes",
+                Tag::Byte((axes[0] as i8) | ((axes[1] as i8) << 1) | ((axes[2] as i8) << 2)),
+            ),
+            ("x", bits(Axis::X)),
+            ("y", bits(Axis::Y)),
+            ("z", bits(Axis::Z)),
+            ("occupied", Tag::ByteArray(vec![])),
+            ("discrete_min", Tag::IntArray(min.to_vec())),
+            ("discrete_max", Tag::IntArray(max.to_vec())),
+        ]);
+        let one = Tag::LongArray(vec![0, 1.0f64.to_bits() as i64]);
+        let cube = Tag::compound([
+            ("canonical", Tag::Byte(0)),
+            ("cube", Tag::Byte(1)),
+            ("cube_axes", Tag::Byte(7)),
+            ("x", one.clone()),
+            ("y", one.clone()),
+            ("z", one),
+            ("occupied", Tag::ByteArray(vec![1])),
+            ("discrete_min", Tag::IntArray(vec![0; 3])),
+            ("discrete_max", Tag::IntArray(vec![1; 3])),
+        ]);
+        let table = Tag::compound([
+            ("DataVersion", Tag::Int(sunrise_world::DATA_VERSION)),
+            ("states", Tag::List(names())),
+            ("shapes", Tag::List(vec![cube, air])),
+            ("cached_shapes", Tag::IntArray(vec![1, 0])),
+        ]);
+        (registry, table)
+    }
+
+    /// A mod as a real one is built: a `Hooks` impl that only registers, and a block part whose
+    /// one method is `collision_shape`, so no `Hooks` method subscribes the mod to the hook. The
+    /// game's own gate and marking decide whether a player's move asks the part: stone opens
+    /// for entity 7 only, as a per-player barrier does.
+    #[test]
+    fn a_registered_part_gives_a_moving_entity_its_shape() {
+        use sunrise_client::{chunk::Chunk, collisions::SceneCollisions, world::World};
+        use sunrise_core::geometry::{Aabb, Vec3};
+        use sunrise_world::{
+            collision_context::{CollisionContext, CollisionEntity, EntityContextKind},
+            entity_obstruction::EntityIdentity,
+        };
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+        struct Barrier;
+        #[mod_api::sunrise_part]
+        impl mod_api::BlockPart for Barrier {
+            fn collision_shape(
+                &self,
+                _: &dyn mod_api::LoopContext,
+                event: &mut mod_api::CollisionShapeEvent<'_>,
+            ) {
+                ASKED.fetch_add(1, Ordering::SeqCst);
+                if event.query.kind() == mod_api::CollisionEntityKind::Player
+                    && event.query.entity() == Some(7)
+                {
+                    *event.shape = Some(Vec::new());
+                }
+            }
+        }
+        #[derive(Default)]
+        struct Walker;
+        #[mod_api::sunrise_mod]
+        impl mod_api::Hooks for Walker {
+            fn register(
+                &self,
+                registrar: &mut dyn mod_api::Registrar,
+                _: &mod_api::RegistrationContext,
+            ) {
+                let stone = registrar.block_key("minecraft:stone");
+                registrar.block_part(stone, Barrier);
+            }
+        }
+        let mods: mod_api::Mods =
+            vec![mod_api::ModEntry::new("collision_walk", Box::new(Walker))].into();
+        crate::entry::install_client_hooks();
+        mod_platform::testing::with_mods(mods.clone(), || {
+            mod_platform::__private::part_tests::install_parts_fixture(&mods).unwrap();
+            let (registry, table) = stone_tables();
+            crate::game::api_values::resolve_block_definitions(&registry).unwrap();
+            mod_api::__private::resolve_parts(
+                &Default::default(),
+                &Default::default(),
+                mod_api::__private::KnownIds {
+                    block: &|_| true,
+                    item: &|_| false,
+                },
+            )
+            .unwrap();
+            let cached =
+                sunrise_world::collision::CachedCollisionRegistry::from_nbt(&table, &registry)
+                    .unwrap();
+            let binding = BlockCollisionRegistry::new(Arc::new(cached)).unwrap();
+            mark_part_states(&binding);
+            let inputs = Arc::new(LoadInputs::new(Default::default(), std::env::temp_dir()));
+            let context = Arc::new(
+                LoadContext::new(DataLoadOrigin::ServerDataLoad, inputs, [])
+                    .loop_context(LoopSide::Server, [] as [&str; 0]),
+            );
+            let mut world = World::new(BlockStateId(0), 0);
+            world.chunks.insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            world.set(1, 64, 1, BlockStateId(1)).unwrap();
+            // A player standing west of the stone walks a block east into it.
+            let walk = |id: u64| {
+                let body = Aabb::new(Vec3::new(0.3, 64.0, 1.2), Vec3::new(0.9, 65.8, 1.8));
+                let delta = Vec3::new(1.0, 0.0, 0.0);
+                let mut scene = SceneCollisions {
+                    world: &world,
+                    binding: &binding,
+                    subject: None,
+                };
+                let mut gate = sunrise_client::move_gate::armed(
+                    &context,
+                    id as u32,
+                    "minecraft:player",
+                    sunrise_world::entity_move::MoverType::Player,
+                    delta,
+                );
+                let player = CollisionContext::for_entity(
+                    CollisionEntity {
+                        identity: EntityIdentity(id),
+                        kind: EntityContextKind::Player,
+                        y: 64.0,
+                        descending: false,
+                        main_hand: Some(sunrise_world::collision_context::CollisionItem::EMPTY),
+                    },
+                    false,
+                );
+                sunrise_client::move_gate::scene_resolve_with_context(
+                    &mut gate, &mut scene, body, delta, 0.6, true, player,
+                )
+                .unwrap()
+                .x
+            };
+            DISABLED.with_borrow_mut(HashSet::clear);
+            ASKED.store(0, Ordering::SeqCst);
+            // The level tick's parts, as the client and the server enter them.
+            let parts = enter_parts(&context);
+            assert!(
+                parts.is_some(),
+                "a part that answers collision_shape opens the tick's parts"
+            );
+            // The body's east face is at x = 0.9 and the stone's west face at x = 1.0, so a
+            // stopped player moves 1.0 - 0.9 in f64, which is 0.09999999999999998, not 0.1.
+            const TO_THE_FACE: f64 = 0.09999999999999998;
+            assert_eq!(walk(7), 1.0, "the barrier is open for player 7");
+            assert_eq!(walk(8), TO_THE_FACE, "player 8 stops at the stone's face");
+            assert!(ASKED.load(Ordering::SeqCst) > 0);
+            // Outside the tick's parts the stone is its own cube for everyone, and the part is
+            // not asked.
+            drop(parts);
+            ASKED.store(0, Ordering::SeqCst);
+            assert_eq!(walk(7), TO_THE_FACE);
+            assert_eq!(ASKED.load(Ordering::SeqCst), 0);
         });
     }
 }

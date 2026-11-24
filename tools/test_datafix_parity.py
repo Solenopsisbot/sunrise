@@ -62,6 +62,8 @@ IGNORED = {
 SINGLE_COMPOUNDS = [
     ('named_wool', 'item_stack', 1343, '{id:"minecraft:wool",Damage:14s,Count:3b,tag:{display:{Name:"Quest reward"}}}'),
     ('numeric_wool', 'item_stack', 99, '{id:35s,Damage:14s,Count:3b}'),
+    ('numeric_wool_before_first_schema', 'item_stack', 98, '{id:35s,Damage:14s,Count:3b}'),
+    ('numeric_wool_unversioned', 'item_stack', -1, '{id:35s,Damage:14s,Count:3b}'),
     ('mod_item', 'item_stack', 1343, '{id:"example:token",Count:3b,tag:{quest:"welcome"}}'),
     ('legacy_granite', 'block_state', 1400, '{Name:"minecraft:stone",Properties:{variant:"granite"}}'),
     ('post_flattening_state', 'block_state', 1519, '{Name:"minecraft:stone",Properties:{variant:"granite"}}'),

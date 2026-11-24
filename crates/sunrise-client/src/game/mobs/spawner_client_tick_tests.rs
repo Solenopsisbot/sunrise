@@ -39,6 +39,10 @@ const PLAYER: [i32; 4] = [0x5355_4e52, 0x4953_4500, 0, 1];
 #[test]
 #[ignore = "daily"]
 fn client_ticks_match_the_vanilla_cases() {
+    run_client_ticks_match_the_vanilla_cases();
+}
+
+pub(in crate::game) fn run_client_ticks_match_the_vanilla_cases() {
     if run_in_child("client_ticks_match_the_vanilla_cases") {
         return;
     }

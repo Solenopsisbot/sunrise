@@ -156,6 +156,15 @@ its sky, its spawning and its beds follow that clock, and `/time` in the level s
 `level.clock_marker_time(host, &marker)` gives the next time the level's own clock reaches a time marker, as
 `/time set <marker>` moves it. Only the Overworld's clock defines markers today, so any other clock answers None.
 
+To give a dimension a clock of its own, register a `WorldClock` with `r.register_world_clock("dungeon")` in
+`register` and name it in the dimension's settings, `DimensionSettings { clock: Some("mymod:dungeon".into()), .. }`:
+the dimension type takes it as its `default_clock` in place of `day_cycle`'s, and every level of that type follows it.
+A registered clock is an entry of the world's `minecraft:world_clock` registry, sent to players, and runs from the
+world's first tick like the vanilla clocks. `level.clock(host)` gives the level's clock as a `WorldClockRef`
+(`None` for a level without one), whose writes are `ServerClockManager`'s: `set_total_ticks(host, ticks)` sets its
+time, `set_rate(host, rate)` the ticks it counts each game tick, and `set_paused(host, paused)` stops or restarts it,
+so a paused clock gives the level a fixed time.
+
 When enough players have slept, `sleep_finished_time` hands its listeners a `ClockAdjustment` for the level's own
 clock: `Absolute(time)`, `Relative(ticks)` from the time now, or `Marker(id)`. It starts as vanilla's
 `Marker(minecraft:wake_up_from_sleep)`, a later mod reads what an earlier one set, and the game resolves it once

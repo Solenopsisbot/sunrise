@@ -98,6 +98,8 @@ pub struct Menu {
     pub asks_still_valid: bool,
     /// The hand the opener supplied and its stack at open. Neither travels to the client.
     pub opening_item: Option<(Hand, Option<ItemStack>)>,
+    /// Last container snapshot reconciled with `menu_slot_changed` for this open mod menu.
+    pub slot_changed_seen: Option<Vec<Option<ItemStack>>>,
 }
 
 /// What a mod menu type's crafting grid makes (`ResultContainer`), and the
@@ -153,8 +155,36 @@ impl Menu {
         self.mod_type?.owned_slots.as_deref()
     }
 
+    /// Whether this menu is a blockless processing owned menu (declares both `owned_slots` and
+    /// take-only `results`), whose non-result inputs return to the player on close like vanilla
+    /// `AbstractContainerMenu.clearContainer` and whose results are discarded.
+    pub fn is_processing_owned(&self) -> bool {
+        self.slots == Slots::Native
+            && self
+                .mod_type
+                .is_some_and(|t| t.owned_slots.is_some() && !t.results.is_empty())
+    }
+
+    /// Extract all non-result stacks from a closing blockless processing owned menu, clearing its
+    /// transient storage and discarding declared `results` slots.
+    pub fn take_processing_inputs(
+        &self,
+        native_menu: &mut Vec<Option<ItemStack>>,
+    ) -> Vec<ItemStack> {
+        if !self.is_processing_owned() {
+            return Vec::new();
+        }
+        let results = self.mod_type.map_or(&[][..], |t| t.results.as_slice());
+        std::mem::take(native_menu)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(slot, stack)| (!results.contains(&slot)).then_some(stack).flatten())
+            .collect()
+    }
+
     /// Detached transient values and provenance, for the existing close notice. The old
-    /// native storage is emptied even for a menu that did not declare owned slots.
+    /// native storage is emptied even for a menu that did not declare owned slots; processing
+    /// owned menus leave `owned_slots` empty because the game returns their inputs itself.
     pub(super) fn native_closed(
         &self,
         uuid: u128,
@@ -164,7 +194,7 @@ impl Menu {
         if self.slots != Slots::Native {
             return None;
         }
-        let owned_slots = if self.owned_slots().is_some() {
+        let owned_slots = if self.owned_slots().is_some() && !self.is_processing_owned() {
             std::mem::take(native_menu)
         } else {
             native_menu.clear();
@@ -257,6 +287,13 @@ impl Menu {
 pub enum NativeMenuEvent {
     /// The cursor of a menu the hub closed itself, to be returned to its player.
     ReturnCarried { conn: u32, item: ItemStack },
+    /// Non-result inputs detached from a closing processing owned menu, to be returned to the
+    /// player's inventory (or dropped when `drop_instead` is set for death or disconnect).
+    ReturnProcessingInputs {
+        conn: u32,
+        items: Vec<ItemStack>,
+        drop_instead: bool,
+    },
     /// The menu closed: by the player, by the server, another opened, or
     /// the player left.
     Closed {
@@ -2258,6 +2295,7 @@ pub(crate) mod tests {
             links: Vec::new(),
             asks_still_valid: false,
             opening_item: None,
+            slot_changed_seen: None,
         });
         // Nothing made yet: nothing shown.
         assert_eq!(slots.get(&world, &g, 0), None);
@@ -2405,6 +2443,7 @@ pub(crate) mod tests {
             links: Vec::new(),
             asks_still_valid: false,
             opening_item: None,
+            slot_changed_seen: None,
         });
         // Nothing linked yet: the linked slots are empty and all left out.
         let read = slots.read(&world, &g).unwrap();
@@ -3513,6 +3552,7 @@ pub(crate) mod tests {
             links: Vec::new(),
             asks_still_valid: false,
             opening_item: None,
+            slot_changed_seen: None,
         });
         g.inventory[9] = Some(ItemStack::new("minecraft:stone", 1));
         let mut chest = vec![Some(ItemStack::new("minecraft:stone", 1))];
@@ -3636,6 +3676,7 @@ pub(crate) mod tests {
                 links: Vec::new(),
                 asks_still_valid: false,
                 opening_item: None,
+                slot_changed_seen: None,
             });
             g
         };
@@ -3930,6 +3971,7 @@ pub(crate) mod tests {
             craft: None,
             links: Vec::new(),
             asks_still_valid: false,
+            slot_changed_seen: None,
         });
         g.carried = Some(ItemStack::new("minecraft:stone", 8));
         let mut chest = vec![None];
@@ -4015,6 +4057,7 @@ pub(crate) mod tests {
                 craft: None,
                 links: Vec::new(),
                 asks_still_valid: false,
+                slot_changed_seen: None,
             });
             if button == 40 {
                 g.offhand = Some(ItemStack::new("minecraft:stone", 4));
@@ -4105,6 +4148,7 @@ pub(crate) mod tests {
                 craft: None,
                 links: Vec::new(),
                 asks_still_valid: false,
+                slot_changed_seen: None,
             });
             let mut prediction = crate::menu::Menu::new(crate::menu::Kind::Mod(menu_type));
             prediction.set_registry_id(Some(menu_type.id));
@@ -4240,5 +4284,95 @@ pub(crate) mod tests {
                 assert_eq!(view.get(slot).map(|s| s.count), count);
             }
         });
+    }
+
+    #[test]
+    fn processing_owned_menu_extracts_only_non_result_inputs_and_clears_close_snapshot() {
+        let processing: &'static crate::containers::ModMenuType =
+            Box::leak(Box::new(crate::containers::ModMenuType {
+                id: "test:processor",
+                owner: "test",
+                slots: 3,
+                player_inventory: true,
+                data_slots: 0,
+                owned_slots: Some(vec![64, 64, 64]),
+                results: vec![2],
+                inputs: vec![0, 1],
+                crafting: None,
+                links: None,
+            }));
+        let generic: &'static crate::containers::ModMenuType =
+            Box::leak(Box::new(crate::containers::ModMenuType {
+                id: "test:filter",
+                owner: "test",
+                slots: 2,
+                player_inventory: true,
+                data_slots: 0,
+                owned_slots: Some(vec![1, 1]),
+                results: Vec::new(),
+                inputs: Vec::new(),
+                crafting: None,
+                links: None,
+            }));
+        let make = |kind: &'static crate::containers::ModMenuType| Menu {
+            window: 1,
+            kind: 0,
+            pos: None,
+            slots: Slots::Native,
+            size: kind.slots,
+            state: 0,
+            sent: Vec::new(),
+            drag: None,
+            sent_data: Vec::new(),
+            reported_unsent_data_len: None,
+            blockless_data: Vec::new(),
+            mod_type: Some(kind),
+            registry_id: kind.id.into(),
+            craft: None,
+            links: Vec::new(),
+            asks_still_valid: false,
+            opening_item: None,
+            slot_changed_seen: None,
+        };
+
+        let proc_menu = make(processing);
+        assert!(proc_menu.is_processing_owned());
+        let mut storage = vec![
+            Some(ItemStack::new("minecraft:stick", 2)),
+            None,
+            Some(ItemStack::new("minecraft:stone", 1)),
+        ];
+        let inputs = proc_menu.take_processing_inputs(&mut storage);
+        assert_eq!(inputs, vec![ItemStack::new("minecraft:stick", 2)]);
+        assert!(storage.is_empty());
+        assert_eq!(
+            proc_menu.native_closed(7, 1, &mut storage),
+            Some(NativeMenuEvent::Closed {
+                uuid: 7,
+                window: 1,
+                generation: 1,
+                opening_hand: None,
+                owned_slots: Vec::new(),
+            })
+        );
+
+        let generic_menu = make(generic);
+        assert!(!generic_menu.is_processing_owned());
+        let mut generic_storage = vec![Some(ItemStack::new("minecraft:stick", 1)), None];
+        assert!(
+            generic_menu
+                .take_processing_inputs(&mut generic_storage)
+                .is_empty()
+        );
+        assert_eq!(
+            generic_menu.native_closed(7, 2, &mut generic_storage),
+            Some(NativeMenuEvent::Closed {
+                uuid: 7,
+                window: 1,
+                generation: 2,
+                opening_hand: None,
+                owned_slots: vec![Some(ItemStack::new("minecraft:stick", 1)), None],
+            })
+        );
     }
 }

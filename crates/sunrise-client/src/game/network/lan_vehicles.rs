@@ -188,7 +188,7 @@ impl Game<'_> {
             return Some((lo, hi, at(t.position)));
         }
         if let Some(f) = self.falling.iter().find(|f| f.id == id) {
-            let (lo, hi) = corners(sunrise_client::falling_block::bounds(f.position));
+            let (lo, hi) = corners(f.bounds());
             return Some((lo, hi, at(f.position)));
         }
         let row = self.general_row(id)?;

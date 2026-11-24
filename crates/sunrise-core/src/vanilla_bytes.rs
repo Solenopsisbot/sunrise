@@ -70,7 +70,11 @@ impl Writer {
         self.data.extend_from_slice(&v.to_be_bytes());
     }
     pub fn nbt(&mut self, tag: &Tag) {
-        match nbt::write_network(tag, nbt::Limits::default()) {
+        self.nbt_within(tag, nbt::Limits::default());
+    }
+    /// Write network NBT using the packet codec's limits.
+    pub fn nbt_within(&mut self, tag: &Tag, limits: nbt::Limits) {
+        match nbt::write_network(tag, limits) {
             Ok(bytes) => self.data.extend_from_slice(&bytes),
             // Unencodable tags (too deep) are sent as "no tag".
             Err(_) => self.data.push(0),

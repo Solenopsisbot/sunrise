@@ -814,6 +814,106 @@ fn a_killed_guest_with_no_combat_entry_reports_its_drops() {
     );
 }
 
+/// A loaded guest at `position` with `health` and a diamond to drop.
+fn standing_guest(game: &mut Game<'_>, position: [f64; 3], health: f32) -> u32 {
+    crate::game::native_player_death::tests::add_guest(game);
+    game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+        guest.loaded = true;
+        guest.load_timeout = 0;
+        guest.position = position;
+        guest.health = health;
+        guest.inventory[0] = Some(ItemStack::new("minecraft:diamond", 3));
+    });
+    game.lan.as_ref().unwrap().hub.guests[0].entity_id as u32
+}
+
+/// A skeleton (42) at x 2.5 and its arrow from x 4.5 flying east along z 4.5, through a
+/// guest standing at x 6.
+fn skeleton_shot_at_guest(game: &mut Game<'_>) -> u32 {
+    mob(game, 42, "minecraft:skeleton", Vec3::new(2.5, 80.0, 4.5));
+    let mut shot = Projectile::new(
+        ProjectileKind::Arrow {
+            base_damage: 2.0,
+            critical: false,
+            effect: None,
+        },
+        Vec3::new(4.5, 81.0, 4.5),
+        Some(Who::Mob(42)),
+    );
+    shot.left_owner = true;
+    shot.velocity = Vec3::new(4.0, 0.0, 0.0);
+    game.add_projectile(shot);
+    game.creatures.projectiles[0].id
+}
+
+/// An arrow kills a guest: `living_drops` hears the source `living_death` heard (#4843): an
+/// arrow's damage, the skeleton causing it, and the hit's position. (A projectile's id is
+/// not kept on a player's hit, so `direct` is whatever both hooks were given; the hook's
+/// notes say so.)
+#[test]
+#[ignore = "daily"]
+fn an_arrow_killed_guest_reports_the_arrow_to_living_drops() {
+    crate::game::in_own_process(
+        "game::native_hooks::death_source_tests::an_arrow_killed_guest_reports_the_arrow_to_living_drops",
+        || {
+            observed(false, false, |game, seen| {
+                let id = standing_guest(game, [6.0, 80.0, 4.5], 1.0);
+                skeleton_shot_at_guest(game);
+                game.tick_projectiles().unwrap();
+                assert!(game.lan.as_ref().unwrap().hub.guests[0].health <= 0.0);
+                game.guest_die(0, 1);
+                let seen = seen.lock().unwrap();
+                assert_eq!(seen.deaths.len(), 1, "one death");
+                let death = &seen.deaths[0];
+                assert_eq!(death.entity, id);
+                assert_eq!(death.damage_type, "minecraft:arrow");
+                assert_eq!(death.causing, 42, "the skeleton caused it");
+                assert!(death.position.is_some(), "the hit's position is set");
+                let mut heard = death.clone();
+                heard.weapon = None;
+                assert_eq!(seen.drops, vec![(heard, vec!["minecraft:diamond".into()])]);
+            })
+        },
+    );
+}
+
+/// `/kill` after an earlier hit still dies of `generic_kill`, with no causing or direct
+/// entity: the hit's record is not the fatal source.
+#[test]
+#[ignore = "daily"]
+fn a_guest_killed_after_a_hit_reports_generic_kill() {
+    crate::game::in_own_process(
+        "game::native_hooks::death_source_tests::a_guest_killed_after_a_hit_reports_generic_kill",
+        || {
+            observed(false, false, |game, seen| {
+                let id = standing_guest(game, [6.0, 80.0, 4.5], 20.0);
+                skeleton_shot_at_guest(game);
+                game.tick_projectiles().unwrap();
+                let health = game.lan.as_ref().unwrap().hub.guests[0].health;
+                assert!(
+                    health > 0.0 && health < 20.0,
+                    "the arrow hurt the guest: {health}"
+                );
+                assert_eq!(seen.lock().unwrap().deaths.len(), 0);
+                assert!(game.run_command("kill @a"));
+                game.guest_die(0, 1);
+                let kill = Hit {
+                    entity: id,
+                    kind: "minecraft:player".into(),
+                    damage_type: "minecraft:generic_kill".into(),
+                    causing: 0,
+                    direct: 0,
+                    position: None,
+                    weapon: None,
+                };
+                let seen = seen.lock().unwrap();
+                assert_eq!(seen.deaths, vec![kill.clone()]);
+                assert_eq!(seen.drops, vec![(kill, vec!["minecraft:diamond".into()])]);
+            })
+        },
+    );
+}
+
 /// Hook payloads and entity handles preserve mod namespaces and qualify bare vanilla ids.
 #[test]
 #[ignore = "daily"]

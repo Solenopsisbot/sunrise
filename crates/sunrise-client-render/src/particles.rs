@@ -1533,9 +1533,15 @@ impl ParticleEngine {
     pub fn vibration(&mut self, from: [f64; 3], to: [f64; 3], ticks: i32) {
         let mut q = Self::vibration_particle(from, to, ticks);
         q.set = self.set_of(ParticleType::Vibration);
-        self.pending.push(PendingParticle::Ordinary(q));
+        self.push(q);
     }
     /// `ParticleEngine.add` (via `particlesToAdd`, applied on the next tick).
+    ///
+    /// The engine's ordinary queue: every ordinary particle joins here (`add`, `add_with`,
+    /// `create`, block breaking, vibrations, firework sparks and their trails). A native mod takes a
+    /// particle here through `[[native.mixin]]`, as a Java mod does with a mixin on
+    /// `ParticleEngine.add`; a cancelled `HEAD` drops it.
+    #[sunrise_mod_api_macros::replaceable]
     pub fn push(&mut self, particle: Particle) {
         self.pending.push(PendingParticle::Ordinary(particle));
     }
@@ -1662,19 +1668,49 @@ impl ParticleEngine {
         override_limiter: bool,
         always_show: bool,
     ) -> bool {
-        let c = self.camera;
-        let d2 = (p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2);
-        if let Some(requested) = &mut self.requested {
-            requested.push((options.clone(), p, v));
-            REQUESTED.set(REQUESTED.get() + 1);
+        if self.capture(options, p, v) {
             return true;
         }
-        let minimal = self.calculate_particle_level(always_show) == 2;
-        if override_limiter || (d2 <= 1024.0 && !minimal) {
+        if self.admit_particle_at(p, override_limiter, always_show) {
             self.create_with_world(world, options, p, v)
         } else {
             true
         }
+    }
+
+    /// A capture (`requested`) takes the request in place of the particle it would create.
+    fn capture(&mut self, options: &ParticleOptions, p: [f64; 3], v: [f64; 3]) -> bool {
+        let Some(requested) = &mut self.requested else {
+            return false;
+        };
+        requested.push((options.clone(), p, v));
+        REQUESTED.set(REQUESTED.get() + 1);
+        true
+    }
+
+    /// An option its caller admitted already (`ClientLevel.doAddParticle` admits before it
+    /// invokes a provider): a capture takes it as `add`'s, else it is created.
+    pub fn add_admitted_with_world(
+        &mut self,
+        world: Option<&World>,
+        options: &ParticleOptions,
+        p: [f64; 3],
+        v: [f64; 3],
+    ) -> bool {
+        self.capture(options, p, v) || self.create_with_world(world, options, p, v)
+    }
+
+    /// `ClientLevel.doAddParticle`'s admission step, before invoking a provider.
+    pub fn admit_particle_at(
+        &mut self,
+        p: [f64; 3],
+        override_limiter: bool,
+        always_show: bool,
+    ) -> bool {
+        let c = self.camera;
+        let d2 = (p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2);
+        let minimal = self.calculate_particle_level(always_show) == 2;
+        override_limiter || (d2 <= 1024.0 && !minimal)
     }
     /// `NoxiousGasCloudParticle.spawnNoxiousGasParticle`: the gas, as an
     /// always visible particle (`ClientLevel.addAlwaysVisibleParticle`).
@@ -3614,7 +3650,7 @@ impl ParticleEngine {
         });
         let [r, g, b] = rgb(c);
         let p = self.spark(s.at, v, [r, g, b, 0.99], fade, e.trail, e.twinkle);
-        self.pending.push(PendingParticle::Ordinary(p));
+        self.push(p);
     }
     fn spark_ball(
         &mut self,

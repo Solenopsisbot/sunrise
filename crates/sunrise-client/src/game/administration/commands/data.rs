@@ -368,6 +368,7 @@ impl Game<'_> {
                 // the raw compound alone does not contain generated clouds.
                 let mut tag = self.other_to_nbt(
                     &super::OtherEntity {
+                        size_answer: None,
                         attachment_lifetime: Default::default(),
                         join: Default::default(),
                         id,
@@ -450,6 +451,7 @@ impl Game<'_> {
                 let fence = self.natural_knot(id)?;
                 let uuid = *self.persist.uuids.get(&id)?;
                 let knot = super::OtherEntity {
+                    size_answer: None,
                     attachment_lifetime: Default::default(),
                     // A serialization view, not a second resident entity.
                     join: sunrise_client::join_seq::JoinSeq::UNJOINED,
@@ -909,18 +911,27 @@ impl Game<'_> {
                     .iter()
                     .position(|p| p.id == id)
                     .ok_or_else(stale)?;
-                self.creatures.projectiles.update(index, |p| {
-                    if let Some(pos) = entity_nbt::position(&tag) {
-                        p.position = pos;
-                        p.previous = pos;
-                    }
-                    p.velocity = entity_nbt::motion(&tag);
-                    let [yaw, pitch] = entity_nbt::rotation(&tag);
-                    p.yaw = yaw;
-                    p.pitch = pitch;
-                    p.no_gravity = entity_nbt::flag(&tag, "NoGravity");
-                    p.ground.on_ground = entity_nbt::flag(&tag, "OnGround");
-                });
+                if let Some(spectral) = self.creatures.projectiles[index]
+                    .arrow
+                    .as_ref()
+                    .map(|a| a.spectral)
+                {
+                    self.load_resident_arrow(index, spectral, &tag)
+                        .ok_or_else(stale)?;
+                } else {
+                    self.creatures.projectiles.update(index, |p| {
+                        if let Some(pos) = entity_nbt::position(&tag) {
+                            p.position = pos;
+                            p.previous = pos;
+                        }
+                        p.velocity = entity_nbt::motion(&tag);
+                        let [yaw, pitch] = entity_nbt::rotation(&tag);
+                        p.yaw = yaw;
+                        p.pitch = pitch;
+                        p.no_gravity = entity_nbt::flag(&tag, "NoGravity");
+                        p.ground.on_ground = entity_nbt::flag(&tag, "OnGround");
+                    });
+                }
                 set_key(&mut tag, "UUID", Tag::IntArray(uuid.to_vec()));
             }
             _ => return Err(stale()),
@@ -959,6 +970,64 @@ impl Game<'_> {
             }
         }
         Ok(())
+    }
+    /// `Entity.load` with `AbstractArrow.readAdditionalSaveData` on the resident arrow or
+    /// spectral arrow at `index` of the projectile list: the loader's decoding
+    /// (`arrow_from_nbt`), over the entity it already is. Its type, id, join,
+    /// random, UUID and tick count stay; so does what no save holds (its pierced
+    /// entities, `inGroundTime`, fluid state). None when the data has no position.
+    fn load_resident_arrow(&mut self, index: usize, spectral: bool, tag: &Tag) -> Option<()> {
+        // `Entity.load` cannot change the type, and `/data`'s compound has no `id`.
+        let mut tag = tag.clone();
+        let kind = if spectral {
+            "minecraft:spectral_arrow"
+        } else {
+            "minecraft:arrow"
+        };
+        set_key(&mut tag, "id", Tag::String(kind.into()));
+        let (mut new, in_block) = entity_nbt::arrow_from_nbt(
+            &tag,
+            self.saved_player_uuid(),
+            crate::game::dispenser::tipped_effect,
+        )?;
+        // Projectile.readAdditionalSaveData: `setOwner(EntityReference.read(..))`.
+        self.claim_owner(&mut new);
+        let last_state = in_block.and_then(|t| self.state_from_nbt(&t));
+        let read = new.arrow.take()?;
+        self.creatures.projectiles.update(index, |p| {
+            p.kind = new.kind;
+            p.position = new.position;
+            // Entity.load: setOldPosAndRot.
+            p.previous = new.position;
+            p.velocity = new.velocity;
+            (p.yaw, p.pitch) = (new.yaw, new.pitch);
+            (p.previous_yaw, p.previous_pitch) = (new.yaw, new.pitch);
+            p.left_owner = new.left_owner;
+            (p.owner, p.guest, p.owner_vehicle) = (new.owner, new.guest, new.owner_vehicle);
+            p.owner_uuid = new.owner_uuid;
+            p.no_gravity = new.no_gravity;
+            p.ground.on_ground = new.ground.on_ground;
+            p.air_supply = new.air_supply;
+            p.stuck = new.stuck;
+            let Some(a) = p.arrow.as_mut() else {
+                return;
+            };
+            a.life = read.life;
+            a.last_state = last_state;
+            a.shake = read.shake;
+            a.in_ground = read.in_ground;
+            a.pickup = read.pickup;
+            a.pierce = read.pierce;
+            a.has_been_shot = read.has_been_shot;
+            a.can_break = read.can_break;
+            a.spectral_duration = read.spectral_duration;
+            a.pickup_item = read.pickup_item;
+            a.fired_from_weapon = read.fired_from_weapon;
+            a.crossbow_hit_sound = read.crossbow_hit_sound;
+            a.fire_ticks = read.fire_ticks;
+            a.fall_distance = read.fall_distance;
+        });
+        Some(())
     }
     /// The block entity part of `BlockInput.place`: load the block entity
     /// from the argument's tag (read; `load_block_entity_nbt` reads SNBT); true when its saved data changed.
@@ -2028,6 +2097,7 @@ mod tests {
             game.persist.raw.insert(12, Tag::Compound(raw));
             game.persist.uuids.insert(12, [1, 2, 3, 4]);
             game.others.push(super::super::OtherEntity {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 join: Default::default(),
                 item_transformation: None,
@@ -2517,6 +2587,9 @@ mod residency_tests;
 
 #[cfg(test)]
 mod hopper_cooldown_tests;
+
+#[cfg(test)]
+mod arrow_reload_tests;
 
 #[cfg(test)]
 mod arrow_owner_tests {

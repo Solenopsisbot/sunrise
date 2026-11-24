@@ -829,6 +829,7 @@ impl Game<'_> {
                     pitch: 1.0,
                     except: None,
                     entity: None,
+                    seed: None,
                 }) {
                     return None;
                 }

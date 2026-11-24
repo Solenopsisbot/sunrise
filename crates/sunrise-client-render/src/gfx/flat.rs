@@ -278,10 +278,21 @@ pub fn is_broken_intel_vulkan(info: &wgpu::AdapterInfo) -> bool {
 
 fn supported(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
     let flags = adapter.get_downlevel_capabilities().flags;
-    let limits = device.limits();
-    flags.contains(wgpu::DownlevelFlags::VERTEX_STORAGE | wgpu::DownlevelFlags::COMPUTE_SHADERS)
-        && limits.max_storage_buffers_per_shader_stage >= 3
-        && limits.max_storage_buffer_binding_size >= super::arena::PAGE_BYTES
+    pages_readable(adapter, device)
+        && flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+        && device.limits().max_storage_buffer_binding_size >= super::arena::PAGE_BYTES
+}
+
+/// Whether vertex shaders can read the section arena's pages as storage: a shader pack's
+/// terrain programs then read their quad's corners from them in per-section draws too
+/// (`pack_atlas::TerrainDraws::Pages`), by set 3's three storage buffers (`pack_post::block_ids`),
+/// which flat draws' set 1 (`draw_layout`) matches in count.
+pub fn pages_readable(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
+    adapter
+        .get_downlevel_capabilities()
+        .flags
+        .contains(wgpu::DownlevelFlags::VERTEX_STORAGE)
+        && device.limits().max_storage_buffers_per_shader_stage >= 3
 }
 
 fn storage(binding: u32, stage: wgpu::ShaderStages, read_only: bool) -> wgpu::BindGroupLayoutEntry {

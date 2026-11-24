@@ -7,6 +7,7 @@ use sunrise_core::geometry::Vec3;
 
 fn orb(at: Vec3) -> ExperienceOrb {
     ExperienceOrb {
+        size_answer: None,
         attachment_lifetime: Default::default(),
         fall_distance: 0.0,
         rotation: [0.0, 0.0],

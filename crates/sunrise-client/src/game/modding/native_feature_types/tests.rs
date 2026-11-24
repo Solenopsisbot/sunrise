@@ -4,11 +4,13 @@ use sunrise_core::random::LegacyRandom;
 use sunrise_world::registry::BlockStateId;
 use sunrise_world::worldgen::mod_features::ModFeatureRandom;
 
-/// A world of air with dirt at y 63 (and nothing readable below 0), recording every write.
+/// A world of air with dirt at y 63 (and nothing readable below 0), recording every write. Its
+/// biome is `biomes[0]` west of x 0 and `biomes[1]` from x 0 east.
 struct Ground {
     registry: Option<&'static BlockRegistry>,
     writes: Vec<([i32; 3], BlockStateId, i32)>,
     entities: Vec<([i32; 3], Compound)>,
+    biomes: [Option<BiomeKey>; 2],
 }
 impl ModFeatureTarget for Ground {
     fn registry(&self) -> Option<&'static BlockRegistry> {
@@ -27,6 +29,12 @@ impl ModFeatureTarget for Ground {
     }
     fn block_in_tag(&mut self, pos: [i32; 3], tag: &str) -> Option<bool> {
         Some(tag == "minecraft:dirt" && self.block(pos) == Some(BlockStateId(1)))
+    }
+    fn biome(&mut self, pos: [i32; 3]) -> Option<BiomeKey> {
+        if pos[1] < 0 {
+            return None;
+        }
+        self.biomes[usize::from(pos[0] >= 0)]
     }
     fn min_y(&mut self) -> Option<i32> {
         Some(-64)
@@ -100,6 +108,7 @@ fn the_books_pillar_places_through_the_adapter_on_a_worker() {
                 registry: Some(registry),
                 writes: Vec::new(),
                 entities: Vec::new(),
+                biomes: [None; 2],
             };
             let result = adapter.place(
                 &mut ground,
@@ -159,6 +168,7 @@ fn block_entity_data_must_fit_its_block_and_a_registry_is_required() {
             registry: Some(registry),
             writes: Vec::new(),
             entities: Vec::new(),
+            biomes: [None; 2],
         };
         // An oak log has no block entity: chest data for it is refused.
         let placed = adapter.place(
@@ -173,6 +183,7 @@ fn block_entity_data_must_fit_its_block_and_a_registry_is_required() {
             registry: None,
             writes: Vec::new(),
             entities: Vec::new(),
+            biomes: [None; 2],
         };
         let placed = adapter.place(
             &mut bare,
@@ -184,6 +195,82 @@ fn block_entity_data_must_fit_its_block_and_a_registry_is_required() {
             placed,
             Err("this world has no block registry for mod features".into())
         );
+    })
+    .join()
+    .unwrap();
+}
+
+/// A feature that copies the ground's dirt to its origin in plains and puts an oak log there in a
+/// desert, reading the biome through its context; anywhere else it places nothing.
+struct ByBiome {
+    plains: BiomeKey,
+    desert: BiomeKey,
+    dirt: BlockKey,
+    log: BlockKey,
+}
+impl FeatureType for ByBiome {
+    fn place(
+        &self,
+        context: &mut dyn FeatureContext,
+        origin: [i32; 3],
+    ) -> Result<bool, mod_api::FeatureError> {
+        let block = match context.biome(origin) {
+            Some(biome) if biome == self.plains => self.dirt,
+            Some(biome) if biome == self.desert => self.log,
+            _ => return Ok(false),
+        };
+        let state = context.state(block);
+        Ok(context.set_block(origin, state, BlockUpdateFlags::CLIENTS))
+    }
+}
+
+/// `FeatureContext::biome` answers the key of the biome the level holds at a position, so a
+/// feature in a two-biome world gives each biome its own block, and `None` where the level can't
+/// be read, where it places nothing.
+#[test]
+fn a_feature_places_by_the_biome_it_reads() {
+    let registry = registry();
+    let keys = mod_api::__private::BiomeKeys::new(7, ["minecraft:desert", "minecraft:plains"]);
+    let [plains, desert] = ["minecraft:plains", "minecraft:desert"].map(|id| keys.key(id).unwrap());
+    let index = &WorkerResources::get(registry).unwrap().index;
+    let [dirt, log] = [1, 2].map(|state| index.to_api(BlockStateId(state)).unwrap().block());
+    let adapter = Adapter::new(
+        vec![],
+        Arc::new(ByBiome {
+            plains,
+            desert,
+            dirt,
+            log,
+        }),
+    );
+    std::thread::spawn(move || {
+        let config = adapter.prepare_config(&serde_json::json!({})).unwrap();
+        let place = |origin: [i32; 3]| {
+            let mut ground = Ground {
+                registry: Some(registry),
+                writes: Vec::new(),
+                entities: Vec::new(),
+                biomes: [Some(plains), Some(desert)],
+            };
+            let result = adapter.place(
+                &mut ground,
+                &mut Random(LegacyRandom::new(0)),
+                origin,
+                &*config,
+            );
+            (result, ground.writes)
+        };
+        // Plains: dirt (state 1); desert: an oak log, axis y (state 2); flags CLIENTS (2).
+        assert_eq!(
+            place([-5, 64, 0]),
+            (Ok(true), vec![([-5, 64, 0], BlockStateId(1), 2)])
+        );
+        assert_eq!(
+            place([5, 64, 0]),
+            (Ok(true), vec![([5, 64, 0], BlockStateId(2), 2)])
+        );
+        // The level can't be read there: no biome, nothing placed.
+        assert_eq!(place([5, -3, 0]), (Ok(false), vec![]));
     })
     .join()
     .unwrap();

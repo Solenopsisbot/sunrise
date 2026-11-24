@@ -60,6 +60,9 @@ pub struct ThrownTrident {
     pub owner: u32,
     /// The guest that threw it (`Projectile.getOwner`); `None` for the host.
     pub guest: Option<u32>,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub size_answer: Option<sunrise_client::pose::SizeAnswer>,
 }
 impl ThrownTrident {
     /// A trident loaded from its NBT (`AbstractArrow.readAdditionalSaveData`).
@@ -157,6 +160,7 @@ impl ThrownTrident {
     /// A trident a server sent (`handleAddEntity`): placed and moved by it.
     pub fn remote(id: u32, position: Vec3, yaw: f32, pitch: f32) -> Self {
         Self {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             join: Default::default(),
             id,

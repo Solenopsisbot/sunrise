@@ -298,6 +298,10 @@ pub(super) fn submitted_bodies<T>(
 #[test]
 #[ignore = "daily"]
 fn entity_draw_order_after_client_packets() {
+    run_entity_draw_order_after_client_packets();
+}
+
+pub(in crate::game) fn run_entity_draw_order_after_client_packets() {
     use sunrise_client::camera::CameraType;
     use sunrise_protocol::{
         entity_data::{

@@ -137,6 +137,10 @@ fn client_camera_entity_returns_to_player_after_removal() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn a_named_mob_the_server_camera_is_attached_to_shows_no_name_tag() {
+    run_a_named_mob_the_server_camera_is_attached_to_shows_no_name_tag();
+}
+
+pub(in crate::game) fn run_a_named_mob_the_server_camera_is_attached_to_shows_no_name_tag() {
     let path = std::env::var("SUNRISE_NAME_TAG_CAMERA_WITNESS")
         .expect("run through tools/test_camera_parity.py, which records the witness");
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|err| {

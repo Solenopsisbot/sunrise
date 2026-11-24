@@ -2212,6 +2212,20 @@ mod tests {
             0x80
         );
     }
+    /// A NaN read from the network goes back out with its bits (#308 item 4).
+    /// Expected bytes from vanilla 26.3.
+    #[test]
+    fn a_network_nan_round_trips_with_its_bits() {
+        for bytes in [
+            // FriendlyByteBuf.readNbt then writeNbt on FloatTag NaN 0x7f800001
+            &[5, 0x7f, 0x80, 0, 1][..],
+            // FriendlyByteBuf.readNbt then writeNbt on DoubleTag NaN 0xfff0000000000001
+            &[6, 0xff, 0xf0, 0, 0, 0, 0, 0, 1],
+        ] {
+            let tag = read_network(bytes, Limits::default()).unwrap().0;
+            assert_eq!(write_network(&tag, Limits::default()).unwrap(), bytes);
+        }
+    }
     #[test]
     fn snbt_parses_typed_values() {
         let text = "{a:1b,b:[I;1,2],c:'x y',d:[{e:2.5f}],f:true,g:id}";

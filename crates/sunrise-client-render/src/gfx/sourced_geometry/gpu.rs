@@ -630,6 +630,12 @@ impl Sourced {
             return false;
         };
         if !tiles.values().any(|tile| tile.mesh.solid > 0) {
+            // No table while no mesh with solid quads is resident, but GPU culling is
+            // on and the frame walk reads `listed`: every tile is the CPU's, and keeps
+            // its place for the table the first solid tile makes.
+            for (&key, tile) in tiles.iter_mut() {
+                self.listed.insert(key, tile.bounds());
+            }
             return false;
         }
         match SourcedGpu::new(gpu, device, lod::instance([0.0; 3], 0)[3]) {
@@ -655,14 +661,19 @@ impl Sourced {
 
     /// Debug builds: the records are the tiles' as they are now (compaction's moves included),
     /// the pass draws only tiles whole at `now`, a flagged tile time makes whole is waited for,
-    /// and `listed` holds exactly the tiles a GPU frame lists. A record left behind would
+    /// and `listed` holds exactly the tiles a GPU frame lists. With GPU culling off (`gpu_on`
+    /// false) nothing is listed; on, the tiles it leaves the CPU keep their places even while
+    /// no solid mesh has made the table yet. A record left behind would
     /// draw quads gone or another mesh's; a tile drawn while it fades would pop in; one missing
     /// from `listed` would leave its water, or all of it, undrawn.
     #[cfg(debug_assertions)]
-    pub(crate) fn check(&self, tiles: &FxHashMap<TileKey, Tile>, now: Instant) {
+    pub(crate) fn check(&self, tiles: &FxHashMap<TileKey, Tile>, now: Instant, gpu_on: bool) {
         let Some(table) = &self.table else {
             assert!(self.tracked.is_empty(), "records of a dropped table");
-            assert!(self.listed_is_empty(), "listed of a dropped table");
+            assert!(
+                gpu_on || self.listed_is_empty(),
+                "listed of GPU culling off"
+            );
             return;
         };
         let (records, waits) = table.checked();

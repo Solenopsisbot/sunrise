@@ -30,7 +30,7 @@ pub(in crate::game) mod terrain_cmds;
 mod test_locate;
 mod test_runs;
 mod text_commands;
-mod world_cmds;
+pub(in crate::game) mod world_cmds;
 
 use super::{Dim, Game, Screen, chat::PLAYER_NAME, vehicle_teleport::TeleportMotion};
 use sunrise_client::{
@@ -152,6 +152,9 @@ pub(in crate::game) struct OtherEntity {
     pub knot_check: Option<u8>,
     /// A summoned or loaded `minecraft:eye_of_ender`'s flight; None for every other kind.
     pub eye: Option<super::end::SummonedEye>,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub(in crate::game) size_answer: Option<sunrise_client::pose::SizeAnswer>,
 }
 
 sunrise_client::impl_joined!(OtherEntity);
@@ -4571,11 +4574,11 @@ mod teleport_mob_tests;
 
 #[cfg(test)]
 #[path = "teleport_item_tests.rs"]
-mod teleport_item_tests;
+pub(in crate::game) mod teleport_item_tests;
 
 #[cfg(test)]
 #[path = "teleport_level_tests.rs"]
-mod teleport_level_tests;
+pub(in crate::game) mod teleport_level_tests;
 
 #[cfg(test)]
 #[path = "teleport_player_rider_tests.rs"]

@@ -302,6 +302,40 @@ vanilla's corner arguments: `top` stays on the `y0` edge and `bottom` on the `y1
   Zero-area calls are culled here; vanilla can retain their layering bounds without drawing pixels.
 - **Cost.** One quad on the GUI batch, as `fill`; nothing is drawn or kept when a mod doesn't call it.
 
+## Player faces
+
+The `gui_paint` op `GuiDraw::PlayerFace { uuid, x, y, size, hat, flip, color }` draws a player's skin head as
+vanilla's `PlayerFaceExtractor` does, the head the player list, a team screen or a waystone's owner line shows:
+the face, then the hat layer when `hat`, each `size` GUI pixels square at `x, y`, tinted by the ARGB `color`
+(`0xFFFF_FFFF` for none).
+
+```rust,ignore
+use mod_api::client::hud_layout::GuiDraw;
+
+fn draw_member(draw: &mut dyn DrawContext, member: u128, x: i32, y: i32) -> Result<(), GuiPaintError> {
+    draw.gui_paint(&[GuiDraw::PlayerFace {
+        uuid: member,
+        x,
+        y,
+        size: 8,
+        hat: true,
+        flip: false,
+        color: 0xFFFF_FFFF,
+    }])
+}
+```
+
+- **Which skin.** A player with an entry on the connection's player list (`PlayerInfo`) draws the skin the
+  player list draws. Any other UUID, an offline team member say, draws its profile's skin, looked up by id the
+  way a player head's profile is: the lookup starts in the background the first time and is kept as heads keep
+  theirs. Until the skin is downloaded and in the atlas, and when the profile has none, the face is the UUID's
+  default skin (`DefaultPlayerSkin.get`). The op never waits, so draw it every frame and the real skin appears
+  when it is ready.
+- **Upside down.** `flip` draws the face upside down. The op never guesses it from a name: vanilla's player
+  list flips Dinnerbone and Grumm only while their player is in the level, so set it yourself if you want that.
+- **Pose and clip.** The face follows the buffer's pose (`Push`) and the hook call's clip (`push_clip`), as
+  `Blit` does; the hat layer is drawn under the same pose, clip and tint as the face.
+
 ## Scaled text
 
 `DrawContext::text_scaled(text, at, scale, argb, shadow)` draws `text` as `text` does, scaled by `scale` about

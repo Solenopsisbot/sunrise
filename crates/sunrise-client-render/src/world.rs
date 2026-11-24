@@ -475,13 +475,44 @@ impl World {
     pub fn below_world_y(&self) -> f64 {
         f64::from(self.shape.min_y - 64)
     }
+    #[inline]
+    pub fn chunk_at(&self, cx: i32, cz: i32) -> Option<&Chunk> {
+        self.chunks.get(&(cx, cz)).map(Arc::as_ref)
+    }
+
     /// The biome table index of the noise cell at a block (`ChunkAccess.getNoiseBiome`): a
     /// cell above or below the level reads its top or bottom cells, not the cells the chunks'
     /// widened column holds there (vanilla's Nether and End save none, and read back they
     /// hold the table's first biome). `None` where the chunk isn't loaded.
     pub fn noise_biome(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+        self.noise_biome_with_chunk(x, y, z, self.chunk_at(x >> 4, z >> 4))
+    }
+
+    /// Reads the noise biome with the caller's lookup result for this column.
+    #[inline]
+    pub fn noise_biome_with_chunk(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        chunk: Option<&Chunk>,
+    ) -> Option<u16> {
         let y = y.clamp(self.shape.min_y, self.shape.max_y() - 1);
-        Some(self.chunks.get(&(x >> 4, z >> 4))?.biome(x, y, z))
+        Some(chunk?.biome(x, y, z))
+    }
+    /// `LevelReader.getBiome` (`BiomeManager.getBiome`): the biome table index of the noise cell
+    /// `zoom` picks for the block, one of the eight quarts around it and perhaps in a
+    /// neighbouring chunk, read as [`noise_biome`](Self::noise_biome) reads it. `None` where that
+    /// cell's chunk isn't loaded.
+    pub fn biome_at(
+        &self,
+        zoom: sunrise_core::biome::BiomeZoom,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<u16> {
+        let [qx, qy, qz] = zoom.quart_at_block(sunrise_core::position::BlockPos::new(x, y, z));
+        self.noise_biome(qx << 2, qy << 2, qz << 2)
     }
     /// One above the highest block Y the level's chunks hold.
     pub fn top_y(&self) -> i32 {
@@ -735,8 +766,19 @@ impl World {
     /// block that isn't `air`, or the column's minimum Y (also where the chunk
     /// isn't loaded).
     pub fn world_surface(&self, x: i32, z: i32, air: impl Fn(BlockStateId) -> bool) -> i32 {
-        let bottom = self.layout().min_y();
-        self.chunks.get(&(x >> 4, z >> 4)).map_or(bottom, |chunk| {
+        self.world_surface_with_chunk(x, z, self.chunk_at(x >> 4, z >> 4), air)
+    }
+
+    /// Reads WORLD_SURFACE with the caller's lookup result for this column.
+    #[inline]
+    pub fn world_surface_with_chunk(
+        &self,
+        x: i32,
+        z: i32,
+        chunk: Option<&Chunk>,
+        air: impl Fn(BlockStateId) -> bool,
+    ) -> i32 {
+        chunk.map_or(self.bottom_y(), |chunk| {
             chunk.world_surface(x, z, |v| air(BlockStateId(v)))
         })
     }
@@ -751,9 +793,13 @@ impl World {
     }
     #[inline]
     pub fn block(&self, x: i32, y: i32, z: i32) -> BlockStateId {
-        self.chunks
-            .get(&(x >> 4, z >> 4))
-            .map_or(self.air, |chunk| chunk.block(x & 15, y, z & 15))
+        self.block_with_chunk(x, y, z, self.chunk_at(x >> 4, z >> 4))
+    }
+
+    /// Reads a block with the caller's lookup result for this column.
+    #[inline]
+    pub fn block_with_chunk(&self, x: i32, y: i32, z: i32, chunk: Option<&Chunk>) -> BlockStateId {
+        chunk.map_or(self.air, |chunk| chunk.block(x & 15, y, z & 15))
     }
     /// Whether a block of the box `lo..=hi` may match, from the palettes of
     /// the sections it reaches (a palette of the whole registry may hold
@@ -807,7 +853,13 @@ impl World {
     /// no sky layer (`LevelLightEngine.getRawBrightness`). Never loads a chunk.
     #[inline]
     pub fn light(&self, x: i32, y: i32, z: i32) -> u8 {
-        match self.chunks.get(&(x >> 4, z >> 4)).and_then(|chunk| {
+        self.light_with_chunk(x, y, z, self.chunk_at(x >> 4, z >> 4))
+    }
+
+    /// Reads published light with the caller's lookup result for this column.
+    #[inline]
+    pub fn light_with_chunk(&self, x: i32, y: i32, z: i32, chunk: Option<&Chunk>) -> u8 {
+        match chunk.and_then(|chunk| {
             let s = chunk.section_index(y)?;
             Some(chunk.sections[s].light(crate::chunk::index(x, y, z)))
         }) {
@@ -816,14 +868,14 @@ impl World {
         }
     }
     /// The light of a position no section holds: past a loaded column's sections, or in a column that
-    /// is not loaded ([`Self::border_light`]), without sky in a level without it. It takes the same
-    /// arguments as [`Self::light`] and looks the column up again, so the hot read keeps nothing live
-    /// for it; a read inside a column of a level without skylight is already without it (its
-    /// sections' sky is 0).
+    /// is not loaded ([`Self::border_light`]), without sky in a level without it. A read inside a
+    /// section of a level without skylight already has sky set to 0. It looks the column up again,
+    /// among the columns the client chunk cache hides too (light belongs to the level, not to the
+    /// cache's current view), so the hot read keeps nothing live for it.
     #[cold]
     #[inline(never)]
     fn light_outside(&self, x: i32, y: i32, z: i32) -> u8 {
-        let light = match self.chunks.get(&(x >> 4, z >> 4)) {
+        let light = match self.chunks.resident_get(&(x >> 4, z >> 4)) {
             Some(chunk) => chunk.light(x & 15, y, z & 15),
             None => self.border_light((x >> 4, z >> 4), x, y, z),
         };
@@ -1207,6 +1259,31 @@ mod tests {
             assert_eq!(world.noise_biome(9, y, 9), Some(biome), "y {y}");
         }
         assert_eq!(world.noise_biome(16, 0, 0), None);
+    }
+
+    /// `BiomeManager.getBiome` reads the noise cell the zoom picks, not the block's own: at world
+    /// seed 12345, block (16, 64, 8) lies in chunk 1 0's quart 4 16 2, but the zoom picks quart
+    /// 3 15 1, which chunk 0 0 holds; block (17, 64, 8) keeps to chunk 1 0 (quart 4 15 1).
+    #[test]
+    fn biome_at_reads_the_quart_the_zoom_picks() {
+        use sunrise_core::biome::{BiomeZoom, obfuscate_seed};
+        let mut world = World::new(BlockStateId(0), 12345);
+        for (cx, biome) in [(0, 1), (1, 2)] {
+            let mut chunk = Chunk::empty(cx, 0);
+            for qy in 0..SECTIONS as i32 * 4 {
+                for qz in 0..4 {
+                    for qx in 0..4 {
+                        chunk.set_biome_cell(qx, qy, qz, biome);
+                    }
+                }
+            }
+            world.chunks.insert((cx, 0), Arc::new(chunk));
+        }
+        let zoom = BiomeZoom::new(obfuscate_seed(12345));
+        assert_eq!(world.noise_biome(16, 64, 8), Some(2));
+        assert_eq!(world.biome_at(zoom, 16, 64, 8), Some(1));
+        assert_eq!(world.biome_at(zoom, 17, 64, 8), Some(2));
+        assert_eq!(world.biome_at(zoom, 40, 64, 8), None);
     }
 
     /// A box misses a state only where no section it reaches lists it, and

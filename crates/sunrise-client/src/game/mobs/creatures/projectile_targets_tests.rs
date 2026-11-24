@@ -721,29 +721,49 @@ fn run_family(filter: impl Fn(&str) -> bool) {
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_armor_stand_targets() {
+    run_witness_armor_stand_targets();
+}
+
+pub(in crate::game) fn run_witness_armor_stand_targets() {
     run_family(|t| t.starts_with("armor_stand"));
 }
 
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_painting_and_cushion_targets() {
+    run_witness_painting_and_cushion_targets();
+}
+
+pub(in crate::game) fn run_witness_painting_and_cushion_targets() {
     run_family(|t| t == "painting" || t == "cushion");
 }
 
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_item_frame_targets() {
+    run_witness_item_frame_targets();
+}
+
+pub(in crate::game) fn run_witness_item_frame_targets() {
     run_family(|t| t.starts_with("item_frame") || t.starts_with("glow_item_frame"));
 }
 
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_leash_knot_targets() {
+    run_witness_leash_knot_targets();
+}
+
+pub(in crate::game) fn run_witness_leash_knot_targets() {
     run_family(|t| t.starts_with("leash_knot"));
 }
 
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_falling_block_targets() {
+    run_witness_falling_block_targets();
+}
+
+pub(in crate::game) fn run_witness_falling_block_targets() {
     run_family(|t| t == "falling_block");
 }

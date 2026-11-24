@@ -399,7 +399,6 @@ impl Game<'_> {
         });
         for a in self.armor_stands.iter().filter(|a| a.id > after) {
             let p = a.position;
-            let attributes = self.stand_attributes(&a.live);
             let e = add_state(
                 out,
                 a.id,
@@ -470,7 +469,7 @@ impl Game<'_> {
                     e.equipment.push((slot as u8, host.hub.stack(item)));
                 }
             }
-            e.attributes = attributes;
+            self.stand_attributes(&a.live, &mut e.attributes);
         }
         for f in self.item_frames.iter().filter(|f| f.id > after) {
             // ItemFrame.getAddEntityPacket: the block it hangs in and its direction.

@@ -1,6 +1,6 @@
 # Is this the right tool for a block
 
-Two read-only queries answer whether a tool harvests a block on both sides. Use them to show that the block under the crosshair drops loot with the held item.
+Queries answer whether a tool harvests a block, and how fast a tick removes a supplied state. Use them to show that the block under the crosshair drops loot with the held item, or to preview a dig.
 
 ## The stack alone
 
@@ -40,3 +40,17 @@ fn harvestable_under_crosshair(host: &mut dyn Host, player: PlayerRef, pos: [i32
     player.has_correct_tool_for_drops(host, level, pos, state).unwrap_or(false)
 }
 ```
+
+## How much of a tick removes
+
+`player.destroy_progress(host, level, pos, state)` is vanilla's
+`BlockBehaviour.getDestroyProgress(state, player, level, pos)` for a supplied state. It uses the same path as
+the game's own dig: the player's selected hotbar slot, the state's hardness and tool rules, efficiency,
+effects, block-break speed, submerged mining and the on-ground penalty, then the `can_harvest_block`,
+`player_harvest_check` and `player_break_speed` listeners. It returns the share one tick removes (`0.0` for
+an unbreakable state), so a value of `1.0` or more breaks the block at once. Nothing requires `pos` to hold
+`state`. On a server it answers for a connected or fake player; on a client, for its local player.
+
+It runs those three hooks, so it answers `None` from inside any of them, even for a different state. It also
+answers `None` for a stale handle, an unknown state, a dead server player and a level other than the one in
+place.

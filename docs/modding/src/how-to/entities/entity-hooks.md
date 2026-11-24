@@ -234,9 +234,12 @@ refreshes an entity's size. A client asks for its copy of a server entity when t
 copy is added, when the server sends a new pose (even one with the same size), and
 when `minecraft:scale` or another synched value from the server changes its vanilla
 size; the copy's box, picking and hitbox outline then use the answer.
-The server asks for its own entity separately, so answer from the event (the
-entity's type, the pose and the sizes) the same way on both sides, or the client's
-box and the server's disagree.
+The server asks for its own entity separately: a mob before and after its tick,
+and every other entity (items, minecarts, boats, projectiles, armor stands, displays,
+interactions and the rest) at the same points, the first time once it exists. Its
+collisions, block contacts and picking then use the answer. Answer from the event
+(the entity's type, the pose and the sizes) the same way on both sides, or the
+client's box and the server's disagree.
 
 ## Player size and pose fit
 

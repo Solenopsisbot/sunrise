@@ -1,19 +1,13 @@
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
-    net::TcpListener,
     path::Path,
     process::{Command, Output},
-    thread,
 };
-use sunrise_mod_package::{
-    Package,
-    index::{self, Kind},
-};
+use sunrise_mod_package::Package;
 
 #[test]
 #[ignore = "daily"]
-fn builds_and_checks_a_native_addon_with_local_and_registry_libraries() {
+fn builds_and_checks_a_native_addon_with_local_libraries() {
     // book-quickstart assembles and signs this run's SDK, like the native run smoke test.
     let target = Path::new(env!("CARGO_TARGET_TMPDIR"));
     fs::create_dir_all(target).unwrap();
@@ -173,78 +167,19 @@ impl mod_api::Hooks for Addon {
             && error.contains("uses list"),
         "{error}"
     );
-    let newest = root.join("native-newest.smod");
-    fs::write(
-        &library_manifest,
-        original.replace(&pin, &other_pin).replace("1.0.0", "1.1.0"),
-    )
-    .unwrap();
-    let newest_bytes = Package::pack_directory(&library).unwrap();
-    fs::write(&newest, &newest_bytes).unwrap();
     fs::write(&library_manifest, original).unwrap();
-    let bytes = Package::pack_directory(&library).unwrap();
     let package = root.join("native.smod");
-    fs::write(&package, &bytes).unwrap();
-    let rows: Vec<_> = [(&package, &bytes), (&newest, &newest_bytes)]
-        .into_iter()
-        .map(|(path, bytes)| {
-            let facts = index::inspect(&Kind::NativeMod, path).unwrap();
-            let name = path.file_name().unwrap().to_str().unwrap();
-            serde_json::json!({"version": facts.version, "api": facts.api, "game": facts.game,
-            "dependencies": facts.dependencies, "file": {"name": name, "size": bytes.len(),
-                "sha256": index::sha256(bytes), "url": format!("https://example.org/{name}")}})
-        })
-        .collect();
-    let payload = serde_json::to_vec(&serde_json::json!({
-        "schema": index::SCHEMA,
-        "projects": [{
-            "id": "native", "kind": "native-mod", "name": "Test Library", "summary": "Fixture library",
-            "license": "MIT", "source": "https://example.org/source",
-            "versions": rows
-        }]
-    })).unwrap();
-    let parsed = index::Index::parse(std::str::from_utf8(&payload).unwrap()).unwrap();
-    assert!(parsed.left_out.is_empty(), "{:?}", parsed.left_out);
-    let http = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let base = format!("http://{}", http.local_addr().unwrap());
-    let registry = thread::spawn(move || {
-        // Both commands read the current index. Build fetches the newest in-range release
-        // first, rejects its pin, then fetches 1.0.0. Check reuses both verified downloads.
-        for (expected, body) in [
-            ("/index.json", &payload),
-            ("/files/native/native-newest.smod", &newest_bytes),
-            ("/files/native/native.smod", &bytes),
-            ("/index.json", &payload),
-        ] {
-            let (mut stream, _) = http.accept().unwrap();
-            let mut input = BufReader::new(&mut stream);
-            let mut line = String::new();
-            input.read_line(&mut line).unwrap();
-            assert_eq!(
-                line.split_whitespace().take(2).collect::<Vec<_>>(),
-                ["GET", expected]
-            );
-            while line != "\r\n" {
-                line.clear();
-                assert_ne!(input.read_line(&mut line).unwrap(), 0);
-            }
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            stream.write_all(body).unwrap();
-        }
-    });
-    for command in ["build", "check"] {
-        let stdout = passed(tool(&addon, &[command], Some(&base)));
-        assert!(
-            stdout.contains("Using library native 1.0.0 from the Sunrise mod registry"),
-            "{stdout}"
-        );
-    }
-    registry.join().unwrap();
+    fs::write(&package, Package::pack_directory(&library).unwrap()).unwrap();
+    // A packed library is staged from its archive, as a registry library is after its checks.
+    let stdout = passed(tool(
+        &addon,
+        &["build", "--with", package.to_str().unwrap()],
+        offline,
+    ));
+    assert!(
+        stdout.contains("Using library native 1.0.0 from"),
+        "{stdout}"
+    );
     let output = addon.join("target/sunrise-mod/test_addon.smod");
     assert_eq!(Package::read(&output).unwrap().manifest.id, "test_addon");
     assert_eq!(

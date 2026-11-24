@@ -20,7 +20,7 @@ NoxiousGasParticle.Provider.createParticle	port	crates/sunrise-client-render/src
 Particle.<init>	port	crates/sunrise-client-render/src/particles.rs::Particle::base_at	4-arg constructor (box and lifetime draw); the 7-arg one is Particle::base_moving
 Particle.toString	skip:debug
 Particle.setLocationFromBoundingbox	port	crates/sunrise-client-render/src/particles.rs::Particle::set_location_from_bb
-Particle.LifetimeAlpha.isOpaque	inline	crates/sunrise-client-core/src/particle_type.rs::ParticleType::translucent_layer	the layer is a fixed per-type table; VaultConnection is the non-opaque case
+Particle.LifetimeAlpha.isOpaque	inline	crates/sunrise-world/src/particle_type.rs::ParticleType::translucent_layer	the layer is a fixed per-type table; VaultConnection is the non-opaque case
 ParticleDescription.fromJson	port	crates/sunrise-client-render/src/particles.rs::ParticleEngine::load_sprites	reads the textures list from particles/*.json
 ParticleEngine.makeParticle	port	crates/sunrise-client-render/src/particles.rs::ParticleEngine::make	every provider arm; a VibrationSignal option has to carry its destination, and ParticleEngine::vibration is the client's own spawner
 ParticleEngine.createParticleGroup	skip:other		no render-type groups: ParticleEngine::render draws every particle in one pass, and the ITEM_PICKUP group is tick_pickups

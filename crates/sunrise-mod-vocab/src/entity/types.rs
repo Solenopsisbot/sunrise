@@ -112,6 +112,17 @@ pub struct ChannelRef {
     pub id: u64,
 }
 
+/// The client-supplied login destination returned by [`PlayerRef::virtual_host`].
+/// This is neither the peer address nor a verified server name.
+#[derive(Clone, Debug, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
+// exhaustive: the destination consists of exactly a host and a port.
+pub struct VirtualHost {
+    /// The host string from the handshake, before its first NUL character.
+    pub host: String,
+    /// The unsigned port from the same handshake.
+    pub port: u16,
+}
+
 /// A player on the server, as a server hook sees them.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -1387,8 +1398,8 @@ pub struct ProfileProperty<'a> {
 pub enum OpenMenuError {
     /// The menu type is not a content mod's (`data/<id>/sunrise/menu/`).
     NotModMenu,
-    /// A menu with `owned_slots` also declares a take-only or crafting result.
-    OwnedSlotsWithResults,
+    /// A menu with `owned_slots` also declares a crafting grid.
+    OwnedSlotsWithCrafting,
     /// Opening a new window is not possible during the active menu click action.
     ClickInProgress,
     /// The player is stale, dead, disconnecting, has no supported client, or their turn
@@ -1459,6 +1470,49 @@ pub enum RespawnRefusal {
 }
 
 impl NoBackend for RespawnRefusal {
+    fn no_backend() -> Self {
+        Self::Stale
+    }
+}
+
+/// Where a player would respawn now, as [`PlayerRef::respawn_target`] finds it: the transition
+/// `ServerPlayer.findRespawnPositionAndUseSpawnBlock(false, DO_NOTHING)` gives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub struct RespawnTarget {
+    /// The level: the respawn point's, or the world spawn's (`MinecraftServer.findRespawnDimension`).
+    pub level: LevelRef,
+    /// The feet position in that level.
+    pub position: [f64; 3],
+    /// The yaw the player faces: toward the bed or anchor, else the world spawn's.
+    pub yaw: f32,
+    /// The pitch the player faces: level at a bed or anchor, else the world spawn's.
+    pub pitch: f32,
+    /// The player had a respawn point whose bed or anchor no longer gives a position
+    /// (`TeleportTransition.missingRespawnBlock`): the target is the world spawn, and a respawn
+    /// there would tell them `block.minecraft.spawn.not_valid`.
+    pub missing_respawn_block: bool,
+}
+
+/// Why [`PlayerRef::respawn_target`] found no target now. The checks run in the order the
+/// variants are listed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum RespawnTargetUnavailable {
+    /// The handle no longer identifies a player on this server: it is stale, or they left.
+    Stale,
+    /// A player's state is swapped in (the call came from inside a player's hook, such as a
+    /// command or a packet handler) and the target is in a level not in place, which the call
+    /// would have to put in place to read; call it from `server_tick`.
+    InPlayerHook,
+    /// The world spawn's column search (`PlayerSpawnFinder`) waits for a chunk to load, as the
+    /// End exit's search does; the call asked for it. Ask again on a later tick.
+    Loading,
+}
+
+impl NoBackend for RespawnTargetUnavailable {
     fn no_backend() -> Self {
         Self::Stale
     }

@@ -1297,10 +1297,11 @@ impl Ticker<'_, '_, '_, '_> {
             return;
         }
         targets.visit(|c| {
-            if !left_owner && owner.is_some_and(|o| targets.owner_tree_contains(o, c.who)) {
+            if !c.bounds.intersects(area) || self.st.pierced.contains(&c.who) {
                 return;
             }
-            if !c.bounds.intersects(area) || self.st.pierced.contains(&c.who) {
+            // Vehicle ancestry is only relevant for candidates in the arrow's sweep.
+            if !left_owner && owner.is_some_and(|o| targets.owner_tree_contains(o, c.who)) {
                 return;
             }
             if let Some(at) = self.entity_hit(&c.bounds, from, end, margin) {

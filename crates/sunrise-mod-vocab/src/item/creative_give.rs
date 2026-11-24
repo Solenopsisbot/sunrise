@@ -14,6 +14,8 @@ pub enum CreativeGiveError {
     /// The game's item boundary refused the stack: an unknown item, a count above its
     /// effective stack limit, or invalid components.
     Stack(crate::StackWriteError),
+    /// The connected server's enabled feature flags do not enable this item.
+    FeatureDisabled,
 }
 
 impl std::fmt::Display for CreativeGiveError {
@@ -22,6 +24,7 @@ impl std::fmt::Display for CreativeGiveError {
             Self::Unavailable => f.write_str("no client world is open"),
             Self::NotCreative => f.write_str("the player is not in creative mode"),
             Self::Stack(error) => write!(f, "invalid stack: {error:?}"),
+            Self::FeatureDisabled => f.write_str("the item's required feature is disabled"),
         }
     }
 }

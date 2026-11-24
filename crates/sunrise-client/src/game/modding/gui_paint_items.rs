@@ -1,11 +1,12 @@
 //! `GuiDraw::Item` for the hotbar and a mod's `gui_paint`: one path, `hud_layout::paint_items`,
 //! with the local player's hotbar slots drawn as `extractSlot` draws them (`item`, then
-//! `itemDecorations`). A mod's buffer is checked first and refused whole with the op it could
-//! not draw.
+//! `itemDecorations`), and a mod's `GuiDraw::PlayerFace` with the skin the client has. A mod's
+//! buffer is checked first and refused whole with the op it could not draw.
 use super::Game;
 use mod_api::GuiPaintError;
+use std::borrow::Cow;
 use sunrise_client::hud::HudBatch;
-use sunrise_client::hud_layout::{self, GuiDraw, GuiItems, Undrawable};
+use sunrise_client::hud_layout::{self, GuiDraw, GuiFaces, GuiItems, Undrawable};
 use sunrise_client::items::ItemStack;
 use sunrise_items::equipment::OFFHAND;
 
@@ -55,6 +56,18 @@ impl GuiItems for HotbarItems<'_, '_> {
     }
 }
 
+/// The skins of `GuiDraw::PlayerFace`s ([`Game::player_face_skin`]), borrowed; `name` holds a
+/// looked-up skin's name, reused from face to face.
+struct FaceSkins<'a, 'g> {
+    game: &'a Game<'g>,
+    name: String,
+}
+impl GuiFaces for FaceSkins<'_, '_> {
+    fn skin(&mut self, uuid: u128) -> Cow<'_, str> {
+        Cow::Borrowed(self.game.player_face_skin(uuid, &mut self.name))
+    }
+}
+
 /// The API's name for the op `paint_checked` refused at `index`.
 pub(crate) fn paint_error((index, why): (usize, Undrawable)) -> GuiPaintError {
     let index = u32::try_from(index).unwrap_or(u32::MAX);
@@ -71,7 +84,7 @@ pub(crate) fn paint_error((index, why): (usize, Undrawable)) -> GuiPaintError {
 
 impl Game<'_> {
     /// A mod's `gui_paint` buffer: every op drawn under its pose, items from the local player's
-    /// hotbar, or nothing and the op it could not draw.
+    /// hotbar, faces with the skins the client has, or nothing and the op it could not draw.
     pub(crate) fn native_gui_paint(
         &self,
         batch: &mut HudBatch,
@@ -81,6 +94,11 @@ impl Game<'_> {
             game: self,
             source: HotbarSource::Own,
         };
-        hud_layout::paint_checked(batch, &self.gui.atlas, draws, &mut items).map_err(paint_error)
+        let mut faces = FaceSkins {
+            game: self,
+            name: String::new(),
+        };
+        hud_layout::paint_checked(batch, &self.gui.atlas, draws, &mut items, &mut faces)
+            .map_err(paint_error)
     }
 }

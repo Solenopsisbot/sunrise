@@ -174,6 +174,10 @@ fn make_chunk(cx: i32, cz: i32, biome_id: u16, uniform_light: u8) -> Chunk {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn any_tracked_entity_resolves_as_camera_26_3() {
+    run_any_tracked_entity_resolves_as_camera_26_3();
+}
+
+pub(in crate::game) fn run_any_tracked_entity_resolves_as_camera_26_3() {
     let witness = parity_witness();
     let records = witness["entity_cameras"]["records"].as_array().unwrap();
     with_client_game(|game| {
@@ -267,6 +271,10 @@ fn any_tracked_entity_resolves_as_camera_26_3() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn interaction_camera_eye_rotation_move_and_teleport_26_3() {
+    run_interaction_camera_eye_rotation_move_and_teleport_26_3();
+}
+
+pub(in crate::game) fn run_interaction_camera_eye_rotation_move_and_teleport_26_3() {
     let witness = parity_witness();
     let life = &witness["interaction_lifecycle"];
     with_client_game(|game| {
@@ -445,6 +453,10 @@ fn interaction_camera_eye_rotation_move_and_teleport_26_3() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn removing_camera_entity_keeps_detached_camera_26_3() {
+    run_removing_camera_entity_keeps_detached_camera_26_3();
+}
+
+pub(in crate::game) fn run_removing_camera_entity_keeps_detached_camera_26_3() {
     let witness = parity_witness();
     for kind in ["minecraft:interaction", "minecraft:creeper"] {
         let case = &witness["camera_removal"][kind];
@@ -533,6 +545,10 @@ fn removing_camera_entity_keeps_detached_camera_26_3() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn camera_consumers_bob_fog_dark_disc_and_vignette_26_3() {
+    run_camera_consumers_bob_fog_dark_disc_and_vignette_26_3();
+}
+
+pub(in crate::game) fn run_camera_consumers_bob_fog_dark_disc_and_vignette_26_3() {
     let witness = parity_witness();
     let consumers = &witness["camera_consumers"];
     with_client_game(|game| {
@@ -757,6 +773,11 @@ fn camera_consumers_bob_fog_dark_disc_and_vignette_26_3() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn camera_consumers_streaming_particles_debug_and_spectator_crosshair_26_3() {
+    run_camera_consumers_streaming_particles_debug_and_spectator_crosshair_26_3();
+}
+
+pub(in crate::game) fn run_camera_consumers_streaming_particles_debug_and_spectator_crosshair_26_3()
+{
     let witness = parity_witness();
     let consumers = &witness["camera_consumers"];
     let stream = &consumers["streaming_and_particles"];
@@ -935,6 +956,10 @@ fn camera_consumers_streaming_particles_debug_and_spectator_crosshair_26_3() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn frozen_camera_partial_tick_matches_26_3_witness() {
+    run_frozen_camera_partial_tick_matches_26_3_witness();
+}
+
+pub(in crate::game) fn run_frozen_camera_partial_tick_matches_26_3_witness() {
     let witness = parity_witness();
     let frozen = &witness["camera_consumers"]["frozen_partial"];
     with_client_game(|game| {
@@ -993,6 +1018,10 @@ fn frozen_camera_partial_tick_matches_26_3_witness() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn block_outline_requires_player_camera_26_3() {
+    run_block_outline_requires_player_camera_26_3();
+}
+
+pub(in crate::game) fn run_block_outline_requires_player_camera_26_3() {
     let witness = parity_witness();
     let outline = &witness["camera_consumers"]["block_outline"];
     with_client_game(|game| {
@@ -1029,6 +1058,10 @@ fn block_outline_requires_player_camera_26_3() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn culling_near_plane_uses_max_of_fov_and_option_fov_26_3() {
+    run_culling_near_plane_uses_max_of_fov_and_option_fov_26_3();
+}
+
+pub(in crate::game) fn run_culling_near_plane_uses_max_of_fov_and_option_fov_26_3() {
     let witness = parity_witness();
     let case = witness["cull_frustum"]["cases"]
         .as_array()
@@ -1130,6 +1163,10 @@ fn add_entity_with_data(
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn sleeping_spectated_living_entity_bed_view_and_visibility_26_3() {
+    run_sleeping_spectated_living_entity_bed_view_and_visibility_26_3();
+}
+
+pub(in crate::game) fn run_sleeping_spectated_living_entity_bed_view_and_visibility_26_3() {
     let witness = parity_witness();
     let cases = witness["sleeping_spectated_camera"]["cases"]
         .as_array()
@@ -1260,6 +1297,10 @@ fn sleeping_spectated_living_entity_bed_view_and_visibility_26_3() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn camera_player_fov_modifier_and_death_isolation_26_3() {
+    run_camera_player_fov_modifier_and_death_isolation_26_3();
+}
+
+pub(in crate::game) fn run_camera_player_fov_modifier_and_death_isolation_26_3() {
     let witness = parity_witness();
     let cases = witness["camera_player_fov_modifier"]["cases"]
         .as_array()
@@ -1579,6 +1620,10 @@ fn camera_player_fov_modifier_and_death_isolation_26_3() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn camera_entity_excluded_from_pick_for_all_pickable_kinds_26_3() {
+    run_camera_entity_excluded_from_pick_for_all_pickable_kinds_26_3();
+}
+
+pub(in crate::game) fn run_camera_entity_excluded_from_pick_for_all_pickable_kinds_26_3() {
     let witness = parity_witness();
     let cases = witness["camera_pick_exclusion"]["cases"]
         .as_array()
@@ -1672,6 +1717,11 @@ fn camera_entity_excluded_from_pick_for_all_pickable_kinds_26_3() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn camera_entity_hidden_in_first_person_for_all_kinds_and_local_player_hidden_26_3() {
+    run_camera_entity_hidden_in_first_person_for_all_kinds_and_local_player_hidden_26_3();
+}
+
+pub(in crate::game) fn run_camera_entity_hidden_in_first_person_for_all_kinds_and_local_player_hidden_26_3()
+ {
     use sunrise_client::camera::CameraType;
     use sunrise_core::nbt::Tag;
 
@@ -1962,6 +2012,10 @@ fn camera_entity_hidden_in_first_person_for_all_kinds_and_local_player_hidden_26
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn spectated_rider_mount_attributes_26_3() {
+    run_spectated_rider_mount_attributes_26_3();
+}
+
+pub(in crate::game) fn run_spectated_rider_mount_attributes_26_3() {
     use sunrise_client::camera::{Camera, CameraType};
 
     let witness = parity_witness();
@@ -2142,6 +2196,10 @@ fn spectated_rider_mount_attributes_26_3() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn particle_camera_before_first_frame_and_after_reset_26_3() {
+    run_particle_camera_before_first_frame_and_after_reset_26_3();
+}
+
+pub(in crate::game) fn run_particle_camera_before_first_frame_and_after_reset_26_3() {
     use sunrise_client::particles::{ParticleLevel, ParticleOptions, ParticleType};
 
     let witness = parity_witness();
@@ -2343,6 +2401,10 @@ fn particle_camera_before_first_frame_and_after_reset_26_3() {
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn review_followup_camera_parity_26_3() {
+    run_review_followup_camera_parity_26_3();
+}
+
+pub(in crate::game) fn run_review_followup_camera_parity_26_3() {
     let witness = parity_witness();
     let rf = &witness["review_followup"];
     with_client_game(|game| {

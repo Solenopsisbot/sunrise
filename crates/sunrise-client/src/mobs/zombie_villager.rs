@@ -387,6 +387,7 @@ mod tests {
             biomes: &biomes,
             mob_griefing: true,
             universal_anger: false,
+            pvp: false,
             mob_drops: true,
             max_entity_cramming: 24,
             difficulty: super::super::spawning::LocalDifficulty::new(2, 18000, 0, 0.0),

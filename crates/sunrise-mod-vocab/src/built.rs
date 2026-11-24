@@ -663,3 +663,30 @@ impl<'a> From<ContainerLootFilled<'a>> for super::ContainerLootFilled<'a> {
         }
     }
 }
+// exhaustive: the game builds it with a literal; mods only read it
+#[derive(sunrise_mod_api_macros::Wire)]
+pub struct RespawnTarget {
+    pub level: super::LevelRef,
+    pub position: [f64; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub missing_respawn_block: bool,
+}
+impl From<RespawnTarget> for super::RespawnTarget {
+    fn from(v: RespawnTarget) -> Self {
+        let RespawnTarget {
+            level,
+            position,
+            yaw,
+            pitch,
+            missing_respawn_block,
+        } = v;
+        Self {
+            level,
+            position,
+            yaw,
+            pitch,
+            missing_respawn_block,
+        }
+    }
+}

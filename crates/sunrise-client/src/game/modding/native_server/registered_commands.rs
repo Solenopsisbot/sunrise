@@ -4,7 +4,7 @@
 //! line naming a mod command parses with no hub; a hub, once there is one, takes that same tree.
 
 use super::{
-    CommandArguments, CommandExecutorSlots, Game, command_arguments, command_tree_for,
+    BaseTree, CommandArguments, CommandExecutorSlots, Game, command_arguments, command_tree_for,
     register_command_nodes,
 };
 use mod_api::__private::{
@@ -80,11 +80,10 @@ impl Game<'_> {
             features,
         );
         let arguments = command_arguments();
-        let hub = self.lan.as_ref().map(|host| &host.hub);
         let mut slots = HashMap::new();
         let (tree, levels, problems) = command_tree_for(
             &usages,
-            |name| hub.is_some_and(|hub| hub.vanilla_command(name)) || vanilla.find(name).is_some(),
+            BaseTree::Merged(&vanilla),
             &arguments,
             false,
             Some(&mut slots),
@@ -134,7 +133,8 @@ impl Game<'_> {
         let revision = Some(state.display_revision);
         let replacing = host.native_commands_sent.is_some();
         if host.native_commands_sent != revision {
-            let tree = without_reserved_roots(&state.report, |name| host.hub.vanilla_command(name));
+            // The hub merges a root vanilla has into vanilla's node (`CommandTree::packet_with`).
+            let tree = state.report.clone();
             host.native_commands_sent = revision;
             host.hub
                 .set_selector_tokens(super::super::native_entity_selectors::selector_tokens());
@@ -165,8 +165,11 @@ impl Game<'_> {
         };
         let dispatcher = Arc::make_mut(&mut self.ui.dispatcher.0);
         // A replacement can add a session tool, e.g. pregen. Never overwrite its nodes
-        // or advertise a mod usage behind the tool's name.
-        let report = without_reserved_roots(&commands.tree, |name| dispatcher.find(name).is_some());
+        // or advertise a mod usage behind the tool's name. Vanilla's roots take mod usages.
+        let report = without_reserved_roots(&commands.tree, |name| {
+            sunrise_client::command::vanilla::is_session_tool(name)
+                && dispatcher.find(name).is_some()
+        });
         register_command_nodes(
             dispatcher,
             &report,

@@ -823,6 +823,290 @@ mod families {
 
     #[test]
     #[ignore = "daily"]
+    fn an_outer_abort_restores_the_mount_and_guest_without_publishing_the_click() {
+        use crate::game::native_entity_refs::tests::run_fresh_cases;
+        use std::sync::{Arc, mpsc};
+        use sunrise_client::{
+            lan::{Out, PlayerSender},
+            mobs::Mob,
+        };
+        use sunrise_core::geometry::Vec3;
+        use sunrise_protocol::{buf::Reader, item::Stack, packets::play::Clientbound};
+
+        if run_fresh_cases(
+            "game::stacked_on_other_tests::families::an_outer_abort_restores_the_mount_and_guest_without_publishing_the_click",
+            "SUNRISE_TEST_MOUNT_MENU_TRANSACTION",
+            &["mount-click"],
+        ) {
+            return;
+        }
+        with_mod(|| {
+            with_guests(|game| {
+                let (tx, rx) = mpsc::channel();
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .update_guest(12, |g| {
+                        g.sender = PlayerSender::new(tx, Arc::default());
+                    })
+                    .unwrap();
+                let menu_packets = || -> Vec<_> {
+                    rx.try_iter()
+                        .flat_map(|out| match out {
+                            Out::Packet(body) => vec![body],
+                            Out::Packets(bodies) => bodies,
+                            _ => Vec::new(),
+                        })
+                        .map(|body| {
+                            let mut read = Reader::new(&body);
+                            Clientbound::decode(read.varint().unwrap(), read.rest()).unwrap()
+                        })
+                        .filter(|p| {
+                            matches!(
+                                p,
+                                Clientbound::ContainerSetContent(_)
+                                    | Clientbound::ContainerSetSlot(_)
+                                    | Clientbound::SetCursorItem(_)
+                                    | Clientbound::SetPlayerInventory(_)
+                            )
+                        })
+                        .collect()
+                };
+                let assert_snapshot = |window, slots: &[(usize, Option<(i32, i32)>)], carried| {
+                    let packets = menu_packets();
+                    let [Clientbound::ContainerSetContent(content)] = packets.as_slice() else {
+                        panic!(
+                            "expected one settled mount snapshot, got {} menu packets",
+                            packets.len()
+                        );
+                    };
+                    assert_eq!(content.container, window);
+                    let stack = |s: &Option<Stack>| s.as_ref().map(|s| (s.item, s.count));
+                    for &(slot, expected) in slots {
+                        assert_eq!(stack(&content.items[slot]), expected, "menu slot {slot}");
+                    }
+                    assert_eq!(stack(&content.carried), carried);
+                };
+                let item_id = |name: &str| {
+                    game.lan
+                        .as_ref()
+                        .unwrap()
+                        .hub
+                        .sync_data()
+                        .builtin
+                        .get("minecraft:item")
+                        .unwrap()
+                        .id(name)
+                        .unwrap()
+                };
+                let (dirt_id, stone_id, emerald_id) = (
+                    item_id("minecraft:dirt"),
+                    item_id("minecraft:stone"),
+                    item_id("minecraft:emerald"),
+                );
+                let mount = |game: &Game<'_>, id, name: &str| {
+                    let kind = game.res.mob_types().get(name).unwrap().clone();
+                    let mut mob = Mob::new(id, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
+                    mob.extra.tame = true;
+                    mob
+                };
+                let open = |game: &mut Game<'_>, id| {
+                    game.lan_open_mount(12, id);
+                    let _ = menu_packets();
+                    game.lan.as_ref().unwrap().play[&12]
+                        .mount_window
+                        .as_ref()
+                        .unwrap()
+                        .window
+                };
+                let guest_items = |game: &Game<'_>| {
+                    let g = &game.lan.as_ref().unwrap().hub.guests[0];
+                    (g.inventory[9].clone(), g.carried.clone())
+                };
+                let dirt = Some(ItemStack::new("minecraft:dirt", 2));
+                let stone = Some(ItemStack::new("minecraft:stone", 3));
+                let mut donkey = mount(game, 60, "minecraft:donkey");
+                donkey.extra.chested = true;
+                donkey.extra.items = vec![dirt.clone()];
+                game.mobs.push(donkey);
+                let window = open(game, 60);
+                game.world.modified.clear();
+                game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+                    g.inventory[9] = None;
+                    g.carried = stone.clone();
+                });
+                script(Script::default());
+                game.storage_scope(|game, _| {
+                    game.lan_guest_packet(12, packet(window, 2));
+                    assert_eq!(game.mobs[0].extra.items[0], stone);
+                    assert_eq!(guest_items(game), (None, dirt.clone()));
+                    game.lan_guest_packet(12, packet(window, 17));
+                    assert_eq!(guest_items(game), (dirt.clone(), None));
+                    assert_eq!(SEEN.with(|seen| seen.borrow().clone()), [(3, 2), (2, 0)]);
+                    assert!(!game.world.modified.contains(&(0, 0)));
+                    assert!(menu_packets().is_empty(), "no tentative click reply");
+                    ((), false)
+                });
+                assert_eq!(
+                    game.mobs[0].extra.items.as_slice(),
+                    std::slice::from_ref(&dirt)
+                );
+                assert_eq!(guest_items(game), (None, stone.clone()));
+                assert!(!game.world.modified.contains(&(0, 0)));
+                assert_snapshot(
+                    window,
+                    &[(2, Some((dirt_id, 2))), (17, None)],
+                    Some((stone_id, 3)),
+                );
+
+                // A plain drag start joins the outer scope without dispatching a pickup.
+                // After abort the next pickup must dispatch, not just reset a leaked drag.
+                script(Script::default());
+                game.storage_scope(|game, _| {
+                    game.lan_guest_packet(
+                        12,
+                        Serverbound::ContainerClick(ContainerClick {
+                            container: window,
+                            state: 0,
+                            slot: -999,
+                            button: 0,
+                            input: sunrise_client::lan::menu::input::QUICK_CRAFT,
+                            changed: Vec::new(),
+                            carried: None,
+                        }),
+                    );
+                    assert_eq!(dispatches(), 0);
+                    assert!(menu_packets().is_empty());
+                    ((), false)
+                });
+                assert_snapshot(window, &[(2, Some((dirt_id, 2)))], Some((stone_id, 3)));
+
+                script(Script {
+                    take_clicked: Some(1),
+                    ..Script::default()
+                });
+                game.storage_scope(|game, _| {
+                    game.lan_guest_packet(12, packet(window, 2));
+                    assert_eq!(dispatches(), 1, "an invalid answer was refused");
+                    assert_eq!(
+                        game.mobs[0].extra.items.as_slice(),
+                        std::slice::from_ref(&dirt)
+                    );
+                    assert_eq!(guest_items(game), (None, stone.clone()));
+                    assert!(
+                        menu_packets().is_empty(),
+                        "even a correction waits for settlement"
+                    );
+                    ((), true)
+                });
+                assert_snapshot(
+                    window,
+                    &[(2, Some((dirt_id, 2))), (17, None)],
+                    Some((stone_id, 3)),
+                );
+
+                let tail = Some(ItemStack::new("minecraft:stick", 4));
+                game.mobs[0].extra.items.resize(15, None);
+                game.mobs[0].extra.items.push(tail.clone());
+                script(Script {
+                    cancel: true,
+                    handled: true,
+                    set_clicked: Some(Some(("minecraft:emerald", 1))),
+                    set_carried: Some(None),
+                    ..Script::default()
+                });
+                let emerald = Some(ItemStack::new("minecraft:emerald", 1));
+                game.storage_scope(|game, _| {
+                    game.lan_guest_packet(12, packet(window, 2));
+                    assert_eq!(dispatches(), 1);
+                    assert_eq!(game.mobs[0].extra.items[0], emerald);
+                    assert_eq!(guest_items(game), (None, None));
+                    assert!(menu_packets().is_empty());
+                    ((), true)
+                });
+                assert_eq!(game.mobs[0].extra.items[0], emerald);
+                assert_eq!(
+                    game.mobs[0].extra.items[15], tail,
+                    "the menu owns only its exposed slots"
+                );
+                assert!(game.world.modified.contains(&(0, 0)));
+                assert_snapshot(window, &[(2, Some((emerald_id, 1))), (17, None)], None);
+
+                let mut horse = mount(game, 61, "minecraft:horse");
+                let mut saddle = ItemStack::new("minecraft:saddle", 1);
+                saddle
+                    .data_mut()
+                    .enchantments
+                    .push(("minecraft:unbreaking".into(), 2));
+                let mut armor = ItemStack::new("minecraft:iron_horse_armor", 1);
+                armor.damage = 7;
+                armor
+                    .data_mut()
+                    .enchantments
+                    .push(("minecraft:unbreaking".into(), 3));
+                horse.set_saddle(Some(saddle.clone()));
+                horse.extra.set_body_stack(Some(armor.clone()));
+                game.mobs.push(horse);
+                let window = open(game, 61);
+                let equipment = |game: &Game<'_>| {
+                    let horse = &game.mobs[1];
+                    (horse.saddle_item(), horse.extra.body_stack().cloned())
+                };
+                for (slot, expected) in [(0, &saddle), (1, &armor)] {
+                    script(Script::default());
+                    game.storage_scope(|game, _| {
+                        game.lan_guest_packet(12, packet(window, slot));
+                        assert_eq!(dispatches(), 1);
+                        assert_eq!(guest_items(game), (None, Some(expected.clone())));
+                        let (worn_saddle, worn_armor) = equipment(game);
+                        assert_eq!(worn_saddle.as_ref(), (slot != 0).then_some(&saddle));
+                        assert_eq!(worn_armor.as_ref(), (slot != 1).then_some(&armor));
+                        assert!(game.mobs[1].extra.items.is_empty(), "no chest slots");
+                        assert!(menu_packets().is_empty());
+                        ((), false)
+                    });
+                    assert_eq!(equipment(game), (Some(saddle.clone()), Some(armor.clone())));
+                    assert_eq!(guest_items(game), (None, None));
+                    assert_snapshot(window, &[], None);
+                }
+
+                // An answer that passes hook validation can still be refused by the slot.
+                // Reopen the same mount with the same wire ID before settling the refusal:
+                // the replacement generation must not receive a second window's reply.
+                script(Script {
+                    cancel: true,
+                    handled: true,
+                    set_clicked: Some(Some(("minecraft:stone", 1))),
+                    ..Script::default()
+                });
+                game.world.modified.clear();
+                game.storage_scope(|game, _| {
+                    game.lan_guest_packet(12, packet(window, 1));
+                    assert_eq!(dispatches(), 1);
+                    assert_eq!(equipment(game), (Some(saddle.clone()), Some(armor.clone())));
+                    assert_eq!(guest_items(game), (None, None));
+                    assert!(menu_packets().is_empty());
+                    game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+                        g.next_window = window - 1;
+                    });
+                    assert_eq!(open(game, 61), window);
+                    ((), true)
+                });
+                assert!(
+                    menu_packets().is_empty(),
+                    "no stale reply to the replacement window"
+                );
+                assert!(
+                    !game.world.modified.contains(&(0, 0)),
+                    "refusal does not mark the mount dirty"
+                );
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn the_trading_menu_decides_the_pickup() {
         use crate::game::native_merchant_refs::tests::{offer, spawn};
         use crate::game::trading::MerchantState;

@@ -381,6 +381,10 @@ fn land_positions_match(
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_spectator_player_120() {
+    run_witness_spectator_player_120();
+}
+
+pub(in crate::game) fn run_witness_spectator_player_120() {
     let witness = load_witness();
     let mut resources = None;
     let mut game = setup_game(&mut resources);
@@ -508,6 +512,10 @@ fn witness_spectator_player_120() {
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_wind_charge_end_crystal_121() {
+    run_witness_wind_charge_end_crystal_121();
+}
+
+pub(in crate::game) fn run_witness_wind_charge_end_crystal_121() {
     let witness = load_witness();
     let mut resources = None;
     let mut game = setup_game(&mut resources);
@@ -613,6 +621,10 @@ fn witness_wind_charge_end_crystal_121() {
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_trident_enderman_dodge_122() {
+    run_witness_trident_enderman_dodge_122();
+}
+
+pub(in crate::game) fn run_witness_trident_enderman_dodge_122() {
     let witness = load_witness();
     let mut resources = None;
     let mut game = setup_game(&mut resources);
@@ -885,6 +897,10 @@ fn witness_trident_enderman_dodge_122() {
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_piercing_arrow_multihit_123() {
+    run_witness_piercing_arrow_multihit_123();
+}
+
+pub(in crate::game) fn run_witness_piercing_arrow_multihit_123() {
     let witness = load_witness();
     let mut resources = None;
     let mut game = setup_game(&mut resources);
@@ -1155,6 +1171,10 @@ fn alive_124(game: &Game<'_>, t: Target124) -> bool {
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_firework_rocket_targets_124() {
+    run_witness_firework_rocket_targets_124();
+}
+
+pub(in crate::game) fn run_witness_firework_rocket_targets_124() {
     let witness = load_witness();
     let mut resources = None;
     let mut game = setup_game(&mut resources);
@@ -1739,6 +1759,10 @@ fn check_review_entity(
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_review_round1_regressions() {
+    run_witness_review_round1_regressions();
+}
+
+pub(in crate::game) fn run_witness_review_round1_regressions() {
     let witness = load_witness();
     let mut resources = None;
     let mut game = setup_game(&mut resources);

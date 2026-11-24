@@ -852,10 +852,10 @@ fn vanilla_mobs_at<L: NaturalLevel>(
         (monster && id == "minecraft:fortress") || overrides.get(id, category.name()).is_some()
     });
     if category == Category::Monster
-        && name_at(l, x, y - 1, z) == "minecraft:nether_bricks"
         && structures
             .iter()
             .any(|s| s.id == "minecraft:fortress" && s.in_bounds)
+        && name_at(l, x, y - 1, z) == "minecraft:nether_bricks"
     {
         return fortress_enemies();
     }

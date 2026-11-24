@@ -49,6 +49,9 @@ pub(super) struct PrimedTnt {
     pub used_portal: bool,
     /// PrimedTnt.DATA_BLOCK_STATE_ID; None is the default TNT state.
     pub block_state: Option<sunrise_world::registry::BlockStateId>,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub(super) size_answer: Option<sunrise_client::pose::SizeAnswer>,
 }
 impl PrimedTnt {
     /// The live state encoded for each existing save view.
@@ -64,15 +67,23 @@ impl PrimedTnt {
 
     /// `EntityTypes.TNT`'s `sized(0.98F, 0.98F)`, widened from the float.
     pub(super) const SIZE: f64 = 0.98_f32 as f64;
+    /// `EntityTypes.TNT.getDimensions()`: width, height and eye height.
+    pub(super) const DIMENSIONS: [f32; 3] = [0.98, 0.98, 0.15];
     pub(super) fn bounds(&self) -> Aabb {
         let h = Self::SIZE / 2.0;
-        Aabb::new(
+        let vanilla = Aabb::new(
             Vec3::new(self.position.x - h, self.position.y, self.position.z - h),
             Vec3::new(
                 self.position.x + h,
                 self.position.y + Self::SIZE,
                 self.position.z + h,
             ),
+        );
+        sunrise_client::pose::SizeAnswer::sized_box(
+            self.size_answer,
+            Self::DIMENSIONS,
+            self.position,
+            vanilla,
         )
     }
     /// `Entity.move`: a pending stuck multiplier is used up by the next move,
@@ -429,6 +440,7 @@ impl Game<'_> {
             sunrise_client::save::insecure_uuid(&mut sunrise_client::random_source::entity());
         self.persist.uuids.insert(self.next_entity, uuid);
         self.tnts.push(PrimedTnt {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: [0.0, 0.0],
             join: Default::default(),
@@ -1046,7 +1058,7 @@ pub(super) fn tnt_general_seat(tnt: Vec3) -> Vec3 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::game) mod tests {
     use super::*;
 
     #[test]
@@ -1082,6 +1094,7 @@ mod tests {
         ]))
         .unwrap();
         let mut tnt = PrimedTnt {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: [0.0, 0.0],
             join: Default::default(),
@@ -1153,6 +1166,7 @@ mod tests {
         use sunrise_core::geometry::Direction;
         use sunrise_world::piston_push::bounce_velocity;
         let mut tnt = PrimedTnt {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: [0.0, 0.0],
             join: Default::default(),
@@ -1206,6 +1220,7 @@ mod tests {
         for bordered in [false, true] {
             let at = Vec3::new(24.0, 4.0, 20.5);
             let mut tnt = PrimedTnt {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 rotation: [0.0, 0.0],
                 join: Default::default(),
@@ -1288,6 +1303,7 @@ mod tests {
             }
             let at = Vec3::new(19.5, top, 20.5);
             let mut tnt = PrimedTnt {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 rotation: [0.0, 0.0],
                 join: Default::default(),
@@ -1366,6 +1382,7 @@ mod tests {
         world.set(21, 4, 20, flowing).unwrap();
         let at = Vec3::new(20.5, 4.0, 20.5);
         let mut tnt = PrimedTnt {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: [0.0, 0.0],
             join: Default::default(),
@@ -1531,6 +1548,7 @@ mod tests {
         // (Entity.handleOnInsideBubbleColumn / handleOnAboveBubbleColumn).
         let at = Vec3::new(20.5, 6.0, 20.5);
         let mut tnt = PrimedTnt {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: [0.0, 0.0],
             join: Default::default(),
@@ -1642,6 +1660,7 @@ mod tests {
         world.set(20, 2, 20, soul_sand).unwrap();
         let at = Vec3::new(20.5, 6.0, 20.5);
         let primed = || PrimedTnt {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: [0.0, 0.0],
             join: Default::default(),
@@ -1775,6 +1794,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn portal_transfer_tnt_state_follows_memory_but_not_saved_nbt() {
+        run_portal_transfer_tnt_state_follows_memory_but_not_saved_nbt();
+    }
+
+    pub(in crate::game) fn run_portal_transfer_tnt_state_follows_memory_but_not_saved_nbt() {
         use super::super::commands::Target;
         let mut resources = None;
         let mut game = server_game(&mut resources).expect("set SUNRISE_TEST_RESOURCES");
@@ -1804,6 +1827,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn portal_transfer_ordinary_nbt_cannot_supply_runtime_immunity() {
+        run_portal_transfer_ordinary_nbt_cannot_supply_runtime_immunity();
+    }
+
+    pub(in crate::game) fn run_portal_transfer_ordinary_nbt_cannot_supply_runtime_immunity() {
         use sunrise_core::nbt::Tag;
         let mut resources = None;
         let mut game = server_game(&mut resources).expect("set SUNRISE_TEST_RESOURCES");
@@ -1825,6 +1852,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn portal_blast_sulfur_cube_uses_only_positive_cooldown() {
+        run_portal_blast_sulfur_cube_uses_only_positive_cooldown();
+    }
+
+    pub(in crate::game) fn run_portal_blast_sulfur_cube_uses_only_positive_cooldown() {
         use sunrise_client::mobs::Mob;
         use sunrise_client::nether_portal::PortalState;
         let mut resources = None;
@@ -2083,6 +2114,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn silent_tnt_keeps_the_blast_without_its_sound() {
+        run_silent_tnt_keeps_the_blast_without_its_sound();
+    }
+
+    pub(in crate::game) fn run_silent_tnt_keeps_the_blast_without_its_sound() {
         on_big_stack(|| {
             let mut resources = None;
             let Some(mut game) = source_silence_game(&mut resources) else {
@@ -2142,6 +2177,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn silent_potions_keep_the_splash_without_its_sound() {
+        run_silent_potions_keep_the_splash_without_its_sound();
+    }
+
+    pub(in crate::game) fn run_silent_potions_keep_the_splash_without_its_sound() {
         on_big_stack(|| {
             use sunrise_client::projectiles::{Hit, Projectile, ProjectileKind};
             let mut resources = None;
@@ -2212,6 +2251,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn silent_creeper_keeps_the_blast_after_its_source_is_removed() {
+        run_silent_creeper_keeps_the_blast_after_its_source_is_removed();
+    }
+
+    pub(in crate::game) fn run_silent_creeper_keeps_the_blast_after_its_source_is_removed() {
         on_big_stack(|| {
             let mut resources = None;
             let Some(mut game) = source_silence_game(&mut resources) else {
@@ -2249,6 +2292,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn silent_launched_potions_and_bottles_keep_their_impact() {
+        run_silent_launched_potions_and_bottles_keep_their_impact();
+    }
+
+    pub(in crate::game) fn run_silent_launched_potions_and_bottles_keep_their_impact() {
         on_big_stack(|| {
             let mut resources = None;
             let Some(mut game) = source_silence_game(&mut resources) else {
@@ -2362,6 +2409,10 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn silent_bottles_preserve_xp_and_the_server_random_stream() {
+        run_silent_bottles_preserve_xp_and_the_server_random_stream();
+    }
+
+    pub(in crate::game) fn run_silent_bottles_preserve_xp_and_the_server_random_stream() {
         on_big_stack(|| {
             use sunrise_client::projectiles::{Hit, Projectile, ProjectileKind};
             let mut resources = None;

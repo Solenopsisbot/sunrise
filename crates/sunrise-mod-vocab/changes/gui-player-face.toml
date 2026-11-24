@@ -1,0 +1,3 @@
+ids = ["type:GuiDraw", "type:GuiDraw.PlayerFace"]
+why = "gui_paint draws a player's skin head by UUID (#4634): GuiDraw::PlayerFace { uuid, x, y, size, hat, flip, color }, PlayerFaceExtractor.extractRenderState through the player list's face drawing, the face then the hat layer under the same pose, clip and tint, upside down only when flip is set. A player with a PlayerInfo on the connection draws its player-list skin; any other UUID its profile's, looked up by id as a player head's is, never waited on; the UUID's DefaultPlayerSkin until the real skin is uploaded."
+migrate = "A match on GuiDraw needs an arm for PlayerFace (or a wildcard)."

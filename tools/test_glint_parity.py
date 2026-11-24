@@ -112,7 +112,7 @@ def main():
         expected_lib = f'{len(LIB_TESTS)} passed; 0 failed'
         assert expected_lib in lib_log.read_text(encoding='utf-8'), f'expected "{expected_lib}" in {lib_log}'
 
-        client_bin = build_test_binary(build, 'sunrise-client', 'sunrise_client', env)
+        client_bin = lab.parity_fixtures()
         client_log = run_logged([client_bin, '--ignored', '--exact', *CLIENT_TESTS], build, 'client-tests', cwd=scratch, env=env)
         expected_client = f'{len(CLIENT_TESTS)} passed; 0 failed'
         assert expected_client in client_log.read_text(encoding='utf-8'), f'expected "{expected_client}" in {client_log}'

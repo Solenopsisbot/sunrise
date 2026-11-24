@@ -311,10 +311,15 @@ envelope header), is one-time context. Decode `open.extra` in the registered cli
 It is an empty slice when no payload matched this opening. Reusing a window id does not reuse
 its previous context. Keep owned decoded values if the screen needs them later; the bytes are
 borrowed only during construction. `pos` is an optional hint offered to the factory and later
-returned by `screen_pos()`. Neither is live data or block backing.
-The menu's declared container slots, if any, start empty. Opening returns the window id or
-`Ok(None)` when vetoed. Invalid type,
-connection or client support, opening bytes, data count or
+returned by `screen_pos()`. Neither is live data or block backing. Pass `Some(hand)` from an
+item's use to let `menu_still_valid` compare that hand's current stack with the one at open. Other
+openers pass `None`. The menu's declared container slots, if any, start empty;
+[`owned_slots`](../../concepts/capabilities/menu-slots.md#menu-owned-slots) declares a temporary
+container that belongs to the window, and adding `results` makes it a blockless processing menu
+that computes outputs in `menu_slot_changed`, handles takes in `menu_slot_take`, and returns its
+non-result inputs to the player on close (dropping overflow, or dropping on disconnect or death,
+and discarding result slots). Opening returns the window id or `Ok(None)` when vetoed. Invalid
+type, connection or client support, opening bytes, data count or
 title returns `OpenMenuError`. Neither a refused nor a cancelled open closes the old menu.
 
 For a slotless status screen, declare `data/mymod/sunrise/menu/status.json` as
@@ -352,6 +357,16 @@ lecterns and mount inventories. `replace` is the Java `MenuProvider`'s choice
 window, which centres the mouse again; `MenuReplace::InPlace` sends none, so the client keeps
 its screen and its mouse where they are until the new screen replaces it, as when one
 screen of a machine leads to the next.
+
+### Window ids
+
+Each menu the server opens for a player takes the next id of that player's container counter
+(vanilla's `ServerPlayer.containerCounter`), 1 to 100 and round again. `player.container_counter(host)` reads
+the id the last open took, so the next one is `counter % 100 + 1`: the id to hand a menu built before the open,
+as Java's `MenuProvider.createMenu(containerId, ...)` is. `player.next_container_counter(host)` advances the
+counter as an open does without opening anything, for an open that decides after the advance that no window
+follows (a `createMenu` that answers `null`). A mod modelling `ServerPlayer.openMenu` from inside the player's
+own action closes the open menu first with `menu.close_container(host)`, which closes at the call there.
 
 ## The menu's screen
 

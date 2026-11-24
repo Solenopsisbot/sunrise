@@ -24,6 +24,36 @@ change by the board's usual per-tick sync, `scoreboard.dat` holds it, and select
 updating as before. A score is sent to clients only while its objective is shown in a display
 slot. Locks are never sent.
 
+## Show one player a sidebar
+
+`player.set_sidebar(host, Some(sidebar))` replaces a personal sidebar; pass `None` to clear it.
+Unlike `host.set_display_slot` on the shared board, this changes only that player's client.
+It creates no saved or command-visible objective. Send it again after the player reconnects.
+
+```rust,ignore
+use mod_api::{Sidebar, SidebarLine, Text};
+
+player.set_sidebar(host, Some(Sidebar {
+    title: Text::literal("Round stats"),
+    lines: vec![
+        SidebarLine { text: Text::literal("Points"), value: Some(Text::literal("3 pts")) },
+        SidebarLine { text: Text::literal("Round complete"), value: None },
+    ],
+}))?;
+```
+
+The client shows the first 15 lines, top first, with `value` in place of each numeric score.
+A line with no value leaves that space blank. The personal sidebar takes the ordinary slot
+and the slot for the player's current team color, if any. The client still prefers its team
+color's slot. A later world packet setting or clearing the ordinary slot takes that slot back;
+score changes and writes to other slots do not. Clearing restores the world's team-color
+assignments and restores the ordinary assignment only if the personal sidebar still held it.
+
+A stale or offline player gives `Ok(false)` without checking the text. Otherwise the title
+and both text fields of each retained line must fit the trusted scoreboard codecs, which
+keep the NBT depth and modified-UTF-8 string limits but have no NBT heap quota. Refused text
+leaves the previous sidebar unchanged. In a transaction, accepted changes wait for commit.
+
 ## Holders
 
 A score holder is a `ScoreHolder`:

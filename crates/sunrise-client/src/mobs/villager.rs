@@ -248,9 +248,11 @@ fn set_wake_pose(
     m.yaw = yaw as f32;
     m.head_pitch = 0.0;
 }
-/// `LivingEntity.getSleepingPos`: the bed head a sleeper lies in.
+/// `LivingEntity.getSleepingPos`: the bed head a sleeper lies in, from the
+/// moment it lies down to the one it wakes. No site that reads it asks for the
+/// sleeping pose: `isSleeping` and `stopSleeping` go by the position alone.
 pub fn sleeping_pos(m: &Mob) -> Option<[i32; 3]> {
-    ext(m).and_then(|e| e.sleeping_pos).filter(|_| sleeping(m))
+    ext(m).and_then(|e| e.sleeping_pos)
 }
 /// `LivingEntityRenderer.sleepDirectionToRotation` and the bed's direction
 /// (the body is shifted back from the pillow by the standing eye height).
@@ -1615,6 +1617,86 @@ mod tests {
                 assert_eq!(saved.get("sleeping_pos"), expected.as_ref());
                 assert_eq!(saved.get("h232_control"), Some(&Tag::Int(42)));
             }
+        }
+    }
+    /// `LivingEntity.stopSleeping` goes by `getSleepingPos()` alone: a
+    /// villager whose sleeping position is set (`setSleepingPos`) stands up
+    /// beside its bed and turns to face it, whether or not it lies in the
+    /// sleeping pose. The first safe cell of
+    /// `AbstractBedBlock.findStandUpPosition` is the one beside the head on the
+    /// side its yaw faces away from, here east of a bed facing north, so the
+    /// woken villager looks west: the yaw it turns by is due west as a float,
+    /// a hair under 90.
+    #[test]
+    #[ignore = "daily"]
+    fn a_sleeper_stands_up_by_its_sleeping_position_alone() {
+        use crate::mobs::world::with_built_test_world;
+        use sunrise_core::geometry::Vec3;
+        let bed = [4, 100, 4];
+        let build = |world: &mut crate::world::World,
+                     registry: &sunrise_world::registry::BlockRegistry| {
+            world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(crate::chunk::Chunk::empty(0, 0)),
+            );
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            for x in 0..8 {
+                for z in 0..8 {
+                    world.set(x, 99, z, stone).unwrap();
+                }
+            }
+            let mut state = registry
+                .state(registry.default_state("minecraft:red_bed").unwrap())
+                .unwrap()
+                .clone();
+            state.properties.insert("facing".into(), "north".into());
+            state.properties.insert("occupied".into(), "true".into());
+            for (part, z) in [("head", 4), ("foot", 5)] {
+                state.properties.insert("part".into(), part.into());
+                world.set(4, 100, z, registry.id(&state).unwrap()).unwrap();
+            }
+        };
+        let mut woke = Vec::new();
+        let ran = with_built_test_world(&[], build, |w, types| {
+            for posed in [false, true] {
+                let kind = std::sync::Arc::new(types.types["minecraft:villager"].clone());
+                let mut m = Mob::new(1, kind, Vec3::new(4.5, 100.6875, 4.5), 0.0);
+                ext_mut(&mut m).sleeping_pos = Some(bed);
+                if posed {
+                    m.extra.ints[1] = bed_facing_code(Some("north"));
+                }
+                let mut events = Vec::new();
+                stop_sleeping(&mut m, w, &mut events);
+                woke.push((
+                    posed,
+                    m.position,
+                    m.yaw,
+                    m.head_pitch,
+                    events,
+                    sleeping(&m),
+                    ext(&m).unwrap().sleeping_pos,
+                ));
+            }
+        });
+        if !ran {
+            return;
+        }
+        assert_eq!(woke.len(), 2);
+        for (posed, position, yaw, pitch, events, asleep, stored) in woke {
+            assert_eq!(position, Vec3::new(5.5, 100.0, 4.5), "posed: {posed}");
+            assert_eq!(yaw, 89.999_99, "posed: {posed}");
+            assert_eq!(pitch, 0.0, "posed: {posed}");
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [MobEvent::BedOccupied {
+                        pos,
+                        occupied: false
+                    }] if *pos == bed
+                ),
+                "posed: {posed}"
+            );
+            assert!(!asleep && stored.is_none(), "posed: {posed}");
         }
     }
     /// `Villager.setUnhappy` -> `Mob.makeSound(VILLAGER_NO)` plays with

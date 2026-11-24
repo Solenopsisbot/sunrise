@@ -2421,6 +2421,7 @@ mod pickup_xp_tests {
             game.lan.as_mut().unwrap().hub.guests.push(g);
             let p = Vec3::new(0.5, 70.0, 0.5);
             game.orbs.push(ExperienceOrb {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 rotation: [0.0, 0.0],
                 join: Default::default(),
@@ -3417,7 +3418,7 @@ mod bundle_slot_tests;
 
 #[cfg(test)]
 #[path = "tests/crack_feedback_tests.rs"]
-mod crack_feedback_tests;
+pub(in crate::game) mod crack_feedback_tests;
 
 #[cfg(test)]
 #[path = "tests/menu_still_valid_tests.rs"]

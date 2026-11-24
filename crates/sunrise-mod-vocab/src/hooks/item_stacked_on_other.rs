@@ -39,7 +39,10 @@ pub trait Hooks {
     ///
     /// Contradictory `ItemPart` answers (`canceled != result.handled`), invalid stacks, writes
     /// through `Host` to what the click read, or panics refuse the click and roll back every
-    /// write. During client prediction, server reconciliation remains authoritative.
+    /// write. On the server, this includes the mount's saddle, body equipment and chest slots
+    /// as well as the player's inventory and cursor. An enclosing abort restores them together;
+    /// the mount menu is reconciled from settled storage. During client prediction, server
+    /// reconciliation remains authoritative.
     #[hook(
         dispatch = "flat",
         side = "both",

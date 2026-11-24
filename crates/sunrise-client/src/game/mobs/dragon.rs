@@ -252,17 +252,23 @@ pub(super) struct Crystal {
     /// as loaded until `/tp` grounds it or a cobweb or powder snow resets the
     /// fall (`crystal.rs`).
     pub fall: (bool, f64),
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub size_answer: Option<sunrise_client::pose::SizeAnswer>,
 }
 sunrise_client::impl_joined!(Crystal);
 sunrise_mod_runtime::impl_attachment_lifetime!(Crystal);
 impl Crystal {
+    /// `EntityType.END_CRYSTAL.getDimensions()`: width, height and eye height.
+    pub(super) const DIMENSIONS: [f32; 3] = [2.0, 2.0, 1.7];
     /// `EntityType.END_CRYSTAL`: 2 x 2.
     pub(super) fn bounds(&self) -> Aabb {
         let p = self.position;
-        Aabb::new(
+        let vanilla = Aabb::new(
             Vec3::new(p.x - 1.0, p.y, p.z - 1.0),
             Vec3::new(p.x + 1.0, p.y + 2.0, p.z + 1.0),
-        )
+        );
+        sunrise_client::pose::SizeAnswer::sized_box(self.size_answer, Self::DIMENSIONS, p, vanilla)
     }
 }
 #[derive(Clone, Debug, Default)]
@@ -4096,6 +4102,7 @@ impl Crystal {
             value => nbt_value::number(value).unwrap_or_default() as i16,
         };
         Some(Self {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             join: Default::default(),
             id: 0,
@@ -5227,7 +5234,7 @@ impl Game<'_> {
 mod crystal;
 
 #[cfg(test)]
-mod tests {
+pub(in crate::game) mod tests {
     use super::*;
 
     #[test]
@@ -5749,6 +5756,10 @@ mod tests {
     #[test]
     #[ignore]
     fn dragon_render_parity_fixture() {
+        run_dragon_render_parity_fixture();
+    }
+
+    pub(in crate::game) fn run_dragon_render_parity_fixture() {
         let path = std::env::var("SUNRISE_DRAGON_RENDER_OUTPUT").expect("harness output path");
         let mut cases = Vec::new();
         for t in [0.0, 0.05, 0.25, 0.5, 0.8, 0.9, 0.95, 1.0] {

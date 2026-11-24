@@ -11,6 +11,10 @@ use sunrise_protocol::{
 #[test]
 #[ignore = "run by tools/test_camera_parity.py"]
 fn a_spectated_dying_living_entity_squeezes_the_fov_26_3() {
+    run_a_spectated_dying_living_entity_squeezes_the_fov_26_3();
+}
+
+pub(in crate::game) fn run_a_spectated_dying_living_entity_squeezes_the_fov_26_3() {
     let path = std::env::var("SUNRISE_CAMERA_DEATH_WITNESS")
         .expect("run through tools/test_camera_parity.py, which records the witness");
     let witness = std::fs::read_to_string(&path).unwrap_or_else(|err| {

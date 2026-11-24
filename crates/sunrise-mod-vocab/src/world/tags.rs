@@ -57,6 +57,11 @@ pub trait Tags {
     /// The names of the tags that currently contain `item`, each once, in no specified order.
     /// `None` means the item mapping or authoritative tag names are unavailable.
     /// A known item with no tags returns an empty list. This does not resolve tag keys.
+    ///
+    /// Each call tests the item against every bound item tag and builds a new list: keep it
+    /// out of per-tick and per-entity hooks. Read it when the answer is needed, or after a
+    /// data reload, and keep the list; for one known tag, [`is_in_tag`](Self::is_in_tag) is
+    /// a single lookup.
     fn item_tags(&self, _item: ItemKey) -> Option<Vec<Identifier>> {
         unimplemented!("Tags::item_tags")
     }
@@ -64,6 +69,9 @@ pub trait Tags {
     /// `None` means the authoritative tag names are unavailable.
     /// A loaded item registry with no bound tags returns an empty list.
     /// Call [`key`](Self::key) separately if you need a key for membership reads.
+    ///
+    /// Each call builds a new list of every bound item tag: keep it out of per-tick and
+    /// per-entity hooks, and keep the list between data reloads.
     fn item_tag_names(&self) -> Option<Vec<Identifier>> {
         unimplemented!("Tags::item_tag_names")
     }

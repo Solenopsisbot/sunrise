@@ -2245,7 +2245,7 @@ mod strider_lava_boarding_tests;
 
 #[cfg(test)]
 #[path = "tests/steerable_boarding_tests.rs"]
-mod steerable_boarding_tests;
+pub(in crate::game) mod steerable_boarding_tests;
 
 #[cfg(test)]
 #[path = "tests/ride_dismount_tests.rs"]

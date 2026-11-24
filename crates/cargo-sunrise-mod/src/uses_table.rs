@@ -4,21 +4,31 @@ use crate::sdk_fetch::PinnedSdk;
 use mod_source::mod_uses::{self, ReadError};
 use mod_surface::child::ChildEntry;
 use mod_surface::uses::{Built, ManifestFacts, Origin, Uses, UsesTable, uses_contained};
-use mod_surface::{Surface, leaf};
+use mod_surface::{ReadError as SurfaceError, Surface, leaf};
 use std::collections::BTreeMap;
 use std::path::Path;
 use sunrise_mod_package::Manifest;
 use sunrise_native_build::game_uses;
 
-/// The surface export a fetched SDK holds.
+/// The surface export a fetched SDK holds. A schema this tool does not read names the two ways
+/// out: a build this tool reads, or the tool that SDK's release ships.
 pub(crate) fn surface_of(sdk: &PinnedSdk) -> Result<Surface, String> {
-    read_surface(&sdk.surface)
+    read_surface(sdk)?.map_err(|e| match e {
+        SurfaceError::Schema(_) => format!(
+            "{}: {e}. Pin the mod to a build this tool reads with `cargo sunrise-mod pin <build>`, or use the tool in sdk-{}",
+            sdk.surface.display(),
+            sdk.build
+        ),
+        _ => format!("{}: {e}", sdk.surface.display()),
+    })
 }
 
-/// A surface file read and checked.
-fn read_surface(path: &Path) -> Result<Surface, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Surface::read(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+/// A fetched SDK's surface export as this tool reads it: the outer error is the file's, the inner
+/// one the surface's.
+pub(crate) fn read_surface(sdk: &PinnedSdk) -> Result<Result<Surface, SurfaceError>, String> {
+    let bytes =
+        std::fs::read(&sdk.surface).map_err(|e| format!("{}: {e}", sdk.surface.display()))?;
+    Ok(Surface::read(&bytes))
 }
 
 /// What the scan of a mod folder found.

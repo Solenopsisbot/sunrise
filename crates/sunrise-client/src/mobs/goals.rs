@@ -1099,15 +1099,19 @@ impl Mob {
         if !p.alive || p.spectator {
             return false;
         }
-        // LivingEntity.getVisibilityPercent
-        let visibility = if scale {
-            w.player_visibility(p, self.id, p.visibility_percent(self.species()))
-        } else {
-            1.0
-        };
-        let dist = (range * visibility).max(2.0);
-        if self.distance_sqr(p.position) > dist * dist {
-            return false;
+        // `TargetingConditions.test` measures only `if (this.range > 0.0)`: the unranged
+        // `TargetingConditions.DEFAULT` reaches any distance.
+        if range > 0.0 {
+            // LivingEntity.getVisibilityPercent
+            let visibility = if scale {
+                w.player_visibility(p, self.id, p.visibility_percent(self.species()))
+            } else {
+                1.0
+            };
+            let dist = (range * visibility).max(2.0);
+            if self.distance_sqr(p.position) > dist * dist {
+                return false;
+            }
         }
         !check_sight || self.sees(w, Who::Player)
     }
@@ -1708,7 +1712,7 @@ impl MeleeAttack {
     }
     /// `FoxMeleeAttackGoal.checkAndPerformAttack`, which replaces the base method without
     /// calling it: when `canPerformAttack` holds, `resetAttackCooldown`, the strike, then
-    /// the bite `sound`. Sunrise's fox swings as well, as it did before this was split out.
+    /// the bite `sound`. It has no `swingForAttack`: a fox's strike doesn't swing (#4733).
     fn fox_check_and_perform_attack(
         &mut self,
         sound: &'static str,
@@ -1719,7 +1723,6 @@ impl MeleeAttack {
     ) {
         if self.can_perform_attack(m, who, t, cx.w) {
             self.reset_attack_cooldown(m);
-            m.swing();
             super::ai::do_hurt_target(m, who, cx);
             let at = [m.position.x, m.position.y, m.position.z];
             cx.events.push(MobEvent::Sound(sound, at, 1.0, 1.0));
@@ -2098,24 +2101,22 @@ impl Goal for NearestTarget {
                 let pos = Vec3::new(m.position.x, m.eye_y(), m.position.z);
                 let id = m.id;
                 let attacker = m.species();
-                let candidates: Vec<(u32, Vec3)> =
-                    cx.w.nearby(pos, range, move |s| {
-                        s.id != id
-                            && !s.playing_dead
-                            && !illager_spares(attacker, s)
-                            && match prey {
-                                Prey::Species(list) => list.contains(&s.species),
-                                Prey::Filter(f) => f(s),
-                                Prey::Player => false,
-                            }
-                    })
-                    .map(|s| (s.id, s.position))
-                    .collect();
-                for (cid, cpos) in candidates {
-                    if m.distance_sqr(cpos) > cx.w.reach_sqr(cid, m, range) {
+                for candidate in cx.w.nearby(pos, range, |s| {
+                    s.id != id
+                        && !s.playing_dead
+                        && !illager_spares(attacker, s)
+                        && match prey {
+                            Prey::Species(list) => list.contains(&s.species),
+                            Prey::Filter(f) => f(s),
+                            Prey::Player => false,
+                        }
+                }) {
+                    let cid = candidate.id;
+                    let distance_sqr = m.distance_sqr(candidate.position);
+                    if distance_sqr > cx.w.reach_sqr(cid, m, range) {
                         continue;
                     }
-                    if self.beyond_sqr.is_some_and(|d| m.distance_sqr(cpos) <= d) {
+                    if self.beyond_sqr.is_some_and(|d| distance_sqr <= d) {
                         continue;
                     }
                     if !m.sees(cx.w, Who::Mob(cid)) {
@@ -4758,6 +4759,70 @@ mod check_and_perform_attack_tests {
         });
         assert!(ran, "vanilla data is missing");
         assert_eq!(bites, [1, 0]);
+    }
+
+    /// Whether `test` of this module runs here: in the test process, it reruns `test` alone in
+    /// a fresh child process, asserts the child passed and returns false; in that child, true.
+    /// The prepared-resource world writes process-wide tables (the block palette, the item
+    /// tables), which no other test of the shared process may see.
+    fn in_fresh_process(test: &str) -> bool {
+        const CHILD: &str = "SUNRISE_TEST_MELEE_ATTACK_CHILD";
+        let module = module_path!().split_once("::").unwrap().1;
+        let name = format!("{module}::{test}");
+        if std::env::var_os(CHILD).is_some_and(|value| value == name.as_str()) {
+            return true;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([&name, "--exact", "--include-ignored", "--test-threads=1"])
+            .env(CHILD, &name)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "{name} failed in its own process:\n{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        false
+    }
+
+    /// `FoxMeleeAttackGoal.checkAndPerformAttack` has no `swingForAttack`: a fox's strike
+    /// resets the cooldown, hurts its target and bites, but doesn't swing (#4733). The world
+    /// is built in a fresh child process.
+    #[test]
+    #[ignore = "daily"]
+    fn a_foxs_strike_hurts_and_bites_without_a_swing() {
+        if !in_fresh_process("a_foxs_strike_hurts_and_bites_without_a_swing") {
+            return;
+        }
+        let mut outcome = None;
+        let ran = with_test_world(&[], |w, types| {
+            let kind = Arc::new(types.types["minecraft:fox"].clone());
+            let mut world = w.clone();
+            world.player = Some(test_player(Vec3::new(1.5, 64.0, 0.5)));
+            let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
+            m.ai.target = Some(Who::Player);
+            let mut goal = MeleeAttack::new(1.2, true).bite("entity.fox.bite");
+            let mut fixture = crate::health::TestLevel::new(0);
+            let mut events = Vec::new();
+            let mut cx = Cx {
+                w: &world,
+                level: &mut fixture.level(),
+                events: &mut events,
+            };
+            goal.tick(&mut m, &mut cx);
+            let hits = events
+                .iter()
+                .filter(|e| matches!(e, MobEvent::AttackPlayer(..)))
+                .count();
+            let bites = events
+                .iter()
+                .filter(|e| matches!(e, MobEvent::Sound("entity.fox.bite", ..)))
+                .count();
+            outcome = Some((goal.until_attack, hits, bites, m.ai.swinging));
+        });
+        assert!(ran, "prepared mob resources required");
+        assert_eq!(outcome, Some((20, 1, 1, false)));
     }
 }
 

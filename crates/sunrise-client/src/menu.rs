@@ -37,6 +37,8 @@ pub mod container_items;
 pub use container_items::fits_inside_container_items;
 mod click;
 pub use click::{ClickContinuation, SlotTake, apply_stacked_outcome};
+mod client_drops;
+pub use client_drops::DropSpamThrottler;
 mod storage;
 pub use storage::{MutationStamp, Snapshot};
 mod equip_movement;
@@ -796,6 +798,7 @@ impl Menu {
                 data: vec![0; data],
                 creative: false,
                 on_client: false,
+                drop_spam: None,
                 selected: 0,
                 drops: Vec::new(),
                 dropped: Vec::new(),
@@ -1557,6 +1560,21 @@ impl Menu {
     pub fn slot(&self, i: usize) -> Option<&ItemStack> {
         let s = self.state.slots[i];
         self.state.containers[s.container][s.index].as_ref()
+    }
+
+    /// The menu's own containers (`MAIN`, `GRID`, `RESULT`), in [`mod_api::MenuContainer`] order.
+    pub fn slot_containers(
+        &self,
+    ) -> (
+        &[Option<ItemStack>],
+        &[Option<ItemStack>],
+        &[Option<ItemStack>],
+    ) {
+        (
+            &self.state.containers[MAIN],
+            &self.state.containers[GRID],
+            &self.state.containers[RESULT],
+        )
     }
 
     /// Load an existing container slot without applying insertion limits.
@@ -4761,6 +4779,7 @@ pub(crate) mod tests {
                 links: Vec::new(),
                 asks_still_valid: crate::lan::menu::asks_still_valid(mod_type, registry_id),
                 opening_item: None,
+                slot_changed_seen: None,
             };
             menu.still_valid(context, &world, &guest)
         };
@@ -4830,6 +4849,7 @@ pub(crate) mod tests {
                 links: Vec::new(),
                 asks_still_valid: crate::lan::menu::asks_still_valid(Some(mod_type), "test:rules"),
                 opening_item: None,
+                slot_changed_seen: None,
             };
             menu.still_valid(context, &world, &guest)
         };

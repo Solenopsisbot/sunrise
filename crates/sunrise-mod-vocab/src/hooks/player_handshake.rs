@@ -6,7 +6,8 @@ pub trait Hooks {
     /// Runs once on the server thread. There is no player or profile yet.
     ///
     /// `requested_host` is untrusted text, including any suffix after a NUL. Each listener
-    /// sees the previous accepted rewrite; an allowed login keeps the final text verbatim.
+    /// sees the previous accepted rewrite; an allowed login keeps the final text verbatim,
+    /// and `PlayerRef::virtual_host` reports it up to its first NUL.
     /// The 255 UTF-16 code-unit limit from `ClientIntentionPacket` and
     /// `Utf8String.read` applies only to decoding, not to a listener's rewrite.
     /// `requested_port`, `protocol_version` and `peer_ip` are the handshake's own values: each

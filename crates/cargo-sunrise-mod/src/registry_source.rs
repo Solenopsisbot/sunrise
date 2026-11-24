@@ -1,144 +1,202 @@
-//! The reviewed source artifacts used by native builds and source releases.
-use crate::bounded;
+//! Library mods from the signed v2 registry index (sunrise-mods `docs/registry-v2.md`, "Reader
+//! rules"): the index is checked against the registry's key over its exact bytes, and each package
+//! against its size, SHA-256 and GitHub artifact attestation before a build reads it.
+use crate::{
+    bounded::{self, Symlinks},
+    check::require_release_signer,
+};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
-use sunrise_mod_package::index::{self, Index, Project, Trust, Version, native::Bundle};
+use sunrise_mod_package::index::{
+    self,
+    registry::builds::MAX_SIGNATURE,
+    v2::{Index, Project, Release},
+};
 
-#[derive(Default)]
+/// The registry's index key, published as `registry/index-key.pub` in sunrise-org/sunrise-mods.
+/// Built in, never fetched: a registry that serves another key can't sign for this tool.
+const KEY: &str = "RWTNJaFJ4AekHG/RgVrgmJpvy9B2EaeqbdSNuseKUx2XPxaOZkChLV0q";
+/// The highest serial this computer accepted, in the tool's cache: an older index is refused.
+const SERIAL: &str = "registry/v2-serial";
+
+type Fetch = dyn Fn(&str, u64) -> Result<Vec<u8>, String>;
+type Attest = dyn Fn(&[u8], [u8; 32], &Project, &Release) -> Result<(), String>;
+
 pub(crate) struct Registry {
-    /// Tests read the files from a folder, named by SHA-256, instead of downloading them.
-    #[cfg(test)]
-    pub(crate) files: Option<std::path::PathBuf>,
-    /// Source release jobs can require an author signature; dev builds also use reviewed unsigned rows.
-    pub(crate) signed_only: bool,
+    pub(crate) index: Index,
+    fetch: Box<Fetch>,
+    attest: Box<Attest>,
 }
 
 impl Registry {
-    pub(crate) fn read_index(&self) -> Result<Index, String> {
-        let url =
-            test_url("index.json").unwrap_or_else(|| sunrise_addresses::MOD_REGISTRY_INDEX.into());
-        let mut raw = String::new();
-        download(&url)?
-            .take(index::MAX_INDEX + 1)
-            .read_to_string(&mut raw)
-            .map_err(|e| format!("{url}: {e}"))?;
-        if raw.len() as u64 > index::MAX_INDEX {
-            return Err(format!("{url}: index exceeds its size limit"));
-        }
-        Index::parse(&raw).map_err(|e| format!("{url}: {e}"))
+    pub(crate) fn read(cache: &Path) -> Result<Self, String> {
+        let url = test_url().unwrap_or_else(|| sunrise_addresses::MOD_REGISTRY_INDEX.into());
+        let index = read_index(cache, &url, &download, KEY)?;
+        Ok(Self {
+            index,
+            fetch: Box::new(download),
+            attest: Box::new(attest),
+        })
     }
 
-    /// Reuse the verified download and its unpacked source. A cache key is a file identity, not
-    /// an eligibility decision: the current index's revocation and signature checks still run.
-    pub(crate) fn native_source(
+    /// A registry over a fixture index, with stand-ins for downloads and attestation checks.
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        index: Index,
+        fetch: impl Fn(&str, u64) -> Result<Vec<u8>, String> + 'static,
+        attest: impl Fn(&[u8], [u8; 32], &Project, &Release) -> Result<(), String> + 'static,
+    ) -> Self {
+        Self {
+            index,
+            fetch: Box::new(fetch),
+            attest: Box::new(attest),
+        }
+    }
+
+    /// The release's package, downloaded once into the cache and checked again on every use, so
+    /// an edited cache entry is refused. The caller has already skipped taken-down releases.
+    pub(crate) fn package(
         &self,
         cache: &Path,
-        index: &Index,
         project: &Project,
-        row: &Version,
-    ) -> Result<Bundle, String> {
-        let failed = |why: String| format!("{} {}: {why}", project.id, row.version);
-        // A selected mod version passed a semver constraint, and the index checked id and hash.
-        let parent = cache.join("registry").join(&project.id).join(&row.version);
-        let kept = parent.join(&row.file.sha256);
-        if let Some(revoked) = index.revoked(&project.id, &row.file.sha256) {
-            return Err(failed(format!("taken down: {}", revoked.reason)));
-        }
-        let checked = |dir: &Path| -> Result<Bundle, String> {
-            let archive = dir.join("package.smod");
-            let mut bundle = self.verify_native(index, project, row, &archive)?;
-            // Only listed files enter staging. Refuse edits to the unpacked cache rather than
-            // compiling bytes that weren't covered by the verified archive.
-            for (name, expected) in &mut bundle.files {
-                let path = dir.join("source").join(name);
-                let bytes =
-                    bounded::read_bytes(&path, expected.len() as u64, bounded::Symlinks::Refuse)?;
-                if *expected != bytes {
-                    return Err(format!(
-                        "{} differs from the verified source; clear this registry cache entry",
-                        path.display()
-                    ));
-                }
-                *expected = bytes;
-            }
-            Ok(bundle)
-        };
-        if kept.is_dir() {
-            return checked(&kept).map_err(failed);
-        }
-        fs::create_dir_all(&parent).map_err(|e| failed(e.to_string()))?;
-        let pending = tempfile::tempdir_in(&parent).map_err(|e| failed(e.to_string()))?;
-        let archive = pending.path().join("package.smod");
-        #[cfg(test)]
-        let folder = self.files.as_deref();
-        #[cfg(not(test))]
-        let folder: Option<&Path> = None;
-        let input: Box<dyn Read> = if let Some(files) = folder {
-            Box::new(
-                fs::File::open(files.join(&row.file.sha256)).map_err(|e| failed(e.to_string()))?,
+        release: &Release,
+    ) -> Result<PathBuf, String> {
+        let failed = |why: String| {
+            format!(
+                "{} {} (registry project {}): {why}",
+                project.mod_id, release.version, project.id
             )
-        } else {
-            let local = test_url(&format!("files/{}/{}", project.id, row.file.name));
-            download(local.as_deref().unwrap_or(&row.file.url)).map_err(failed)?
         };
-        io::copy(
-            &mut input.take(row.file.size + 1),
-            &mut fs::File::create(&archive).map_err(|e| failed(e.to_string()))?,
-        )
-        .map_err(|e| failed(e.to_string()))?;
-        let bundle = self
-            .verify_native(index, project, row, &archive)
-            .map_err(failed)?;
-        write_files(&pending.path().join("source"), &bundle.files).map_err(failed)?;
-        // A concurrent invocation may have installed the same verified artifact first.
-        if let Err(e) = fs::rename(pending.path(), &kept) {
-            if !kept.is_dir() {
+        let file = &release.file;
+        let parent = cache.join("registry").join(&project.id);
+        let kept = parent.join(&file.sha256);
+        let (archive, bundle) = (
+            kept.join("package.smod"),
+            kept.join("package.sigstore.json"),
+        );
+        if !kept.is_dir() {
+            fs::create_dir_all(&parent).map_err(|e| failed(e.to_string()))?;
+            let pending = tempfile::tempdir_in(&parent).map_err(|e| failed(e.to_string()))?;
+            for (url, limit, name) in [
+                (&file.url, file.size, "package.smod"),
+                (&file.attestation, index::MAX_FILE, "package.sigstore.json"),
+            ] {
+                let bytes = (self.fetch)(url, limit).map_err(failed)?;
+                fs::write(pending.path().join(name), bytes).map_err(|e| failed(e.to_string()))?;
+            }
+            // A concurrent invocation may have kept the same download first; both are checked.
+            if let Err(e) = fs::rename(pending.path(), &kept)
+                && !kept.is_dir()
+            {
                 return Err(failed(e.to_string()));
             }
-            return checked(&kept).map_err(failed);
         }
-        Ok(bundle)
-    }
-
-    fn verify_native(
-        &self,
-        index: &Index,
-        project: &Project,
-        row: &Version,
-        archive: &Path,
-    ) -> Result<Bundle, String> {
-        if index::check_file(index, project, row, archive)? != Trust::Verified && self.signed_only {
-            return Err("library source has no author signature".into());
+        let bytes = bounded::read_bytes(&archive, file.size, Symlinks::Refuse)
+            .map_err(|e| failed(e.into()))?;
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if bytes.len() as u64 != file.size || index::sha256(&bytes) != file.sha256 {
+            return Err(failed(format!(
+                "{} differs from the size and SHA-256 the index lists; delete the folder {}",
+                archive.display(),
+                kept.display()
+            )));
         }
-        let bundle = Bundle::read(archive)?;
-        if row.dependencies.is_none() && !bundle.manifest.dependencies.is_empty() {
-            return Err(
-                "the index omits the library's dependencies; rebuild the registry index".into(),
-            );
-        }
-        Ok(bundle)
+        let attestation = bounded::read_bytes(&bundle, index::MAX_FILE, Symlinks::Refuse)
+            .map_err(|e| failed(e.into()))?;
+        (self.attest)(&attestation, digest, project, release).map_err(failed)?;
+        Ok(archive)
     }
 }
 
-fn download(url: &str) -> Result<Box<dyn Read + Send + Sync>, String> {
+fn read_index(cache: &Path, url: &str, fetch: &Fetch, key: &str) -> Result<Index, String> {
+    let signed = fetch(url, index::MAX_INDEX + MAX_SIGNATURE as u64)?;
+    let index = Index::verify(&signed, key).map_err(|e| format!("{url}: {e}"))?;
+    let path = cache.join(SERIAL);
+    let last = match fs::read_to_string(&path) {
+        Ok(text) => Some(text.trim().parse::<u64>().map_err(|e| {
+            format!(
+                "{}: {e}; delete it to accept the live index",
+                path.display()
+            )
+        })?),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    if let Some(last) = last
+        && index.serial < last
+    {
+        return Err(format!(
+            "{url}: serial {} is older than {last}, the last one this computer accepted",
+            index.serial
+        ));
+    }
+    if last.is_none_or(|last| index.serial > last) {
+        // Replaced whole by a rename, so a stopped run never leaves a partial serial behind.
+        let folder = path.parent().expect("serial file in the cache");
+        fs::create_dir_all(folder)
+            .and_then(|()| tempfile::NamedTempFile::new_in(folder))
+            .and_then(|mut file| {
+                file.write_all(index.serial.to_string().as_bytes())?;
+                file.persist(&path).map_err(|e| e.error)?;
+                Ok(())
+            })
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(index)
+}
+
+/// The attestation must be GitHub's for this digest, from the project's registered repository and
+/// the exact shared-workflow ref the index approved for this release.
+fn attest(
+    bundle: &[u8],
+    digest: [u8; 32],
+    project: &Project,
+    release: &Release,
+) -> Result<(), String> {
+    let attested = sunrise_attestation::verify(
+        bundle,
+        digest,
+        sunrise_attestation::PUBLIC_GOOD_TRUSTED_ROOT,
+    )
+    .map_err(|e| format!("attestation: {e}"))?;
+    let attested = require_release_signer(attested, Some(project.repository.id))
+        .map_err(|e| format!("attestation: {e}"))?;
+    if attested.signer_workflow_ref != release.workflow {
+        return Err(format!(
+            "attestation: expected workflow {}, attestation names {}",
+            release.workflow, attested.signer_workflow_ref
+        ));
+    }
+    Ok(())
+}
+
+fn download(url: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
     sunrise_proxy::get(url, &[], None)
-        .map(|response| response.into_reader())
-        .map_err(|e| format!("{url}: {e}"))
+        .map_err(|e| format!("{url}: {e}"))?
+        .into_reader()
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{url}: {e}"))?;
+    if bytes.len() as u64 > limit {
+        return Err(format!("{url}: exceeds its {limit} byte limit"));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests;
 
-fn test_url(file: &str) -> Option<String> {
-    // Test the HTTP path with a local fixture without changing the published index's URL rules.
+fn test_url() -> Option<String> {
+    // A test points the index at a local address without changing the published one.
     #[cfg(debug_assertions)]
     if let Ok(base) = std::env::var("SUNRISE_MOD_REGISTRY_TEST_BASE") {
-        return Some(format!("{}/{file}", base.trim_end_matches('/')));
+        return Some(format!("{}/index.signed", base.trim_end_matches('/')));
     }
-    let _ = file;
     None
 }
 

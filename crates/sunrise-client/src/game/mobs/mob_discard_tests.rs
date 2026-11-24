@@ -6,6 +6,10 @@ use sunrise_core::nbt::Tag;
 #[test]
 #[ignore = "daily"]
 fn discarded_mob_leaves_selectors_and_saves_while_frozen() {
+    run_discarded_mob_leaves_selectors_and_saves_while_frozen();
+}
+
+pub(in crate::game) fn run_discarded_mob_leaves_selectors_and_saves_while_frozen() {
     let root = PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
     let settings = Settings::default();
     let loaded = load_resources(

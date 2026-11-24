@@ -237,6 +237,16 @@ pub(crate) fn layers(
             }
         }
     }
+    // A pack lists only files whose names are identifiers (`PathPackResources.listPath` skips
+    // and logs "Invalid path in pack"), so `TagLoader` never sees another name.
+    raw.retain(|id, _| {
+        let (namespace, path) = id.split_once(':').unwrap_or(("", id));
+        let valid = Identifier::from_parts(namespace, path).is_ok();
+        if !valid {
+            log::warn!("Sunrise: invalid {kind} tag name {id}: not an identifier, skipped");
+        }
+        valid
+    });
     Ok(raw)
 }
 
@@ -267,6 +277,33 @@ pub fn builtin_ids(root: &Path) -> io::Result<HashMap<String, HashSet<String>>> 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A tag file whose name is not an identifier (`Bad.json`) is skipped, as a pack never
+    /// lists it, so the valid tag beside it binds with its members and no invalid name binds.
+    #[test]
+    fn a_tag_file_name_that_is_not_an_identifier_is_skipped() {
+        let root = std::env::temp_dir().join(format!("sunrise-tag-names-{}", std::process::id()));
+        let dir = root.join("data/test/tags/item");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Bad.json"), r#"{"values":["minecraft:stick"]}"#).unwrap();
+        std::fs::write(dir.join("sticks.json"), r#"{"values":["minecraft:stick"]}"#).unwrap();
+        let overlay_files = [(
+            "tags/test:item/Worse".to_owned(),
+            vec![br#"{"values":["minecraft:stick"]}"#.to_vec()],
+        )];
+        let bound = load(
+            &root,
+            "item",
+            &crate::loot::PackOverlay::new(&overlay_files),
+            |id| id == "minecraft:stick",
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        let bound = bound.unwrap();
+        assert_eq!(
+            bound,
+            HashMap::from([("test:sticks".to_owned(), vec!["minecraft:stick".to_owned()])])
+        );
+    }
 
     #[test]
     fn removals_apply_in_layer_order_and_replace_drops_them() {

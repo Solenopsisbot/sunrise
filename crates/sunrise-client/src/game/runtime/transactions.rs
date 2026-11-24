@@ -31,7 +31,10 @@
 //! health and absorption, and the attribute modifier rows the effects own.
 //! An entity added inside one goes at an abort, one removed is only marked until the root
 //! commit, and mods hear of joins and leaves at the root commit (`transactions/entities.rs`).
-use super::{BlockEntity, BlockStateId, Dim, Game, machines::HopperState, maps::MapData};
+use super::{
+    BlockEntity, BlockStateId, Dim, Game, lan_mount_menu::MountClickWindow, machines::HopperState,
+    maps::MapData,
+};
 use mod_api::{
     __private::TransactionFrame, LevelRef, TransactionContext, TransactionLifecycle,
     TransactionScopeError,
@@ -43,6 +46,7 @@ use sunrise_client::{
     fast_hash::FxHashSet,
     items::ItemStack,
     living_attributes::ModifierChanges,
+    menu::QuickCraftDrag,
     mobs::{Mob, StoredEffect, finalize::EffectModifierUndo, gear::Gear},
     world::{BlockEntityExtras, ModifiedChunks, World},
 };
@@ -77,6 +81,15 @@ impl Drop for QuickMoveNotices<'_, '_> {
 }
 
 type Pos = (i32, i32, i32);
+
+/// A level-local save follows that level's block writes. A transaction save follows the
+/// dimension-keyed owner journal (e.g. an entity's equipment), even through a different level.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum SaveChunkScope {
+    Level,
+    Transaction,
+}
+
 /// The last pending value at this depth for a connection, menu generation and data index.
 type MenuDataJournal = BTreeMap<(u32, u64, usize), i32>;
 type ComposterRandoms =
@@ -228,7 +241,9 @@ impl OpenTransactions {
         modified: &mut ModifiedChunks,
     ) {
         if let Some(level) = entities::open_in(self, dim) {
-            level.save_chunks.insert((dim, chunk));
+            level
+                .save_chunks
+                .insert((dim, chunk, SaveChunkScope::Level));
         } else {
             modified.insert(chunk);
         }
@@ -420,6 +435,10 @@ pub(super) struct Level {
     menus: HashMap<u32, KeptMenus>,
     /// Drag, machine and preview state before a scoped default click.
     menu_clicks: HashMap<u64, KeptClick>,
+    /// The first drag state written in a guest's mount window.
+    mount_drags: HashMap<MountClickWindow, QuickCraftDrag>,
+    /// Mount window identities to reconcile once the outermost transaction has settled.
+    mount_replies: indexmap::IndexSet<MountClickWindow>,
     pub(super) menu_click_active: Option<u32>,
     /// Each native window's slots before the first write, by menu generation.
     native_menu_slots: HashMap<u64, Vec<Option<ItemStack>>>,
@@ -440,7 +459,7 @@ pub(super) struct Level {
     chunk_marks: HashMap<(i32, i32), sunrise_client::world::ChunkMark>,
     /// Chunks whose committed storage writes must be saved, in first-write order and in the
     /// levels written.
-    save_chunks: indexmap::IndexSet<(super::Dim, (i32, i32))>,
+    save_chunks: indexmap::IndexSet<(Dim, (i32, i32), SaveChunkScope)>,
     /// New map data and its reserved IDs. Neither enters the saved map table until root commit.
     pub(super) new_maps: BTreeMap<i32, MapData>,
     /// What the root commit does, in order.
@@ -601,6 +620,7 @@ struct KeptClick {
     conn: u32,
     drag: Option<(u8, Vec<usize>)>,
     craft: Option<sunrise_client::lan::menu::ModCraft>,
+    slot_changed_seen: Option<Vec<Option<ItemStack>>>,
     owned: Option<(u64, Box<sunrise_client::menu::Menu>)>,
     machine: Option<(i32, Box<sunrise_client::menu::Menu>)>,
     places: Option<super::native_menu_places::MenuSlotPlaces>,
@@ -649,6 +669,19 @@ pub(super) enum After {
         silent: bool,
     },
     GuestMenu(u32, Box<super::lan_crafting::GuestMenuEffects>),
+    /// Publish both the connection-local state and its packets together, never on abort.
+    PersonalSidebar(
+        u32,
+        Option<Box<sunrise_client::lan::scoreboard::SidebarContents>>,
+    ),
+    /// Equipment transitions from a mount menu, with distinct sound and game event positions.
+    MountEquipment {
+        dim: Dim,
+        id: u32,
+        at: [f64; 3],
+        sound: Option<(String, [f64; 3])>,
+        equips: bool,
+    },
     MenuClick(Box<super::lan_menus::MenuClickReply>),
     MenuPlacesNotice(u32, u128, i32),
     FurnaceMenu(Box<super::lan_crafting::FurnaceMenuEffects>),
@@ -1245,6 +1278,7 @@ impl<'g> Game<'g> {
         let guard = ClosingPhase { game: self, outer };
         let mut merchant_corrections = std::mem::take(&mut level.trades.refused_clicks);
         merchant_corrections.append(&mut level.trades.correct_on_abort);
+        let mount_replies = std::mem::take(&mut level.mount_replies);
         let departed = std::mem::take(&mut level.departed);
         guard
             .game
@@ -1273,6 +1307,7 @@ impl<'g> Game<'g> {
                 guard.game.resend_merchant_take(conn, window);
             }
         }
+        guard.game.settle_mount_replies(mount_replies);
     }
     /// What closing `level` does, with the closing phase already set.
     fn close_level(&mut self, mut level: Level, commit: bool) {
@@ -1286,6 +1321,7 @@ impl<'g> Game<'g> {
         if !commit {
             merchant_corrections.append(&mut level.trades.correct_on_abort);
         }
+        let mount_replies = std::mem::take(&mut level.mount_replies);
         let departed = std::mem::take(&mut level.departed);
         debug_assert_eq!(
             level.dimension,
@@ -1332,11 +1368,11 @@ impl<'g> Game<'g> {
                         .collect(),
                     ..Level::default()
                 };
-                level.save_chunks.retain(|&(dim, chunk)| {
-                    if dim != self.dim {
+                level.save_chunks.retain(|&(dim, chunk, scope)| {
+                    if dim != self.dim || scope == SaveChunkScope::Transaction {
                         return true;
                     }
-                    local.save_chunks.insert((dim, chunk));
+                    local.save_chunks.insert((dim, chunk, scope));
                     false
                 });
                 if let Some(owner) = entities::open_in(&mut self.transactions, self.dim) {
@@ -1422,6 +1458,9 @@ impl<'g> Game<'g> {
                 for (generation, kept) in level.menu_clicks {
                     outer.menu_clicks.entry(generation).or_insert(kept);
                 }
+                for (window, kept) in level.mount_drags {
+                    outer.mount_drags.entry(window).or_insert(kept);
+                }
                 for (generation, kept) in level.native_menu_slots {
                     outer.native_menu_slots.entry(generation).or_insert(kept);
                 }
@@ -1480,6 +1519,7 @@ impl<'g> Game<'g> {
                 self.resend_merchant_take(conn, window);
             }
         }
+        self.settle_mount_replies(mount_replies);
     }
     /// Aborts abandoned frames before the next operation can join them. Call only when
     /// there is no caller-owned frame; the tick start also uses this as a backstop.
@@ -2017,11 +2057,32 @@ impl<'g> Game<'g> {
                     conn,
                     drag: menu.drag.clone(),
                     craft: menu.craft.clone(),
+                    slot_changed_seen: menu.slot_changed_seen.clone(),
                     owned: owner.and_then(|owner| owner.owned_menu.clone()),
                     machine: owner.and_then(|owner| owner.crafting.machine.as_ref().cloned()),
                     places: owner.and_then(|owner| owner.slot_places.clone()),
                 }
             });
+    }
+
+    pub(super) fn journal_mount_drag(&mut self, window: MountClickWindow, before: QuickCraftDrag) {
+        if let Some(level) = self.transactions.last_mut() {
+            level.mount_drags.entry(window).or_insert(before);
+        }
+    }
+
+    /// On both commit and abort, defer a window's reply if any storage remains tentative.
+    pub(super) fn settle_mount_replies(
+        &mut self,
+        replies: impl IntoIterator<Item = MountClickWindow>,
+    ) {
+        if let Some(level) = self.transactions.last_mut() {
+            level.mount_replies.extend(replies);
+        } else {
+            for window in replies {
+                self.send_settled_mount_reply(window);
+            }
+        }
     }
 
     /// Keeps entity `id`'s inventory as it is, if a transaction is open and hasn't yet.
@@ -2237,11 +2298,15 @@ impl<'g> Game<'g> {
                 .or_insert(old);
         }
     }
-    /// Mark a written chunk unsaved at root commit, without issuing any notice.
-    pub(super) fn journal_chunk_save(&mut self, chunk: (i32, i32)) {
+    /// Mark a written chunk unsaved at commit, without issuing any notice.
+    pub(super) fn journal_chunk_save(&mut self, chunk: (i32, i32), scope: SaveChunkScope) {
         let dim = self.dim;
-        if let Some(level) = entities::open_in(&mut self.transactions, self.dim) {
-            level.save_chunks.insert((dim, chunk));
+        let level = match scope {
+            SaveChunkScope::Level => entities::open_in(&mut self.transactions, dim),
+            SaveChunkScope::Transaction => self.transactions.last_mut(),
+        };
+        if let Some(level) = level {
+            level.save_chunks.insert((dim, chunk, scope));
         }
     }
     /// Queue a reusable interaction effect for the outermost successful commit.
@@ -2380,6 +2445,31 @@ impl<'g> Game<'g> {
                 }
             }
             After::GuestMenu(conn, effects) => self.publish_guest_menu_effects(conn, *effects),
+            After::PersonalSidebar(conn, contents) => {
+                if contents.is_some() {
+                    self.load_scoreboard();
+                }
+                let board = &self.score.board;
+                if let Some(host) = &mut self.lan {
+                    host.hub.update_guest(conn, |guest| {
+                        guest.set_personal_sidebar(board, contents.map(|contents| *contents));
+                    });
+                }
+            }
+            After::MountEquipment {
+                dim,
+                id,
+                at,
+                sound,
+                equips,
+            } => {
+                let _ = self.with_effect_level(dim, |game| {
+                    if let Some((sound, center)) = sound {
+                        game.audio.play(&sound, Some(center), 1.0, 1.0);
+                    }
+                    game.mob_equip_event(id, at, equips);
+                });
+            }
             After::MenuClick(reply) => self.publish_menu_click(*reply),
             After::MenuPlacesNotice(conn, uuid, window) => {
                 self.queue_menu_places_notice(conn, uuid, window);
@@ -2558,9 +2648,42 @@ impl<'g> Game<'g> {
         }
     }
 
+    /// What the mod block entity at `pos` held before a committed transaction that kept
+    /// `block_entities` and `slots`: its kept entity, or the live items with the kept slots put
+    /// back. `None` when the transaction kept nothing there.
+    fn committed_block_items_before(
+        &self,
+        block_entities: &HashMap<Pos, Kept>,
+        slots: &HashMap<(Pos, usize), KeptSlot>,
+        pos: Pos,
+    ) -> Option<Vec<Option<ItemStack>>> {
+        #[cfg(test)]
+        super::slot_changes::probe::snapshot();
+        if let Some(kept) = block_entities.get(&pos) {
+            return match kept.entity.as_ref() {
+                Some(BlockEntity::Mod(entity)) => Some(entity.items.clone()),
+                _ => None,
+            };
+        }
+        let Some(BlockEntity::Mod(entity)) = self.world.block_entities.get(&pos) else {
+            return None;
+        };
+        let mut before = entity.items.clone();
+        let mut patched = false;
+        for (&(slot_pos, slot), kept) in slots {
+            if slot_pos == pos {
+                if before.len() <= slot {
+                    before.resize(slot + 1, None);
+                }
+                before[slot] = kept.stack.clone();
+                patched = true;
+            }
+        }
+        patched.then_some(before)
+    }
     fn root_commit(&mut self, mut level: Level) {
         // Storage is final. Publish save marks before any callback can unwind or start a save.
-        for (dim, chunk) in level.save_chunks {
+        for (dim, chunk, _) in level.save_chunks {
             let world = if dim == self.dim {
                 Some(&mut self.world)
             } else {
@@ -2785,6 +2908,36 @@ impl<'g> Game<'g> {
                 guests.any(|g| g.placed && g.conn == *conn && g.craft_grid != kept.craft_grid);
             if changed {
                 self.guest_craft_result(*conn);
+            }
+        }
+        // `menu_slot_changed` for the open mod menus whose storage this transaction changed: one
+        // batch per menu, owned menus by ascending generation, then block-backed menus by
+        // ascending position. A touched block costs one lookup in the open-menu index unless a
+        // menu is open on it; only then is anything collected or copied.
+        if mod_api::__private::has_part_hook(mod_api::HookId::MenuSlotChanged) {
+            let owned = std::mem::take(&mut level.native_menu_slots);
+            let mut owned_generations: Vec<_> = owned.into_iter().collect();
+            owned_generations.sort_by_key(|(generation, _)| *generation);
+            for (generation, before) in owned_generations {
+                self.notify_owned_menu_slot_changed(generation, &before);
+            }
+            let mut viewed = Vec::new();
+            if let Some(host) = self.lan.as_ref() {
+                let touched = level.block_entities.keys().copied();
+                for pos in touched.chain(level.slots.keys().map(|&(pos, _)| pos)) {
+                    if super::slot_changes::block_menu_viewed(&host.hub.guests, pos)
+                        && !viewed.contains(&pos)
+                    {
+                        viewed.push(pos);
+                    }
+                }
+            }
+            viewed.sort_unstable();
+            for pos in viewed {
+                let (kept, slots) = (&level.block_entities, &level.slots);
+                self.notify_block_menu_slot_changed(pos, |game| {
+                    game.committed_block_items_before(kept, slots, pos)
+                });
             }
         }
         for (pos, kept) in level.block_entities {
@@ -3043,6 +3196,9 @@ impl<'g> Game<'g> {
                 }
             });
         }
+        for (window, drag) in level.mount_drags {
+            self.restore_mount_drag(window, drag);
+        }
         if let Some(host) = self.lan.as_mut() {
             for ((conn, owner), kept) in level.stations {
                 if let Some(menus) = host.menus.get_mut(&conn)
@@ -3064,6 +3220,7 @@ impl<'g> Game<'g> {
                         let menu = g.menu.as_mut().unwrap();
                         menu.drag = kept.drag;
                         menu.craft = kept.craft;
+                        menu.slot_changed_seen = kept.slot_changed_seen;
                     });
                     let owner = host.menus.entry(kept.conn).or_default();
                     owner.owned_menu = kept.owned;

@@ -143,7 +143,7 @@ mod tick;
 mod timeline;
 mod update;
 pub use update::BlockWrite;
-mod weather;
+pub mod weather;
 
 #[cfg(test)]
 #[path = "tests/connections.rs"]

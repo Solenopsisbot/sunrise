@@ -221,10 +221,11 @@ impl Game<'_> {
 
     /// Only enabled LOD worlds extend the renderer's range, never simulation.
     pub(super) fn terrain_distance(&self) -> i32 {
+        let distance = self.effective_render_distance();
         if self.lod.is_some() {
-            self.streaming.radius.max(self.lod_distance() as i32)
+            distance.max(self.lod_distance() as i32)
         } else {
-            self.streaming.radius
+            distance
         }
     }
 
@@ -262,8 +263,10 @@ impl Game<'_> {
             // A new renderer starts with the vanilla column.
             renderer.clear_sections(self.world.layout());
         }
-        // And has no wall for the world border.
+        // And has no wall for the world border. Its sections' sources are kept as the meshes
+        // on their way carry them.
         self.border_renderer.invalidate();
+        renderer.keep_pack_sources(self.streaming.shader_pack);
         self.renderer = Some(renderer);
         self.forget_atlas_slots();
         if !world_kept {

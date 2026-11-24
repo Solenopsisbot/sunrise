@@ -113,14 +113,8 @@ fn pull_request_url(origin: &str, base: &str, head: &str) -> Option<String> {
 
 /// The registered package this release is for: origin's repository, found by its numeric GitHub ID
 /// (a name can be reused after a rename), at exactly this package path, with the project record's
-/// mod ID and kind.
-fn registered(
-    fetch: Fetch<'_>,
-    origin: &str,
-    path: &str,
-    mod_id: &str,
-    kind: &str,
-) -> Result<(), String> {
+/// mod ID. Returns the project's registered kind.
+fn registered(fetch: Fetch<'_>, origin: &str, path: &str, mod_id: &str) -> Result<String, String> {
     let name = github_name(origin).ok_or(NOT_REGISTERED)?;
     let url = format!("https://api.github.com/repos/{name}");
     let text = fetch(&url)?.ok_or(NOT_REGISTERED)?;
@@ -141,12 +135,12 @@ fn registered(
         kind: registered_kind,
     } = toml::from_str(&registry_file(fetch, &record)?)
         .map_err(|e| format!("registry/{record}: {e}"))?;
-    if registered_id != mod_id || registered_kind != kind {
+    if registered_id != mod_id {
         return Err(format!(
-            "this package is registered as {registered_kind} `{registered_id}`, but its manifest makes it {kind} `{mod_id}`"
+            "this package is registered as `{registered_id}`, but its manifest's id is `{mod_id}`"
         ));
     }
-    Ok(())
+    Ok(registered_kind)
 }
 
 fn workflow(fetch: Fetch<'_>) -> Result<String, String> {
@@ -693,7 +687,12 @@ fn release(
     } else {
         "mod"
     };
-    registered(fetch, &origin, &project.path, &project.manifest.id, kind)?;
+    let registered_kind = registered(fetch, &origin, &project.path, &project.manifest.id)?;
+    if registered_kind != kind {
+        println!(
+            "This release makes the project a {kind} (it is registered as a {registered_kind}): the registry's pull request for it changes the project's kind and removes its earlier releases."
+        );
+    }
     let version = next_version(&project.manifest.version, requested)?;
     let tag = format!("{}v{version}", project.prefix);
     let tag_ref = format!("refs/tags/{tag}");

@@ -266,6 +266,9 @@ impl<'a> Reader<'a> {
     pub fn read_int(&mut self) -> CmdResult<i32> {
         self.number("int")
     }
+    pub fn read_long(&mut self) -> CmdResult<i64> {
+        self.number("long")
+    }
     pub fn read_double(&mut self) -> CmdResult<f64> {
         self.number("double")
     }

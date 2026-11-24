@@ -1,7 +1,7 @@
 id = "fnr_lower"
 name = "Function replacement check: a function below the game crate"
 version = "0.1.0"
-description = "fn-replace: rows on listed functions below the game crate (sunrise-client-lib, sunrise-mod-render), each copied into its own patch crate"
+description = "fn-replace: rows on listed functions below the game crate (sunrise-client-lib, sunrise-client-render, sunrise-mod-render, sunrise-world), each copied into its own patch crate"
 authors = []
 api = "0.2"
 side = "both"
@@ -76,6 +76,23 @@ bindings = [
     { name = "m", ty = "&Mob", value = "m" },
     { name = "left", ty = "bool", value = "left" },
 ]
+
+# A HEAD on a player's own move (`LocalPlayer.move`), where every travel branch hands the
+# movement before collision. The dedicated server moves no player here: the build is the check.
+[[native.mixin]]
+id = "self_move"
+target = "sunrise_client_lib::motion::MotionWorld<'_, '_, '_>::move_self"
+kind = "HEAD"
+helper = "src/mixins/self_move.rs"
+
+# A cancellable HEAD on the particle engine's ordinary queue (`ParticleEngine.add`), in
+# sunrise-client-render. The dedicated server adds no particle: the build is the check.
+[[native.mixin]]
+id = "particle_push"
+target = "sunrise_client_render::particles::ParticleEngine::push"
+kind = "HEAD"
+cancellable = true
+helper = "src/mixins/particle_push.rs"
 
 # A cancellable HEAD that draws `right_arm` of the player layer in two segments, bent at the elbow
 # by the angle the `pose` row stored on the part's `Poses`; any other part goes on to the game's own
@@ -178,3 +195,26 @@ kind = "HEAD"
 cancellable = true
 helper = "src/mixins/sun_burn.rs"
 bindings = [{ name = "m", ty = "&Mob", value = "&*m" }]
+
+# RETURNs at the weather's boundaries, where a Java mod keeps a level dry with mixins on
+# `Level.precipitationAt` (answering `NONE`) and `ServerLevel.tickPrecipitation` (sunrise-org/sunrise#4985).
+# Each keeps the function's answer: the build is the check.
+[[native.mixin]]
+id = "precipitation"
+target = "sunrise_world::level::weather::precipitation_at"
+kind = "RETURN"
+helper = "src/mixins/precipitation.rs"
+bindings = [
+    { name = "value", ty = "PrecipitationKind", value = "$value" },
+    { name = "pos", ty = "BlockPos", value = "pos" },
+]
+
+[[native.mixin]]
+id = "tick_precipitation"
+target = "sunrise_world::level::weather::Behaviours::tick_precipitation"
+kind = "RETURN"
+helper = "src/mixins/tick_precipitation.rs"
+bindings = [
+    { name = "value", ty = "()", value = "$value" },
+    { name = "pos", ty = "BlockPos", value = "pos" },
+]

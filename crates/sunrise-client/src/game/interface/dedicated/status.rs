@@ -160,14 +160,17 @@ impl Game<'_> {
                 .iter()
                 .filter(|g| g.participates_online())
                 .map(|g| {
-                    player_status(
+                    let mut status = player_status(
                         &g.name,
                         g.uuid,
                         g.ip_address(),
                         g.latency.load(Ordering::Relaxed),
                         &g.dimension,
                         g.position,
-                    )
+                    );
+                    // Charged bytes held for transmission, including packet bookkeeping.
+                    status["pending_send_bytes"] = json!(g.sender.pending.load(Ordering::Relaxed));
+                    status
                 })
                 .collect();
             (players, h.hub.lan.shared.max_players())

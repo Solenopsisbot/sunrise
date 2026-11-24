@@ -142,7 +142,8 @@ python3 tools/pr_ready.py --base upstream/main   # or origin/main if you work on
 ```
 
 It looks at what your branch changes and runs what matters: rustfmt, clippy with warnings denied, the tests of the
-crates you touched (and the launcher's), generated files, `Cargo.lock` and the Python tests. It runs the
+crates you touched (and the launcher's), generated files, `Cargo.lock` and the Python tests (one test file per
+worker; `--serial-python` runs them in one process, as CI does). It runs the
 vanilla harnesses locally only when your branch changes a harness, an oracle, a probe or the runner; otherwise it
 lists the ones your change can affect. The daily checks the automatic harnesses after the merge. `--harnesses` runs them on your
 machine anyway, and a change to mod content, assets, blocks or items also runs the `#[ignore]`d content-root tests;

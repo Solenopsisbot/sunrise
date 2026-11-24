@@ -39,6 +39,11 @@ impl<'a> StructureInputs<'a> {
             bindings,
         }
     }
+    /// The bundle's template pool `name`: `None` for one it lacks or one left
+    /// out because an element failed to decode.
+    pub fn pool(&self, name: &str) -> Option<Arc<super::jigsaw::Pool>> {
+        self.pools.get(name, self.resources, self.bindings)
+    }
     /// `JigsawPlacement.addPieces` from the bundle's template pools with the
     /// type's own decoded settings, as a NeoForge structure type calls it from
     /// its own `findGenerationPoint`: [`assemble`] with `config`'s depth and

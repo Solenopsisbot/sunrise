@@ -54,6 +54,7 @@ fn mods_replace_and_cancel_received_chat() {
                 game.options.execution_role = ExecutionRole::Client;
                 let (client, _server) = Pipe::pair();
                 game.connect_local(client, "ChatTest").unwrap();
+                game.remote.as_mut().unwrap().has_logical_player = true;
                 let lines = |game: &crate::game::Game| -> Vec<String> {
                     let chat = &game.remote.as_ref().unwrap().chat;
                     chat.iter().map(|(line, _)| line.clone()).collect()

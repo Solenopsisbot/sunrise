@@ -27,7 +27,7 @@ use {
     super::{
         StructureResources,
         jigsaw::{
-            JigsawConfig, JigsawContext, PlaceFeature, PoolPiece, Pools, Projection,
+            JigsawConfig, JigsawContext, PlaceFeature, PoolPiece, Pools, Projection, Site,
             lay_out_children, place_start,
         },
         legacy::{LegacyPiece, PieceContext},
@@ -1789,28 +1789,28 @@ pub fn place_in_chunk<W: FeatureWorld + PlacementContext, R: RandomSource + 'sta
     let center_box = first.bounding_box();
     let center = center_box.center();
     let reference = [center[0], center_box.min[1], center[2]];
+    let chunk = ChunkPos::new(chunk_box.min[0] >> 4, chunk_box.min[2] >> 4);
+    let mut site = Site {
+        world,
+        resources,
+        blocks,
+        chunk_box,
+        place_feature,
+    };
     for piece in &start.pieces {
         if piece.bounding_box().intersects(&chunk_box) {
             match piece {
                 Piece::Pool(p) => {
-                    p.place(
-                        world,
-                        resources,
-                        random,
-                        chunk_box,
-                        reference,
-                        false,
-                        place_feature,
-                    )?;
+                    p.place(&mut site, random, reference, false)?;
                 }
                 Piece::Legacy(p) => {
                     let mut context = PieceContext {
-                        world,
+                        world: &mut site,
                         resources,
                         blocks,
                         random,
                         chunk_box,
-                        chunk: ChunkPos::new(chunk_box.min[0] >> 4, chunk_box.min[2] >> 4),
+                        chunk,
                         reference,
                     };
                     p.post_process(&mut context)?;
@@ -1821,12 +1821,12 @@ pub fn place_in_chunk<W: FeatureWorld + PlacementContext, R: RandomSource + 'sta
     if let Piece::Legacy(p) = first {
         let boxes: Vec<BoundingBox> = start.pieces.iter().map(Piece::bounding_box).collect();
         let mut context = PieceContext {
-            world,
+            world: &mut site,
             resources,
             blocks,
             random,
             chunk_box,
-            chunk: ChunkPos::new(chunk_box.min[0] >> 4, chunk_box.min[2] >> 4),
+            chunk,
             reference,
         };
         p.after_place(&mut context, &boxes)?;

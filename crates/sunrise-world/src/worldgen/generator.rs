@@ -1807,6 +1807,8 @@ pub(super) struct WorkerState {
     /// Decorate with structure pieces only (for structure parity checks).
     pub(super) structures_only: bool,
     pub(super) structure_mobs: Option<Arc<dyn StructureMobs>>,
+    /// The generator's published biome keys, for mod features.
+    pub(super) mod_biome_keys: super::mod_features::ModBiomeKeys,
     /// The world's surface rule compiled once for this worker's chunks: a
     /// `CompiledSurfaceRule` of the pipeline's random.
     surface_rule: Option<Box<dyn Any + Send>>,
@@ -2687,8 +2689,15 @@ pub struct OverworldGenerator {
     /// The noise range the settings asked for and the build height's part
     /// of it that generates, when they differ.
     noise_clamped: Option<(NoiseSettings, NoiseSettings)>,
+    /// What its workers' mod features answer `biome` with.
+    mod_biome_keys: super::mod_features::ModBiomeKeys,
 }
 impl OverworldGenerator {
+    /// The biome keys its workers' mod features answer with, which the game publishes for each
+    /// data load of the world (a worker reads the current snapshot when it decorates).
+    pub fn mod_biome_keys(&self) -> &super::mod_features::ModBiomeKeys {
+        &self.mod_biome_keys
+    }
     /// Install before workers run, so every cache miss can consult the save before generation.
     pub fn set_saved_starts(&self, source: Arc<SavedStructureStarts>) {
         self.pipeline.set_saved_starts(source);
@@ -2853,6 +2862,7 @@ impl OverworldGenerator {
         Ok(Self {
             pipeline,
             noise_clamped,
+            mod_biome_keys: Default::default(),
         })
     }
     pub fn data(&self) -> &Arc<GeneratorData> {
@@ -2923,6 +2933,7 @@ impl OverworldGenerator {
                 timings: StageTimings::default(),
                 structures_only: false,
                 structure_mobs: None,
+                mod_biome_keys: self.mod_biome_keys.clone(),
                 heights: HashMap::new(),
                 surface_rule: None,
             },
@@ -3756,6 +3767,86 @@ mod tests {
         );
     }
 
+    /// A structure piece places a configured feature with no modifiers (as
+    /// `/place feature` does) and a placed feature, both by id from the data
+    /// pack; an id the pack lacks places nothing.
+    #[test]
+    #[ignore = "daily"]
+    fn a_structure_piece_places_configured_and_placed_features_by_id() {
+        use super::super::{
+            feature::FeatureWorld,
+            generator_decoration::Decoration,
+            placement::{PlacementContext, PlacementQueryError},
+            structure::jigsaw::FeatureKey,
+        };
+        use std::collections::BTreeMap;
+        use std::convert::Infallible;
+        use sunrise_core::random::LegacyRandom;
+
+        struct World(BTreeMap<[i32; 3], BlockStateId>);
+        impl FeatureWorld for World {
+            type Error = Infallible;
+            fn block(&mut self, p: [i32; 3]) -> Result<BlockStateId, Infallible> {
+                Ok(self.0.get(&p).copied().unwrap_or(BlockStateId(0)))
+            }
+            fn set_block(
+                &mut self,
+                p: [i32; 3],
+                state: BlockStateId,
+                _: i32,
+            ) -> Result<bool, Infallible> {
+                self.0.insert(p, state);
+                Ok(true)
+            }
+        }
+        impl PlacementContext for World {
+            fn generation(&self) -> super::super::anchor::WorldGenerationContext {
+                super::super::anchor::WorldGenerationContext::new(-64, 384, 63)
+            }
+            fn min_y(&mut self) -> Result<i32, PlacementQueryError> {
+                Ok(-64)
+            }
+            fn height(
+                &mut self,
+                _: HeightmapType,
+                _: i32,
+                _: i32,
+            ) -> Result<i32, PlacementQueryError> {
+                Err(PlacementQueryError::Unavailable)
+            }
+            fn block_survives(
+                &mut self,
+                _: BlockStateId,
+                _: [i32; 3],
+            ) -> Result<bool, PlacementQueryError> {
+                Ok(true)
+            }
+        }
+
+        let data = prepared_data().expect("prepared resources");
+        let plains = ResolvedBiomeSource::Fixed(super::super::biome_source::FixedBiomeSource {
+            biome: "minecraft:plains".into(),
+        });
+        let decoration = Decoration::new(&data, &plains)
+            .unwrap()
+            .expect("decoration");
+        let pumpkin = data.registry().default_state("minecraft:pumpkin").unwrap();
+        let mut world = World(BTreeMap::new());
+        let mut random = LegacyRandom::new(5);
+        let mut place = |feature, pos| {
+            decoration
+                .place_piece_feature(&mut world, &mut random, feature, pos)
+                .unwrap()
+        };
+        assert!(place(
+            FeatureKey::Configured("minecraft:pumpkin"),
+            [3, 70, 4]
+        ));
+        assert!(!place(FeatureKey::Configured("test:missing"), [0, 70, 0]));
+        assert!(!place(FeatureKey::Placed("test:missing"), [0, 70, 0]));
+        assert_eq!(world.0, BTreeMap::from([([3, 70, 4], pumpkin)]));
+    }
+
     /// Seed 1234's strongholds where vanilla 26.3 puts them
     /// (VanillaStructureStartOracle with SUNRISE_RINGS). Each search sampled
     /// its quarts through fresh resolvers, which broke climate ties their own
@@ -4029,6 +4120,7 @@ mod tests {
                 .expect("pipeline"),
             ),
             noise_clamped: None,
+            mod_biome_keys: Default::default(),
         };
         let contents = |chunk: &ProtoChunk| {
             let (x0, z0) = (chunk.position().x * 16, chunk.position().z * 16);
@@ -4108,6 +4200,7 @@ mod tests {
         let generator = OverworldGenerator {
             pipeline: pipeline.clone(),
             noise_clamped: None,
+            mod_biome_keys: Default::default(),
         };
         let barrier = std::sync::Barrier::new(6);
         let pos = ChunkPos::new(11, -11); // ancient city for this seed

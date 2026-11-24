@@ -918,10 +918,12 @@ impl Game<'_> {
             props.enforce_secure_profile && props.online_mode,
             || {
                 let discovery = profiles::discovery_url();
-                profiles::fetch_profile_key_keys(&discovery).unwrap_or_else(|e| {
-                    ::log::error!("{e}");
-                    Vec::new()
-                })
+                profiles::fetch_profile_key_keys(&discovery)
+                    .map(|keys| keys.player_certificate_keys)
+                    .unwrap_or_else(|e| {
+                        ::log::error!("{e}");
+                        Vec::new()
+                    })
             },
         ));
         log(

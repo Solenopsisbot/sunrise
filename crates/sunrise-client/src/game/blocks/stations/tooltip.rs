@@ -114,7 +114,7 @@ impl PreparedTooltipItem {
 
 /// Outcome of gathering and preparing an item's tooltip components before `render_tooltip_pre`.
 pub(in crate::game) enum GatheredTooltip {
-    /// Gathered and prepared components, with text already split in the wrap font.
+    /// Gathered and prepared components, with any Gather text wrapping already applied.
     Ready(Vec<PreparedTooltipItem>),
     /// A `render_tooltip_gather_components` listener explicitly returned `Flow::Cancel`.
     Cancelled,
@@ -327,56 +327,53 @@ impl Game<'_> {
         mouse_x: i32,
         screen: (f32, f32),
     ) -> GatheredTooltip {
-        let gather_listened =
-            mod_api::__private::listened(mod_api::HookId::RenderTooltipGatherComponents);
         let raw_image = self.resolve_raw_tooltip_image(stack);
-        let item_font = self.item_tooltip_font(stack);
-        let item_font_str = crate::game::host::draw::font_id_str(&item_font);
-        let font = &self.gui.atlas.font;
 
-        // Build an initial mod-API snapshot for Gather only when listeners are attached. If any
-        // engine line or vanilla bundle cannot convert across the local API boundary, skip Gather and
-        // render the unmodified engine content directly so no line or bundle is silently dropped.
-        let mut vanilla_bundle_snapshot = None;
-        let api_elements = if gather_listened {
-            let mut snapshot = Vec::with_capacity(lines.len() + usize::from(raw_image.is_some()));
-            let mut convertible = true;
+        // If the snapshot cannot cross the mod API, skip Gather and keep the engine content.
+        let gather_input = || {
+            let api_stack = stack
+                .try_into_api()
+                .map_err(|error| {
+                    log::warn!("mod render_tooltip_gather_components stack refused: {error:?}");
+                })
+                .ok()?;
+            let mut elements = Vec::with_capacity(lines.len() + usize::from(raw_image.is_some()));
             for (text, color) in &lines {
-                match text.try_into_api() {
-                    Ok(api_text) => snapshot.push(TooltipElement::Text(api_text, *color)),
-                    Err(_) => {
-                        convertible = false;
-                        break;
-                    }
-                }
+                let api_text = text
+                    .try_into_api()
+                    .map_err(|error| {
+                        log::warn!("mod render_tooltip_gather_components text refused: {error:?}");
+                    })
+                    .ok()?;
+                elements.push(TooltipElement::Text(api_text, *color));
             }
-            if convertible {
-                match &raw_image {
-                    Some(RawTooltipImage::Mod(component)) => {
-                        let index = usize::from(!snapshot.is_empty());
-                        snapshot.insert(index, TooltipElement::Component(component.clone()));
-                    }
-                    Some(RawTooltipImage::VanillaBundle) => match stack.try_into_api() {
-                        Ok(api_stack) => {
-                            let bundle = mod_api::TooltipComponent::bundle(api_stack);
-                            let index = usize::from(!snapshot.is_empty());
-                            snapshot.insert(index, TooltipElement::Component(bundle.clone()));
-                            vanilla_bundle_snapshot = Some(bundle);
-                        }
-                        Err(_) => convertible = false,
-                    },
-                    None => {}
+            let mut bundle_snapshot = None;
+            let component = match &raw_image {
+                Some(RawTooltipImage::Mod(component)) => Some(component.clone()),
+                Some(RawTooltipImage::VanillaBundle) => {
+                    let bundle = mod_api::TooltipComponent::bundle(api_stack.clone());
+                    bundle_snapshot = Some(bundle.clone());
+                    Some(bundle)
                 }
+                None => None,
+            };
+            if let Some(component) = component {
+                elements.insert(
+                    usize::from(!elements.is_empty()),
+                    TooltipElement::Component(component),
+                );
             }
-            convertible.then_some(snapshot)
-        } else {
-            None
+            Some((api_stack, elements, bundle_snapshot))
         };
-
-        if let Some(mut elements) = api_elements {
+        if mod_api::__private::enabled_listened(mod_api::HookId::RenderTooltipGatherComponents)
+            && let Some((api_stack, mut elements, vanilla_bundle_snapshot)) = gather_input()
+        {
+            let item_font = self.item_tooltip_font(stack);
+            let item_font_str = crate::game::host::draw::font_id_str(&item_font);
+            let font = &self.gui.atlas.font;
             let (mut max_width, mut cancel) = (-1, false);
             self.native_render_tooltip_gather_components(
-                stack,
+                &api_stack,
                 screen.0 as i32,
                 screen.1 as i32,
                 &mut elements,
@@ -449,21 +446,8 @@ impl Game<'_> {
             return GatheredTooltip::Ready(out);
         }
 
-        // Fast / unconvertible-snapshot engine path: no Gather listeners ran, so preserve every
-        // engine text line and vanilla bundle directly without API round-trips.
-        let resolved: Vec<(sunrise_client::text::Text, u32)> = lines
-            .into_iter()
-            .map(|(text, color)| (text.resolve_legacy(), color))
-            .collect();
-        let tooltip_text_width = resolved
-            .iter()
-            .map(|(text, _)| font.width_formatted_with_font(text, &item_font_str))
-            .chain(raw_image.is_some().then_some(0))
-            .max()
-            .unwrap_or(0);
-        let (wrap_width, needs_wrap) =
-            wrap_tooltip_width(tooltip_text_width, mouse_x, screen.0 as i32, -1);
-        let wrap = needs_wrap.then_some(wrap_width);
+        // GuiGraphicsExtractor.setTooltipForNextFrame keeps each vanilla item line intact.
+        // With no Gather dispatch, skip NeoForge wrapping as well as the API round-trip.
         let prepared_image = match raw_image
             .map(|image| match image {
                 RawTooltipImage::VanillaBundle => self.prepare_bundle_tooltip(Cow::Borrowed(stack)),
@@ -474,23 +458,15 @@ impl Game<'_> {
             Ok(prepared) => prepared,
             Err(err) => return GatheredTooltip::PrepareError(err),
         };
-        let mut out = Vec::with_capacity(resolved.len() + usize::from(prepared_image.is_some()));
-        let mut iter = resolved.into_iter();
-        if let Some((first_text, first_color)) = iter.next() {
-            push_prepared_text(
-                font,
-                &item_font_str,
-                first_text,
-                first_color,
-                wrap,
-                &mut out,
-            );
-        }
+        let mut out: Vec<_> = lines
+            .into_iter()
+            .map(|(text, color)| PreparedTooltipItem::Text {
+                text: text.resolve_legacy(),
+                color,
+            })
+            .collect();
         if let Some(image) = prepared_image {
-            out.push(image);
-        }
-        for (text, color) in iter {
-            push_prepared_text(font, &item_font_str, text, color, wrap, &mut out);
+            out.insert(usize::from(!out.is_empty()), image);
         }
         GatheredTooltip::Ready(out)
     }
@@ -510,13 +486,16 @@ impl Game<'_> {
         let font = stack.map_or(Cow::Borrowed(&*DEFAULT_TOOLTIP_FONT_ID), |stack| {
             self.item_tooltip_font(stack)
         });
-        if !mod_api::__private::listened(mod_api::HookId::RenderTooltipPre) {
+        if !mod_api::__private::enabled_listened(mod_api::HookId::RenderTooltipPre) {
             return Some((at, font));
         }
         let api_stack = match stack {
             Some(s) => match s.try_into_api() {
                 Ok(api) => Some(api),
-                Err(_) => return Some((at, font)),
+                Err(error) => {
+                    log::warn!("mod render_tooltip_pre stack refused: {error:?}");
+                    return Some((at, font));
+                }
             },
             None => None,
         };
@@ -546,7 +525,8 @@ impl Game<'_> {
                     Ok(api_text) => {
                         lent.push(mod_api::PreparedTooltipComponent::__text(api_text, *color));
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        log::warn!("mod render_tooltip_pre text refused: {error:?}");
                         ok = false;
                         break;
                     }
@@ -560,7 +540,8 @@ impl Game<'_> {
                             non_empty_height,
                         ));
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        log::warn!("mod render_tooltip_pre bundle refused: {error:?}");
                         ok = false;
                         break;
                     }

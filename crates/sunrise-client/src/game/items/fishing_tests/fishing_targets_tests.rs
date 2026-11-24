@@ -674,6 +674,10 @@ fn run_extra_case(
 #[test]
 #[ignore = "run by tools/test_projectile_targets_parity.py"]
 fn witness_fishing_bobber_targets() {
+    run_witness_fishing_bobber_targets();
+}
+
+pub(in crate::game) fn run_witness_fishing_bobber_targets() {
     let witness = load_witness();
     let mut resources = None;
     let mut game = setup_game(&mut resources);

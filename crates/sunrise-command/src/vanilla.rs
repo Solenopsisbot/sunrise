@@ -600,6 +600,11 @@ pub const MODPROFILE_ACTIONS: [(&str, &str); 3] = [
     ("stop", "modprofile.stop"),
     ("report", "modprofile.report"),
 ];
+/// Whether `name` is a root Sunrise adds beside vanilla's (`/modprofile`, and `/pregen` when it
+/// is on): a tool of the game's own, which a mod's command never merges into.
+pub fn is_session_tool(name: &str) -> bool {
+    matches!(name, "modprofile" | "pregen")
+}
 /// Build the command tree for one server session's registry.
 pub fn session_dispatcher(registry: &RuleRegistry, features: &[String]) -> Dispatcher {
     let dev = std::env::var_os("SUNRISE_DEV_COMMANDS").is_some();

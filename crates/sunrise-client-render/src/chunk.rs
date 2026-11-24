@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicI16, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use sunrise_core::nbt::{Compound, Tag};
 use sunrise_core::paletted::{PalettedContainer, Strategy};
-use sunrise_world::registry::BlockStateId;
+use sunrise_world::{heightmap::Heightmap, registry::BlockStateId};
 
 pub mod block_entity;
+mod packet_heightmap;
 
 /// The vanilla Overworld's column, which every dimension's chunks hold for
 /// now (`LevelShape::column`).
@@ -691,8 +692,11 @@ pub struct Chunk {
     /// the highest non-air block, or the column's minimum Y. Built on the first read; a
     /// `set` that can move a column's surface marks that column, found again on its next read.
     surface: Heights,
-    /// `Heightmap.Types.MOTION_BLOCKING` per column, kept like `surface`.
+    /// Block-derived MOTION_BLOCKING for locally built columns, kept like `surface`.
     motion_blocking: Heights,
+    /// A remote column's authoritative MOTION_BLOCKING data. Packet adoption and client
+    /// block writes maintain this map instead of re-deriving it from the whole column.
+    packet_motion_blocking: Option<Arc<Heightmap>>,
     pub lit: bool,
     /// Light read from a save with `isLightOn`: no light job is needed.
     pub light_loaded: bool,
@@ -760,6 +764,7 @@ impl Chunk {
             light_support: crate::section_mask::SectionMask::EMPTY,
             surface: Heights::default(),
             motion_blocking: Heights::default(),
+            packet_motion_blocking: None,
             lit: false,
             light_loaded: false,
             fresh: false,
@@ -956,12 +961,11 @@ impl Chunk {
     pub fn world_surface(&self, x: i32, z: i32, air: impl Fn(u32) -> bool) -> i32 {
         self.height(&self.surface, x, z, |v| !air(v))
     }
-    /// `getHeight(Heightmap.Types.MOTION_BLOCKING, x, z)` (`x`, `z` within
-    /// the chunk): one above the highest state where `blocks` (a motion
-    /// blocking block or a fluid), or the column's minimum Y. Kept as
-    /// `world_surface` is.
+    /// `getHeight(Heightmap.Types.MOTION_BLOCKING, x, z)`: use the remote column's map,
+    /// or derive it from motion-blocking blocks and fluids for a locally built column.
     pub fn motion_blocking(&self, x: i32, z: i32, blocks: impl Fn(u32) -> bool) -> i32 {
-        self.height(&self.motion_blocking, x, z, blocks)
+        self.packet_motion_blocking_height(x, z)
+            .unwrap_or_else(|| self.height(&self.motion_blocking, x, z, blocks))
     }
     /// One column's height in `map`: the whole map built on its first read, a column a write
     /// marked found again down that column alone.
@@ -1110,6 +1114,11 @@ impl Chunk {
             .filter(|map| map.heights.get().is_some())
             .count()
             * std::mem::size_of::<[i16; 256]>();
+        if let Some(map) = &self.packet_motion_blocking {
+            census.heightmap_bytes += std::mem::size_of::<Heightmap>()
+                + 2 * std::mem::size_of::<usize>()
+                + map.heap_bytes();
+        }
         for section in &self.sections {
             if !seen.insert(Arc::as_ptr(section)) {
                 continue;

@@ -8,12 +8,14 @@ job's condition the way GitHub does, from the workflow files, and walk the graph
 
 import json
 import re
+import sys
 import unittest
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
 STATUS = re.compile(r"\b(always|cancelled|failure)\(\)")
 TOKEN = re.compile(r"\s*(?:(?P<str>'(?:[^']|'')*')|(?P<op>&&|\|\||==|!=|[!(),])|(?P<num>\d+)|(?P<name>[A-Za-z_][\w.\-]*))")

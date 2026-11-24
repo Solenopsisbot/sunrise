@@ -160,4 +160,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "gamemode_split_tests.rs"]
-mod gamemode_split_tests;
+pub(in crate::game) mod gamemode_split_tests;

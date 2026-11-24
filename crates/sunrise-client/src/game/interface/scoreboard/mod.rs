@@ -502,16 +502,12 @@ impl Game<'_> {
         let Some(host) = self.lan.as_mut() else {
             return;
         };
-        host.hub.teams.clone_from(&self.score.board.teams);
-        let view = sunrise_client::lan::scoreboard::View::of(&self.score.board);
+        let board = &self.score.board;
+        host.hub.teams.clone_from(&board.teams);
+        let view = sunrise_client::lan::scoreboard::View::of(board);
         host.hub.guests.update_all(|g| {
-            if g.placed && !g.scoreboard_synced {
-                g.send_all(&view.initial());
-                g.scoreboard = view.clone();
-                g.scoreboard_synced = true;
-            } else if g.placed && g.scoreboard != view {
-                g.send_all(&g.scoreboard.changes(&view));
-                g.scoreboard = view.clone();
+            if g.placed {
+                g.sync_scoreboard(&view, board);
             }
         });
     }
@@ -747,8 +743,22 @@ impl Game<'_> {
             .iter()
             .filter_map(|m| Some((m.id, tame_owner(m)?)))
             .collect();
+        let host = self
+            .player_identity()
+            .and_then(|(_, id)| Some((id, self.player_team()?)));
+        let guests = self.lan.iter().flat_map(|lan| &lan.hub.guests);
+        let players = host
+            .into_iter()
+            .chain(guests.filter(|g| !g.is_fake()).filter_map(|g| {
+                Some((
+                    u32::try_from(g.entity_id).ok()?,
+                    self.score.board.players_team(&g.name)?,
+                ))
+            }))
+            .collect();
         sunrise_client::mobs::Teams {
             player: self.player_team(),
+            players,
             mobs: self
                 .persist
                 .uuids

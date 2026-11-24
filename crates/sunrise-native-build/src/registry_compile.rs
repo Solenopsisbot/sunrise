@@ -503,7 +503,7 @@ pub(super) fn stage_and_cargo(
         }
     }
     super::crates::check_game_graph_names(out, &resolved, &game_names)?;
-    let inventory = metadata.inventory(&super::registry_lock::RegistryLock::default(), links)?;
+    let inventory = metadata.inventory(&plan, links)?;
     if inventory.added_crates > 0 && !options.consent.is_some_and(|ask| ask(&inventory)) {
         return Err(crate::host::tr("The mods' crates.io dependencies were not compiled: the plan's \"registry\" field is false or the question was declined. \"registry\": true approves compiling them; their build scripts and proc macros then run on this computer").into());
     }

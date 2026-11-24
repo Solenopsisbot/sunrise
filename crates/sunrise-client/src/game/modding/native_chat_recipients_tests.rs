@@ -81,6 +81,7 @@ impl Hooks for Queries {
                 host,
                 "time query gametime",
                 PermissionLevel::from_level(2),
+                false,
             );
             self.0.lock().unwrap().extend([console, entity]);
         }
@@ -394,29 +395,32 @@ fn dispatcher_say_filters_the_acting_guests_captured_copy() {
 #[test]
 #[ignore = "daily"]
 fn listener_commands_do_not_count_as_command_block_successes() {
-    let results = Arc::new(Mutex::new(Vec::new()));
-    let mods = vec![mod_api::ModEntry::new(
-        "queries",
-        Box::new(Queries(results.clone())),
-    )]
-    .into();
-    mod_platform::testing::with_mods(mods, || {
-        with_game(|game| {
-            let _receivers = two_guests(game);
-            game.reset_entity_residency();
-            let pos = place_say_block(game);
-            game.command_block_tick(pos);
-            assert_eq!(
-                *results.lock().unwrap(),
-                [true, true],
-                "both listener queries ran"
-            );
-            let sunrise_client::containers::BlockEntity::CommandBlock(block) =
-                &game.world.block_entities[&(pos.x, pos.y, pos.z)]
-            else {
-                panic!("expected the command block");
-            };
-            assert_eq!(block.success_count, 1, "only the block's /say counts");
+    let name = "game::native_chat_recipients_tests::listener_commands_do_not_count_as_command_block_successes";
+    crate::game::in_own_process(name, || {
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let mods = vec![mod_api::ModEntry::new(
+            "queries",
+            Box::new(Queries(results.clone())),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                let _receivers = two_guests(game);
+                game.reset_entity_residency();
+                let pos = place_say_block(game);
+                game.command_block_tick(pos);
+                assert_eq!(
+                    *results.lock().unwrap(),
+                    [true, true],
+                    "both listener queries ran"
+                );
+                let sunrise_client::containers::BlockEntity::CommandBlock(block) =
+                    &game.world.block_entities[&(pos.x, pos.y, pos.z)]
+                else {
+                    panic!("expected the command block");
+                };
+                assert_eq!(block.success_count, 1, "only the block's /say counts");
+            });
         });
     });
 }

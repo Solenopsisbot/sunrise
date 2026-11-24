@@ -1,8 +1,12 @@
 //! Native worker adapters for API-owned structure behaviours.
+use super::native_pool_elements::{
+    Elements, element_ref, engine_element, engine_placement, engine_projection,
+};
+use super::native_structures::engine_rotation;
 use super::native_worldgen::WorkerResources;
 use mod_api::{
     BiomeId, ChunkPos, GenerationContext, HeightmapType, NoiseBlock, NoiseColumn, PieceContext,
-    RandomSource, StructurePiece, StructureType,
+    RandomSource, StructureError, StructurePiece, StructureType,
 };
 use mod_api::{BlockKey, BlockMetadata, BlockState};
 use std::sync::Arc;
@@ -13,7 +17,11 @@ use sunrise_core::{
 };
 use sunrise_world::worldgen::{
     placement::PlacementQueryError,
-    structure::{legacy::PieceRandom, mod_types::ModStructureType},
+    structure::{
+        jigsaw::FeatureKey,
+        legacy::{PieceDraws, PieceRandom},
+        mod_types::ModStructureType,
+    },
 };
 
 fn engine_heightmap(kind: HeightmapType) -> sunrise_world::heightmap::HeightmapType {
@@ -49,8 +57,8 @@ impl sunrise_world::worldgen::structure::start::NoiseColumnTarget for Column {
 }
 
 /// The engine's piece random, as a [`RandomSource`].
-struct Draws<'a, R: PieceRandom + ?Sized>(&'a mut R);
-impl<R: PieceRandom + ?Sized> RandomSource for Draws<'_, R> {
+pub(super) struct Draws<'a, R: PieceDraws + ?Sized>(pub(super) &'a mut R);
+impl<R: PieceDraws + ?Sized> RandomSource for Draws<'_, R> {
     fn next_int_bound(&mut self, bound: i32) -> i32 {
         self.0.int(bound)
     }
@@ -84,6 +92,7 @@ struct Start<'a> {
     inputs: &'a sunrise_world::worldgen::structure::mod_types::StructureInputs<'a>,
     /// The jigsaw pieces [`GenerationContext::assemble_jigsaw`] laid out, ahead of the type's own.
     assembled: Vec<sunrise_world::worldgen::structure::start::Piece>,
+    elements: Elements<'a>,
 }
 
 /// A mod's alias bindings as the engine's; `None` when a weighted list is not one vanilla's
@@ -214,10 +223,51 @@ impl GenerationContext for Start<'_> {
         self.assembled.extend(pieces);
         Some(layout)
     }
+    fn template_pool(&mut self, name: &mod_api::Identifier) -> Option<mod_api::TemplatePool> {
+        let pool = self.inputs.pool(&name.to_string())?;
+        let fallback = mod_api::Identifier::parse(pool.fallback()).ok()?;
+        Some(mod_api::__private::template_pool(
+            pool.templates().iter().cloned().map(element_ref).collect(),
+            fallback,
+            pool.max_size(self.inputs.resources),
+        ))
+    }
+    fn elements(&self) -> &dyn mod_api::ElementContext {
+        &self.elements
+    }
+}
+
+/// A mod's pool piece as the engine's; `None` for an element or rotation
+/// this build doesn't know.
+fn engine_pool_piece(
+    piece: mod_api::PoolPiece,
+) -> Option<sunrise_world::worldgen::structure::start::Piece> {
+    use sunrise_world::worldgen::structure::jigsaw::{Junction, PoolPiece};
+    Some(sunrise_world::worldgen::structure::start::Piece::Pool(
+        PoolPiece {
+            element: engine_element(&piece.element)?,
+            position: piece.position,
+            ground_level_delta: piece.ground_level_delta,
+            rotation: engine_rotation(piece.rotation)?,
+            bounding_box: piece.bounding_box,
+            junctions: piece
+                .junctions
+                .iter()
+                .map(|junction| Junction {
+                    source_x: junction.source_x,
+                    source_ground_y: junction.source_ground_y,
+                    source_z: junction.source_z,
+                    delta_y: junction.delta_y,
+                    dest_projection: engine_projection(junction.dest_projection),
+                })
+                .collect(),
+            waterlogging: piece.liquid == mod_api::LiquidSettings::ApplyWaterlogging,
+        },
+    ))
 }
 
 /// The engine's piece context, as a [`PieceContext`].
-struct Placing<'a> {
+pub(super) struct Placing<'a> {
     world: &'a mut dyn sunrise_world::worldgen::structure::legacy::PieceWorld,
     worker: &'a WorkerResources,
     resources: &'a sunrise_world::worldgen::structure::StructureResources,
@@ -228,7 +278,7 @@ struct Placing<'a> {
 }
 
 impl<'a> Placing<'a> {
-    fn new<'b>(
+    pub(super) fn new<'b>(
         inner: &'a mut sunrise_world::worldgen::structure::legacy::PieceContext<'b>,
     ) -> Result<Self, PlacementQueryError> {
         let worker = WorkerResources::get(inner.resources.registry)?;
@@ -313,6 +363,35 @@ impl PieceContext for Placing<'_> {
             log::error!("Sunrise: a mod structure piece's block entity was refused");
         }
     }
+    fn place_feature(&mut self, feature: &str, pos: [i32; 3]) -> Result<bool, StructureError> {
+        self.world
+            .place_feature(&mut *self.random.0, FeatureKey::Configured(feature), pos)
+            .map_err(|e| StructureError(e.to_string()))
+    }
+    fn place_placed_feature(
+        &mut self,
+        placed_feature: &str,
+        pos: [i32; 3],
+    ) -> Result<bool, StructureError> {
+        self.world
+            .place_feature(&mut *self.random.0, FeatureKey::Placed(placed_feature), pos)
+            .map_err(|e| StructureError(e.to_string()))
+    }
+    fn place_element(
+        &mut self,
+        element: &mod_api::PoolElementRef,
+        placement: &mod_api::ElementPlacement,
+    ) -> Result<bool, StructureError> {
+        let (Some(element), Some(at)) = (engine_element(element), engine_placement(placement))
+        else {
+            return Err(StructureError(
+                "an element or rotation this build doesn't know".into(),
+            ));
+        };
+        self.world
+            .place_element(&mut *self.random.0, &element, at)
+            .map_err(|e| StructureError(e.to_string()))
+    }
 }
 
 /// The adapter: the game's `ModStructureType` around a mod's `StructureType`,
@@ -353,11 +432,16 @@ impl ModStructureType for Adapter {
             config,
             inputs,
             assembled: Vec::new(),
+            elements: Elements {
+                resources: inputs.resources,
+                worker,
+            },
         };
         let found = self.inner.find_generation_point(&mut context)?;
         let ty = self.inner.clone();
         let id = self.id;
         let mut pieces = context.assembled;
+        pieces.extend(found.pool_pieces.into_iter().filter_map(engine_pool_piece));
         pieces.extend(found.pieces.into_iter().map(|piece| {
             sunrise_world::worldgen::structure::start::Piece::Legacy(Box::new(ModPiece {
                 beardifier: piece.beardifier().and_then(engine_beardifier),
@@ -494,7 +578,7 @@ impl Adapter {
 pub(super) mod book_example;
 #[cfg(test)]
 #[path = "native_structure_types/tests.rs"]
-mod tests;
+pub(in crate::game) mod tests;
 
 /// Registered API declarations become engine adapters once, not once per chunk.
 pub(in crate::game) fn installed_structure_types()

@@ -195,6 +195,7 @@ fn body_yaw_is_the_raw_mob_yaw_and_none_for_others() {
             assert_eq!(player.body_yaw(game), None);
         }
         game.others.push(crate::game::commands::OtherEntity {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             knot_check: None,
             eye: None,

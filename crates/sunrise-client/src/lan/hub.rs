@@ -1996,11 +1996,6 @@ impl Hub {
             .unwrap_or_default()
     }
 
-    /// Whether vanilla's command tree has a command of this name.
-    pub fn vanilla_command(&self, name: &str) -> bool {
-        self.sync.commands.as_ref().is_some_and(|t| t.has(name))
-    }
-
     /// The key [`Hub::set_mod_commands`] last had: the game compares it
     /// with its server mods' each tick.
     pub fn mod_commands_key(&self) -> Option<u64> {
@@ -2798,11 +2793,22 @@ impl Hub {
         let mut g = self.guests.remove(i);
         g.listed_behind = behind;
         super::chunk_watch::unwatch_all(&mut self.chunk_watches, &mut g);
-        let closed = g
-            .menu
-            .as_ref()
-            .and_then(|menu| menu.native_closed(g.uuid, g.menu_generation, &mut g.native_menu));
-        self.native_menu_events.extend(closed);
+        if let Some(menu) = g.menu.as_ref() {
+            let inputs = menu.take_processing_inputs(&mut g.native_menu);
+            if !inputs.is_empty() {
+                self.native_menu_events.push(
+                    super::menu::NativeMenuEvent::ReturnProcessingInputs {
+                        conn: g.conn,
+                        items: inputs,
+                        drop_instead: true,
+                    },
+                );
+            }
+            if let Some(closed) = menu.native_closed(g.uuid, g.menu_generation, &mut g.native_menu)
+            {
+                self.native_menu_events.push(closed);
+            }
+        }
         // A held player a proxy dropped keeps, in the log, how its connection really ended
         // (an unreadable packet, a reset): the drop says only that it was dropped.
         if g.held
@@ -6509,6 +6515,7 @@ mod tests {
                     links: Vec::new(),
                     asks_still_valid: true,
                     opening_item: None,
+                    slot_changed_seen: None,
                 });
             });
         };
@@ -8311,6 +8318,7 @@ mod tests {
                 links: Vec::new(),
                 opening_item: None,
                 asks_still_valid: false,
+                slot_changed_seen: None,
             });
         });
         let drain_data =

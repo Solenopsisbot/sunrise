@@ -69,6 +69,18 @@ are, but don't assume they're valid to insert elsewhere. The engine checks the e
 damage and components on write and refuses invalid values rather than clamping them. See
 [Owned item values](../how-to/items/item-stack-values.md) for the boundary rules and examples.
 
+On a creative client, `host.give_stack(&stack)` inserts into the local player's inventory,
+keeping the stack's components. It sends every changed slot to the server immediately,
+even when a server menu is open. `Ok(None)` means the whole stack fit; `Ok(Some(remainder))`
+returns what didn't fit. Nothing is dropped. A `CreativeGiveError` leaves the inventory
+unchanged: `Unavailable` means there's no ready client world or game backend, `NotCreative`
+means the local player isn't in creative mode, `FeatureDisabled` means the connected server's
+enabled feature flags do not enable the item, and `Stack(error)` means the game refused the
+stack (for example, an unknown item, a count above the effective stack limit, or invalid
+components). By contrast, the server's [`PlayerRef::give_stack`](../how-to/entities/server-services-and-players.md#inventory-ender-chest-and-saved-data)
+gives to a server player as `/give` does, normally dropping overflow for that player instead
+of returning it.
+
 A `TagKey` identifies a **name**, not its members. Request it during registration with `r.tag_key`;
 a missing tag can still have a key. Item, block, fluid and damage type tags share the name table but have
 separate membership. A reload replaces membership, not the key. Clients use the authoritative

@@ -1144,6 +1144,28 @@ fn audit_88_no_listener_fast_path_and_deep_local_text() {
     ) {
         return;
     }
+    // This one line is 198 pixels wide. Neither side of x=145 on a 160-pixel screen can fit
+    // it, but vanilla's item tooltip still passes it to the positioner intact.
+    const WIDE: &str = "long item name near a screen edge";
+    let assert_unwrapped = |game: &mut Game<'_>, stack: &ItemStack| {
+        let original_font = std::mem::replace(
+            &mut game.gui.atlas.font,
+            synthetic_ascii_fonts([("default", 6)]),
+        );
+        let gathered = game
+            .gather_tooltip_components(
+                stack,
+                vec![(sunrise_client::text::Text::literal(WIDE), u32::MAX)],
+                145,
+                (160.0, 240.0),
+            )
+            .unwrap_ready();
+        assert_eq!(text_lines(&gathered), [WIDE]);
+        game.gui.atlas.font = original_font;
+        gathered
+    };
+    let stick = ItemStack::new("minecraft:stick", 1);
+
     // Part 1: no listeners at all — an unconvertible stack still gathers and renders its lines.
     let empty_mods: Mods = Vec::<ModEntry>::new().into();
     with_mod_factories(empty_mods, |game| {
@@ -1169,6 +1191,7 @@ fn audit_88_no_listener_fast_path_and_deep_local_text() {
         );
         game.draw_stack_tooltip_lines(&mut batch, &unconvertible, lines, 10.0, 20.0);
         assert!(!batch.vertices.is_empty());
+        assert_unwrapped(game, &stick);
     });
 
     // Part 2: listeners active — unconvertible stack skips Pre without cancelling, and a
@@ -1238,14 +1261,61 @@ fn audit_88_no_listener_fast_path_and_deep_local_text() {
         }
     }
 
+    /// Listens to Pre alone and keeps the literal text of each component it is shown.
+    struct PreOnlyMod(Arc<Mutex<Vec<Option<String>>>>);
+    #[mod_api::__subscriptions]
+    impl Hooks for PreOnlyMod {
+        fn render_tooltip_pre(
+            &self,
+            _: &dyn ClientHost,
+            event: &mut RenderTooltipPreEvent<'_>,
+        ) -> Flow {
+            *self.0.lock().unwrap() = event
+                .components
+                .iter()
+                .map(|component| match component.as_text() {
+                    Some((text, _)) => match &text.content {
+                        mod_api::text::TextContent::Literal(literal) => Some(literal.clone()),
+                        _ => None,
+                    },
+                    None => None,
+                })
+                .collect();
+            Flow::Continue
+        }
+    }
+
     let pre_calls = Arc::new(AtomicUsize::new(0));
-    let mods: Mods = vec![ModEntry::new(
-        "deep_text_mod",
-        Box::new(DeepTextMod(pre_calls.clone())),
-    )]
+    let pre_only_seen = Arc::new(Mutex::new(Vec::new()));
+    let mods: Mods = vec![
+        ModEntry::new("deep_text_mod", Box::new(DeepTextMod(pre_calls.clone()))),
+        ModEntry::new("pre_only_mod", Box::new(PreOnlyMod(pre_only_seen.clone()))),
+    ]
     .into();
 
     with_mod_factories(mods, |game| {
+        // With Pre alone listening, Gather never runs, so Pre sees the wide line unsplit.
+        assert!(mod_api::__private::set_mod_enabled("deep_text_mod", false));
+        let mut gathered = assert_unwrapped(game, &stick);
+        let mut pre_batch = HudBatch::scratch([160, 240]);
+        assert!(
+            game.tooltip_pre_components(
+                &mut pre_batch,
+                Some(&stick),
+                &mut gathered,
+                [145, 20],
+                &DefaultTooltipPositioner,
+            )
+            .is_some()
+        );
+        assert_eq!(*pre_only_seen.lock().unwrap(), [Some(WIDE.to_owned())]);
+        assert!(mod_api::__private::set_mod_enabled("pre_only_mod", false));
+        assert!(mod_api::__private::set_mod_enabled("deep_text_mod", true));
+
+        // An enabled Gather listener cannot take a stack that does not cross the API
+        // boundary: Gather is skipped and the wide line survives unwrapped.
+        assert_unwrapped(game, &ItemStack::new("missing:unregistered_item", 1));
+
         let unconvertible = ItemStack::new("missing:unregistered_item", 1);
         let mut one_line = vec![PreparedTooltipItem::Text {
             text: sunrise_client::text::Text::literal("Keep"),
@@ -1269,7 +1339,6 @@ fn audit_88_no_listener_fast_path_and_deep_local_text() {
             "stack conversion failure skips Pre without cancelling"
         );
 
-        let stick = ItemStack::new("minecraft:stick", 1);
         let mut gathered = game
             .gather_tooltip_components(
                 &stick,

@@ -961,8 +961,7 @@ impl Game<'_> {
             else {
                 return None;
             };
-            let (value, signature) = profile.textures()?;
-            let url = skins::unpack(&value, signature, skins::texture_uris()).skin?;
+            let url = skins::unpack_insecure(profile.textures()?).skin?;
             let location = skins::skin_location(&skins::texture_hash(&url)?);
             Some((url, location))
         });
@@ -993,10 +992,14 @@ fn rain_positions(at: Vec3, top: f64) -> (BlockPos, BlockPos) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::game) mod tests {
     #[test]
     #[ignore = "daily"]
     fn replacing_a_gateway_discards_its_old_cooldown() {
+        run_replacing_a_gateway_discards_its_old_cooldown();
+    }
+
+    pub(in crate::game) fn run_replacing_a_gateway_discards_its_old_cooldown() {
         use crate::game::*;
         let root = std::path::PathBuf::from(
             std::env::var_os("SUNRISE_TEST_RESOURCES").expect("set SUNRISE_TEST_RESOURCES"),

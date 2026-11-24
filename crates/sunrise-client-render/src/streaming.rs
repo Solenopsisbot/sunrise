@@ -335,6 +335,8 @@ pub enum Done {
     Saved(Vec<((i32, i32), Proto)>),
     /// A proto chunk back from `Job::LightView`, with its view.
     LightView(i32, i32, Proto, Option<Chunk>),
+    /// A column whose generation panicked (a mod's chunk generator): it has no proto.
+    Failed(i32, i32),
 }
 struct Queued {
     priority: i64,
@@ -577,6 +579,10 @@ pub struct Streaming {
     /// The centre and radius the sweep was last reset for.
     scan_area: ((i32, i32), i32),
     generating: FxHashSet<(i32, i32)>,
+    /// Columns whose generation panicked (`Done::Failed`), contained by the engine where vanilla
+    /// would crash: never generated again while this streaming lives, so they and the columns
+    /// that need them around them are never FULL (`full_column_failed`).
+    failed: FxHashSet<(i32, i32)>,
     generation_scan: GenerationScan,
     /// Proto chunks: `None` while checked out to a decoration or save job.
     protos: FxHashMap<(i32, i32), Option<Proto>>,
@@ -724,8 +730,9 @@ pub struct Streaming {
     /// each with its ticks left: `begin_full_column` places them, `purge_unknown_tickets` expires
     /// them, and `hold_unknown_tickets` keeps their columns through an owner update.
     unknown: Vec<((i32, i32), i8)>,
-    /// `ServerChunkCache`'s four most recent FULL lookups, newest first (`lastChunkPos`).
-    recent_full: [Option<(i32, i32)>; 4],
+    /// `ServerChunkCache`'s four most recent FULL lookups, newest first (`lastChunkPos`). A cell:
+    /// a resident read through `&self` fills it too (`note_full_read`, `getChunkNow`).
+    recent_full: std::cell::Cell<[Option<(i32, i32)>; 4]>,
     /// `extra`'s squares as a grid, made again when `extra` changes.
     cover: Option<ExtraCover>,
     /// Set while `update` runs, after it refreshed `cover`: nothing else can
@@ -832,6 +839,7 @@ struct GenerationInputs<'a> {
     ranges: Ranges<'a>,
     world: &'a World,
     generating: &'a FxHashSet<(i32, i32)>,
+    failed: &'a FxHashSet<(i32, i32)>,
     protos: &'a FxHashMap<(i32, i32), Option<Proto>>,
     finishing: &'a FxHashSet<(i32, i32)>,
     decorates: bool,
@@ -856,6 +864,7 @@ impl GenerationScan {
         let missing = |&(_, x, z): &(i64, i32, i32)| {
             !input.world.chunks.contains_key(&(x, z))
                 && !input.generating.contains(&(x, z))
+                && !input.failed.contains(&(x, z))
                 && !input.protos.contains_key(&(x, z))
                 && !input.finishing.contains(&(x, z))
         };
@@ -905,6 +914,7 @@ impl GenerationScan {
                     if !input.ranges.requested(x, z, input.decorates)
                         || input.world.chunks.contains_key(&(x, z))
                         || input.generating.contains(&(x, z))
+                        || input.failed.contains(&(x, z))
                         || input.protos.contains_key(&(x, z))
                         || input.finishing.contains(&(x, z))
                     {
@@ -927,6 +937,7 @@ impl GenerationScan {
                         let (x, z) = (fx + dx, fz + dz);
                         if input.world.chunks.contains_key(&(x, z))
                             || input.generating.contains(&(x, z))
+                            || input.failed.contains(&(x, z))
                             || input.protos.contains_key(&(x, z))
                             || input.finishing.contains(&(x, z))
                         {
@@ -1109,9 +1120,19 @@ impl<G: ChunkGenerator> Jobs<G> {
                     Done::Generated(chunk)
                 }
                 None => {
-                    let proto = generator.proto(&mut *worker, x, z);
-                    let decorated = generator.is_decorated(&proto);
-                    Done::Proto(x, z, proto, decorated)
+                    // A panic in the generator loses this column only: it is reported, not left
+                    // generating forever. This covers every generator, the vanilla one included,
+                    // not only a mod's `build_terrain`.
+                    let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        generator.proto(&mut *worker, x, z)
+                    }));
+                    match made {
+                        Ok(proto) => {
+                            let decorated = generator.is_decorated(&proto);
+                            Done::Proto(x, z, proto, decorated)
+                        }
+                        Err(_) => Done::Failed(x, z),
+                    }
                 }
             },
             Job::Decorate(x, z, mut region, finals) => {
@@ -1279,6 +1300,7 @@ impl Streaming {
             scan_age: 0,
             scan_area: ((i32::MIN, i32::MIN), i32::MIN),
             generating: Default::default(),
+            failed: Default::default(),
             generation_scan: GenerationScan::default(),
             protos: Default::default(),
             light_views: Default::default(),
@@ -1346,7 +1368,7 @@ impl Streaming {
             relight_resent: false,
             extra: Vec::new(),
             unknown: Vec::new(),
-            recent_full: [None; 4],
+            recent_full: std::cell::Cell::new([None; 4]),
             cover: None,
             cover_current: false,
             forced_cover: None,
@@ -1430,22 +1452,51 @@ impl Streaming {
         }
         take_resent_column(world, &old, chunk, self.relight_resent);
     }
-    /// A server's light update for a resident column: the sections whose
-    /// light changed and their neighbours remesh
-    /// (`setSectionDirtyWithNeighbors`). A resent column's sections with new
-    /// biomes remesh the same way.
+    /// A changed mesh input also affects its neighbouring sections.
     pub fn light_updated(world: &mut World, x: i32, z: i32, sections: &[usize]) {
         for &sy in sections {
+            Self::dirty_light_section(world, x, sy as i32, z);
+        }
+    }
+
+    /// `ClientPacketListener.readSectionList` requests rebuilds even if a standalone
+    /// light packet repeats the same data. Its coordinates include both padding sections.
+    pub fn rebuild_packet_light(
+        world: &mut World,
+        x: i32,
+        z: i32,
+        layers: &[sunrise_protocol::chunk::SectionLight],
+    ) {
+        for (b, (sky, block)) in layers.iter().enumerate() {
+            if sky.is_some() || block.is_some() {
+                Self::dirty_light_section(world, x, b as i32 - 1, z);
+            }
+        }
+    }
+
+    fn dirty_light_section(world: &mut World, x: i32, sy: i32, z: i32) {
+        let sections = world.layout().sections() as i32;
+        for s in (sy - 1).max(0)..=(sy + 1).min(sections - 1) {
             for dz in -1..=1 {
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        let s = sy as i32 + dy;
-                        if (0..world.layout().sections() as i32).contains(&s) {
-                            world.dirty_sections.insert((x + dx, s, z + dz));
-                        }
-                    }
+                for dx in -1..=1 {
+                    world
+                        .dirty_sections
+                        .insert((x.wrapping_add(dx), s, z.wrapping_add(dz)));
                 }
             }
+        }
+    }
+
+    /// A cache-centre change invalidates mesh inputs but keeps the hidden columns lit.
+    pub fn remote_chunk_visibility_changed(
+        &mut self,
+        world: &mut World,
+        hidden: &[(i32, i32)],
+        shown: &[(i32, i32)],
+    ) {
+        self.forget_visibility(world, hidden.iter().copied());
+        for &(x, z) in hidden.iter().chain(shown) {
+            Self::dirty_visibility_columns(world, x, z);
         }
     }
     /// Give back meshes the renderer has copied: a worker frees them, ahead of
@@ -1748,6 +1799,16 @@ impl Streaming {
         self.protos.insert((x, z), Some(proto));
         if let Some(view) = view {
             self.light_views.insert((x, z), Arc::new(view));
+        }
+    }
+    /// A column whose generation panicked: no longer generating, and never planned again.
+    fn receive_failed(&mut self, x: i32, z: i32) {
+        self.generation_scan.exhausted = false;
+        self.generating.remove(&(x, z));
+        if self.failed.insert((x, z)) {
+            log::error!(
+                "generating chunk [{x}, {z}] panicked; the column stays out of the level until it opens again"
+            );
         }
     }
     /// Whether `light_region` would find all nine columns: the same walk
@@ -2065,6 +2126,7 @@ impl Streaming {
                 }
                 Done::Saved(protos) => self.receive_saved(protos),
                 Done::LightView(x, z, proto, view) => self.receive_light_view(x, z, proto, view),
+                Done::Failed(x, z) => self.receive_failed(x, z),
                 Done::Lit(x, z, sections, seq) => {
                     if self.lighting.get(&(x, z)) != Some(&seq) {
                         continue;
@@ -2398,6 +2460,7 @@ impl Streaming {
                             (-1..=1).all(|dx| {
                                 let n = (x + dx, z + dz);
                                 !world.chunks.contains_key(&n)
+                                    && !s.failed.contains(&n)
                                     && (s.protos.contains_key(&n)
                                         || s.generating.contains(&n)
                                         || s.ranges().requested(n.0, n.1, true))
@@ -2737,6 +2800,7 @@ impl Streaming {
             },
             world,
             generating: &self.generating,
+            failed: &self.failed,
             protos: &self.protos,
             finishing: &self.finishing,
             decorates: self.decorates,
@@ -3097,13 +3161,14 @@ impl Streaming {
     /// finishes with its 3x3 for the wait (`FULL_WAIT_RADIUS`). Refused for a chunk past
     /// `ChunkPos.isValid`, and for a column that is not FULL while streaming is paused or its
     /// generation stopped; a remote streamer answers only for a FULL column it holds, with no
-    /// ticket.
+    /// ticket. A column that is not FULL and that a failed generation keeps from it
+    /// ([`Self::full_column_failed`]) is `Failed`, with no ticket.
     pub fn begin_full_column(&mut self, world: &World, chunk: (i32, i32)) -> FullColumn {
         if !chunk_pos_is_valid(chunk) {
             return FullColumn::Refused;
         }
         let ready = full_column_ready(world, chunk);
-        if self.remote || (ready && self.recent_full.contains(&Some(chunk))) {
+        if self.remote || (ready && self.recent_full.get().contains(&Some(chunk))) {
             return if ready {
                 FullColumn::Ready
             } else {
@@ -3113,6 +3178,9 @@ impl Streaming {
         if !ready && (self.paused || self.shared.aborted.load(Ordering::Relaxed)) {
             return FullColumn::Refused;
         }
+        if !ready && self.full_column_failed(chunk) {
+            return FullColumn::Failed;
+        }
         match self.unknown.iter_mut().find(|(c, _)| *c == chunk) {
             Some((_, left)) => *left = UNKNOWN_TICKET_TIMEOUT,
             None => self.unknown.push((chunk, UNKNOWN_TICKET_TIMEOUT)),
@@ -3121,7 +3189,7 @@ impl Streaming {
             self.remember_full(chunk);
             return FullColumn::Ready;
         }
-        self.recent_full = [None; 4];
+        self.clear_full_lookups();
         self.extra.push((chunk, FULL_WAIT_RADIUS));
         self.rank_full_task(chunk.0, chunk.1);
         FullColumn::Pending
@@ -3144,23 +3212,53 @@ impl Streaming {
         ready
     }
 
+    /// Whether column `chunk` cannot come FULL because a generation failed (`Done::Failed`, a
+    /// panic contained in a mod's chunk generator): its own, or that of a column its wait
+    /// generates around it (the margin `Ranges::margins` asks for, which decoration and light
+    /// need). Generation does not try those columns again while the level is open.
+    pub fn full_column_failed(&self, chunk: (i32, i32)) -> bool {
+        let (margin, _) = Ranges::margins(self.decorates);
+        let reach = FULL_WAIT_RADIUS + margin;
+        self.failed
+            .iter()
+            .any(|&(x, z)| (x - chunk.0).abs() <= reach && (z - chunk.1).abs() <= reach)
+    }
+
     /// `ServerChunkCache.storeInCache`: the newest of the four recent FULL lookups.
-    fn remember_full(&mut self, chunk: (i32, i32)) {
-        self.recent_full.rotate_right(1);
-        self.recent_full[0] = Some(chunk);
+    fn remember_full(&self, chunk: (i32, i32)) {
+        let mut recent = self.recent_full.get();
+        recent.rotate_right(1);
+        recent[0] = Some(chunk);
+        self.recent_full.set(recent);
+    }
+
+    /// `ServerChunkCache.getChunkNow` on a resident column: a FULL column not among the recent
+    /// lookups joins them, so a `Level.getChunk` that follows answers from them with no ticket.
+    /// A remote streamer keeps none.
+    pub fn note_full_read(&self, world: &World, chunk: (i32, i32)) {
+        if !self.remote
+            && !self.recent_full.get().contains(&Some(chunk))
+            && full_column_ready(world, chunk)
+        {
+            self.remember_full(chunk);
+        }
+    }
+
+    /// `ServerChunkCache.clearCache`: forget the recent FULL lookups, at the end of every
+    /// `ServerChunkCache.tick`, the level's chunk tick, whether or not the server runs normally.
+    pub fn clear_full_lookups(&self) {
+        self.recent_full.set([None; 4]);
     }
 
     /// `TicketStorage.purgeStaleTickets` for the `UNKNOWN` tickets: each one's ticks left go
     /// down by one, and it is removed once they fall below zero. With `TicketType.UNKNOWN`'s
     /// timeout of 1, a ticket survives the first purge after it was placed and goes at the
-    /// second. Called once per server tick that runs normally, at the level's chunk tick, which
-    /// also forgets the recent FULL lookups (`ServerChunkCache.tick`'s `clearCache`).
+    /// second. Called once per server tick that runs normally, at the level's chunk tick.
     pub fn purge_unknown_tickets(&mut self) {
         self.unknown.retain_mut(|(_, left)| {
             *left -= 1;
             *left >= 0
         });
-        self.recent_full = [None; 4];
     }
 
     /// Whether a live `UNKNOWN` ticket holds a column of this level.
@@ -3425,6 +3523,8 @@ pub enum FullColumn {
     Pending,
     /// Not a column this level can bring to FULL now.
     Refused,
+    /// A generation the column needs panicked ([`Streaming::full_column_failed`]).
+    Failed,
 }
 
 /// Whether column `chunk` is FULL: resident and lit (vanilla's FULL follows the LIGHT step).
@@ -5081,6 +5181,7 @@ mod tests {
         extra: Vec<((i32, i32), i32)>,
         forced: HashSet<(i32, i32)>,
         generating: FxHashSet<(i32, i32)>,
+        failed: FxHashSet<(i32, i32)>,
         protos: FxHashMap<(i32, i32), Option<Proto>>,
         finishing: FxHashSet<(i32, i32)>,
         decorates: bool,
@@ -5095,6 +5196,7 @@ mod tests {
                 extra: Vec::new(),
                 forced: HashSet::new(),
                 generating: Default::default(),
+                failed: Default::default(),
                 protos: Default::default(),
                 finishing: Default::default(),
                 decorates,
@@ -5114,6 +5216,7 @@ mod tests {
                 },
                 world: &self.world,
                 generating: &self.generating,
+                failed: &self.failed,
                 protos: &self.protos,
                 finishing: &self.finishing,
                 decorates: self.decorates,
@@ -5163,6 +5266,7 @@ mod tests {
         let missing = |x, z| {
             !input.world.chunks.contains_key(&(x, z))
                 && !input.generating.contains(&(x, z))
+                && !input.failed.contains(&(x, z))
                 && !input.protos.contains_key(&(x, z))
                 && !input.finishing.contains(&(x, z))
         };

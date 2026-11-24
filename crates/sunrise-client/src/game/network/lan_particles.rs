@@ -3,8 +3,7 @@
 //! `/particle` uses) and `ClientboundExplodePacket` (`ServerLevel.explode`).
 use super::{Game, explosion_settings::BlastEffects, lan::LanHost, level_sounds::LevelSound};
 use mod_api::{SoundSource, client::particles::PositionSource};
-use sunrise_client::lan::containers::within_range;
-use sunrise_client::lan::hub::Hub;
+use sunrise_client::lan::{Body, containers::within_range, hub::Hub};
 use sunrise_client::particles::{ExplosionParticle, ParticleOptions, ParticleType};
 use sunrise_core::{
     geometry::{Aabb, Vec3},
@@ -197,17 +196,40 @@ pub(super) fn send_hub_level_particles(
         count: count as i32,
         randomization: 0,
     });
-    for g in hub.guests.iter().filter(|g| hub.here(g)) {
-        if sunrise_only && !g.is_sunrise() {
-            continue;
+    let mut recipients = hub
+        .guests
+        .iter()
+        .filter(|guest| {
+            if !hub.here(guest)
+                || !guest.participates_online()
+                || sunrise_only && !guest.is_sunrise()
+            {
+                return false;
+            }
+            // ServerLevel compares the player's block centre, strictly within 32.
+            let distance: f64 = (0..3)
+                .map(|k| (guest.position[k].floor() + 0.5 - at[k]).powi(2))
+                .sum();
+            distance < 32.0 * 32.0
+        })
+        .peekable();
+    let Some(first) = recipients.next() else {
+        return;
+    };
+    let body = match packet.try_encode() {
+        Ok(body) => body,
+        Err(error) => {
+            eprintln!("[lan] send refused: {error}");
+            return;
         }
-        // ServerLevel compares the player's block centre, strictly within 32.
-        let distance: f64 = (0..3)
-            .map(|k| (g.position[k].floor() + 0.5 - at[k]).powi(2))
-            .sum();
-        if distance < 32.0 * 32.0 {
-            g.send(&packet);
-        }
+    };
+    if recipients.peek().is_none() {
+        first.sender.send(body);
+        return;
+    }
+    let shared = Body::shared(body);
+    for guest in std::iter::once(first).chain(recipients) {
+        guest.sender.send_many([shared.clone()]);
     }
 }
 
@@ -405,15 +427,11 @@ impl Game<'_> {
                 );
                 self.item_particle_options(&stack)?
             }
-            Some(ParticleData::State(s)) => {
-                let pos = at.map(|v| v.floor() as i32);
-                let state = BlockStateId(*s as u32);
-                let (sprite, tint) = self
-                    .particle_sprite(state, pos)
-                    .unwrap_or_else(|| ("block/stone".into(), 0xFFFFFF));
-                ParticleOptions::block(ty, sprite, tint)
-                    .with_source(&self.res.facts().get(state).name)
-            }
+            Some(ParticleData::State(s)) => self.block_provider_options(
+                ty,
+                BlockStateId(*s as u32),
+                at.map(|v| v.floor() as i32),
+            )?,
             Some(ParticleData::ColorScale(c, scale)) => {
                 ParticleOptions::dust(rgb(rgba(*c)), *scale)
             }
@@ -913,6 +931,92 @@ pub(in crate::game) mod tests {
     use sunrise_client::particles::{ExplosionParticle, ParticleOptions, ParticleType};
     use sunrise_core::random::LegacyRandom;
     use sunrise_protocol::packets::play;
+
+    #[test]
+    #[ignore = "daily"]
+    fn received_block_particles_follow_the_provider_matrix() {
+        use crate::game::{
+            in_own_process, native_client_session::tests::logged_client,
+            native_entity_refs::tests::with_client_game,
+        };
+        in_own_process(
+            "game::lan_particles::tests::received_block_particles_follow_the_provider_matrix",
+            || {
+                with_client_game(|game| {
+                    let _server = logged_client(game);
+                    let types = [
+                        ParticleType::Block,
+                        ParticleType::DustPillar,
+                        ParticleType::BlockCrumble,
+                        ParticleType::FallingDust,
+                        ParticleType::BlockMarker,
+                    ];
+                    let registry = game
+                        .remote
+                        .as_ref()
+                        .unwrap()
+                        .builtin
+                        .get("minecraft:particle_type")
+                        .unwrap();
+                    let ids =
+                        types.map(|ty| registry.id(&format!("minecraft:{}", ty.name())).unwrap());
+                    for (name, terrain, dust) in [
+                        ("air", false, true),
+                        ("cave_air", false, true),
+                        ("void_air", false, true),
+                        ("moving_piston", false, false),
+                        ("barrier", false, false),
+                        ("structure_void", false, false),
+                        ("light", true, false),
+                        ("water", true, false),
+                        ("chest", true, true),
+                        ("sand", true, true),
+                        ("stone", true, true),
+                    ] {
+                        let state = game
+                            .pack
+                            .assets
+                            .registry
+                            .default_state(&format!("minecraft:{name}"))
+                            .unwrap();
+                        for ((ty, id), admit) in types
+                            .into_iter()
+                            .zip(ids)
+                            .zip([terrain, terrain, terrain, dust, true])
+                        {
+                            let result = game.received_particle(
+                                &Particle {
+                                    id,
+                                    data: Some(ParticleData::State(state.0 as i32)),
+                                },
+                                [0.5, 64.5, 0.5],
+                            );
+                            assert_eq!(result.is_some(), admit, "{name} for {}", ty.name());
+                            if let Some(options) = result {
+                                assert_eq!(options.ty, ty);
+                                let (sprite, tint) = options.block.unwrap();
+                                if ty == ParticleType::BlockMarker {
+                                    assert!(!sprite.is_empty());
+                                    assert_eq!(tint, 0xFFFFFF);
+                                } else if ty == ParticleType::FallingDust {
+                                    assert!(
+                                        sprite.is_empty(),
+                                        "falling dust uses the provider's sprite set"
+                                    );
+                                    match name {
+                                        "sand" => assert_eq!(tint, 0xDBD3A0),
+                                        "stone" => assert_eq!(tint, 0x707070),
+                                        "air" | "cave_air" | "void_air" => assert_eq!(tint, 0),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                })
+            },
+        );
+    }
 
     /// `PowderSnowBlock.entityInside`: vertical-only movement skips the roll;
     /// horizontal movement uses nextBoolean, then X and Z floats in order.

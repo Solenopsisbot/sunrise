@@ -129,7 +129,10 @@ impl Renderer {
             post.set_weather(weather);
             let flat = self.flat.as_ref().filter(|_| flat_frame);
             self.pack_pages.clear();
-            if flat.is_some() && (pack_draws_terrain || pack_draws_shadow) {
+            // The pack's terrain programs read their pages: flat, or per section where vertex
+            // shaders read storage (`pack_terrain_draws`).
+            let reads_pages = flat.is_some() || self.pack_terrain_draws().reads_pages();
+            if reads_pages && (pack_draws_terrain || pack_draws_shadow) {
                 self.pack_pages.extend(
                     self.arena
                         .page_buffers()
@@ -197,7 +200,7 @@ impl Renderer {
                                     (shadow_first + shadow_solid, shadow_translucent)
                                 }
                             };
-                            self.draw_sections(rp, &self.indirect, 0, first, count);
+                            self.draw_sections_paged(rp, &self.indirect, first, count, page);
                         }
                     }
                 };

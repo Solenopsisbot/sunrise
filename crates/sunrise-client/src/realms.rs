@@ -1197,16 +1197,16 @@ impl Screen {
         slot: usize,
     ) -> Option<String> {
         let id = uuid.and_then(sunrise_client_render::auth::parse_uuid)?;
-        let (value, signature) = {
+        let value = {
             let mut profiles = self.skin_workers.profiles.lock().ok()?;
             let crate::skins::Resolve::Done(Some(profile)) =
                 profiles.state(&crate::skins::NameOrId::Id(id))
             else {
                 return None;
             };
-            profile.textures()?
+            profile.textures()?.to_owned()
         };
-        let textures = crate::skins::unpack(&value, signature, crate::skins::texture_uris());
+        let textures = crate::skins::unpack_insecure(&value);
         let url = textures.skin?;
         let location = crate::skins::skin_location(&crate::skins::texture_hash(&url)?);
         let mut downloads = self.skin_workers.downloads.lock().ok()?;

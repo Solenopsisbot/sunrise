@@ -586,19 +586,28 @@ fn native_declared() -> std::borrow::Cow<'static, NativeDeclared> {
         }
         declared
     };
+    // `Hooks::blocks` and `Hooks::items` are startup registration: the platform holds it
+    // open on this thread while they run. Without a platform every declaration is refused
+    // as closed, by name.
+    let declare = || {
+        let mut declared = None;
+        if let Ok(platform) = mod_api::__private::platform::platform() {
+            (platform.with_registration_open)(&mut || declared = Some(collect()));
+        }
+        declared.unwrap_or_else(collect)
+    };
     // Production freezes one loaded mod set for startup and reload. Tests replace
     // that set in thread-local scopes, so a process-wide snapshot would retain
     // whichever fixture reached content loading first, even on another thread.
     #[cfg(not(test))]
     {
         static DECLARED: std::sync::OnceLock<NativeDeclared> = std::sync::OnceLock::new();
-        std::borrow::Cow::Borrowed(DECLARED.get_or_init(collect))
+        std::borrow::Cow::Borrowed(DECLARED.get_or_init(declare))
     }
     #[cfg(test)]
     {
-        // Test fixtures bypass startup; collect with registration open as startup does.
-        let _registration = mod_platform::__private::RegistrationGuard::open();
-        std::borrow::Cow::Owned(collect())
+        super::api_values::install_test_platform();
+        std::borrow::Cow::Owned(declare())
     }
 }
 /// The native mods' standalone models (`native_standalone_models`), set once
@@ -2786,6 +2795,30 @@ pub(in crate::game) mod tests {
     }
 
     #[test]
+    fn startup_collects_native_declarations_with_registration_open() {
+        struct DeclaresSeat;
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for DeclaresSeat {
+            fn blocks(&self, _: &RegistrationContext, event: &mut mod_api::BlocksEvent<'_>) {
+                let _ = event.register(mod_api::Block::new("stone_seat", "minecraft:stone"));
+            }
+            fn items(&self, _: &RegistrationContext, event: &mut mod_api::ItemsEvent<'_>) {
+                let _ = event.register(mod_api::Item::new("cushion", "minecraft:stick"));
+            }
+        }
+        let mods = vec![mod_api::ModEntry::new("seat", Box::new(DeclaresSeat))].into();
+        mod_platform::testing::with_mods(mods, || {
+            // Startup opens nothing around `freeze_declarations`: collecting opens it.
+            assert!(!mod_api::registration_open());
+            let declared = native_declared();
+            let batch = &declared.batches["seat"];
+            assert_eq!(batch.blocks[0].get().id, "seat:stone_seat");
+            assert_eq!(batch.items[0].get().id, "seat:cushion");
+            assert!(!mod_api::registration_open());
+        });
+    }
+
+    #[test]
     fn native_declarations_follow_the_scoped_mod_fixture() {
         struct DeclaresBlock;
         #[mod_api::__subscriptions]
@@ -4285,17 +4318,11 @@ pub(in crate::game) mod tests {
     }
 
     mod inventory {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/game/modding/mods/mod_inventory_tests.rs"
-        ));
+        include!("mod_inventory_tests.rs");
     }
 
     mod recipe_priorities {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/game/modding/mods/recipe_priorities_tests.rs"
-        ));
+        include!("recipe_priorities_tests.rs");
     }
 
     const BUILT: &[BuiltMod] = &[BuiltMod {

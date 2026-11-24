@@ -159,7 +159,7 @@ workspace = true
 [dev-dependencies]
 sunrise-hooks = { path = "../sunrise-hooks", features = ["test-support"] }
 sunrise-client-core = { path = "../sunrise-client-core", features = ["test-language-publication"] }
-sunrise-client-lib = { path = "../sunrise-client-lib", default-features = false, features = ["test-menu-validity", "test-payload-probe", "test-publication-scope", "test-residency-observer", "test-dry-side", "test-tooltip-factories"] }
+sunrise-client-lib = { path = "../sunrise-client-lib", default-features = false, features = ["test-menu-validity", "test-payload-probe", "test-publication-scope", "test-residency-observer", "test-dry-side", "test-tooltip-factories", "test-pack-feedback"] }
 tempfile = "3"
 sunrise-mod-runtime = { path = "../sunrise-mod-runtime", features = ["test-work-count"] }
 sunrise-threads = { path = "../sunrise-threads", features = ["test-allocation-count", "test-game-dir"] }

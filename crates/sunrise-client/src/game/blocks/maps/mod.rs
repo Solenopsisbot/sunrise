@@ -1974,7 +1974,7 @@ mod live_frame_tests;
 #[cfg(test)]
 mod native_read_tests;
 #[cfg(test)]
-mod save_tests;
+pub(in crate::game) mod save_tests;
 
 #[cfg(test)]
 mod tests {

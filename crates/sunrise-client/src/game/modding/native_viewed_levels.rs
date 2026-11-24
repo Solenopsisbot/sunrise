@@ -1,9 +1,9 @@
 //! A client mod's reads of the levels the server opened for viewing (#3981, gap 10), as Immersive
 //! Portals' `ClientWorldLoader.getWorld(dim)` hands out the far `ClientLevel`: on a client,
 //! `host.level(dim)` also names each level the server keeps open on `sunrise:levels`, and
-//! `block_state`, `clip`, `collision_boxes` and `has_collisions` read its world (`viewed_worlds`),
-//! as do the reads built on `level_block_state`: `block`, `block_property` and the both-sided
-//! fluid reads (`fluid_shape`, `fluid_height`, `fluid_height_for_camera`,
+//! `block_state`, `brightness`, `clip`, `collision_boxes` and `has_collisions` read its world
+//! (`viewed_worlds`), as do the reads built on `level_block_state`: `block`, `block_property`
+//! and the both-sided fluid reads (`fluid_shape`, `fluid_height`, `fluid_height_for_camera`,
 //! `fluid_can_be_replaced_with`). `get_enchant_power_bonus` uses the viewed level as context.
 //! A read never writes and never loads a column: a column the
 //! world does not hold is None. The handle answers None from the server's close of the level,
@@ -63,8 +63,8 @@ impl Game<'_> {
         renderer.set_world_view_own_level(own_level);
         Some(renderer.camera_frustum(camera, fov_degrees, yaw, pitch, bob, depth_far))
     }
-    /// The world `block_state` and `clip` read: on a server an open level, in place or parked
-    /// (`native_level_world`), on a client `client_view_world`.
+    /// The world for reads such as `block_state`, `brightness` and `clip`: on a server an open
+    /// level, in place or parked (`native_level_world`), on a client `client_view_world`.
     pub(super) fn native_level_view_world(&self, level: LevelRef) -> Option<&World> {
         if self.is_logical_server() {
             self.native_level_world(level)
@@ -79,12 +79,12 @@ mod tests {
     use crate::game::{
         Game,
         api_values::TryIntoApi,
-        native_entity_refs::tests::collect_entities_in,
+        native_entity_refs::tests::{collect_entities_in, run_fresh_cases},
         viewed_worlds::tests::{client, close, column, layered, open, run, spawn},
     };
     use mod_api::{
         BlockFace, BlockState, BlockUpdateFlags, ClipBlock, ClipFluid, Host, LevelReadError,
-        LevelRef, LevelWriteError,
+        LevelRef, LevelWriteError, LightLayer, WorldEpoch,
     };
     use sunrise_protocol::packets::play::{self, Clientbound as C};
     use sunrise_world::registry::BlockStateId;
@@ -145,6 +145,62 @@ mod tests {
         assert_eq!(state(&game, viewed, [3, 80, 5]), Some(0));
         // A level the server did not open has no handle.
         assert_eq!(game.level("minecraft:the_end"), None);
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn brightness_reads_the_requested_client_world() {
+        if run_fresh_cases(
+            "game::native_viewed_levels::tests::brightness_reads_the_requested_client_world",
+            "SUNRISE_TEST_VIEWED_LEVEL_BRIGHTNESS",
+            &["brightness"],
+        ) {
+            return;
+        }
+        let mut resources = None;
+        let mut game = client(&mut resources);
+        let lit_column = |sky, block| {
+            let C::LevelChunkWithLight(mut packet) = layered(0, 0, 0) else {
+                unreachable!("layered returns a chunk with light")
+            };
+            // Light section 1 is the first block section, above the bottom padding.
+            packet.light.sky_mask = vec![0b10];
+            packet.light.block_mask = vec![0b10];
+            packet.light.sky = vec![vec![sky; 2048]];
+            packet.light.block = vec![vec![block; 2048]];
+            C::LevelChunkWithLight(packet)
+        };
+        game.handle_packet(lit_column(0xCC, 0x55)).unwrap();
+        game.handle_packet(open(1, "test:void")).unwrap();
+        game.handle_packet(run(1, &[lit_column(0x77, 0x22)]))
+            .unwrap();
+        let own = game.level("minecraft:overworld").unwrap();
+        let viewed = game.level("test:void").unwrap();
+        let read = |host: &dyn Host, level: LevelRef, pos| {
+            (
+                level.brightness(host, LightLayer::Sky, pos),
+                level.brightness(host, LightLayer::Block, pos),
+            )
+        };
+
+        let lit = [3, -60, 5];
+        assert_eq!(read(&game, own, lit), (Some(12), Some(5)));
+        assert_eq!(read(&game, viewed, lit), (Some(7), Some(2)));
+        let missing = [16, -60, 5];
+        assert_eq!(read(&game, own, missing), (None, None));
+        assert_eq!(read(&game, viewed, missing), (None, None));
+        assert!(!game.world.chunks.contains_key(&(1, 0)));
+        let world = &game.remote.as_ref().unwrap().viewed.get(1).unwrap().world;
+        assert!(!world.chunks.contains_key(&(1, 0)));
+
+        let stale = LevelRef::new(
+            WorldEpoch::new(viewed.epoch().get() + 1),
+            viewed.dimension(),
+        );
+        assert_eq!(read(&game, stale, lit), (None, None));
+        game.handle_packet(close(1)).unwrap();
+        assert_eq!(read(&game, viewed, lit), (None, None));
+        assert_eq!(read(&game, own, lit), (Some(12), Some(5)));
     }
 
     /// A ray down onto the viewed level's stone hits its top, while the same ray in the

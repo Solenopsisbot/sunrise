@@ -7,7 +7,7 @@ use std::sync::Arc;
 use sunrise_client::items::ItemStack;
 use sunrise_client::{
     items::Items,
-    lan::attributes::{add_modifier, instance, operation_named, syncable},
+    lan::attributes::{add_modifier, instance, operation_named, syncable_snapshots},
     mobs::{
         GearKnockback, Mob, Species,
         finalize::{self, Attr, Op},
@@ -155,9 +155,8 @@ impl Game<'_> {
         // builds the map if this is its first use; the tick's equipment pass
         // keeps its stacks current. What the map holds is sent once, with the
         // base its instance has — never derived again beside it.
-        let catalog = self.motion.attributes.clone();
         let _ = m.extra.live.read(
-            &catalog,
+            &self.motion.attributes,
             kind,
             Attr::MovementSpeed.id(),
             sunrise_world::attribute_map::ValueKind::Computed,
@@ -169,7 +168,7 @@ impl Game<'_> {
             },
         );
         if let Some(live) = m.extra.live.built() {
-            for s in syncable(live) {
+            for s in syncable_snapshots(live) {
                 let (attribute, base) = (s.attribute, s.base);
                 *instance(out, attribute, base) = s;
             }
@@ -236,31 +235,29 @@ impl Game<'_> {
     pub(super) fn stand_attributes(
         &self,
         live: &sunrise_client::living_attributes::LivingAttributes,
-    ) -> Vec<AttributeSnapshot> {
+        out: &mut Vec<AttributeSnapshot>,
+    ) {
         const KIND: &str = "minecraft:armor_stand";
-        let mut out = Vec::new();
         if let Some(a) = self.synced_attribute(KIND, "minecraft:movement_speed") {
             instance(
-                &mut out,
+                out,
                 a,
                 self.attribute_default(KIND, "minecraft:movement_speed"),
             );
         }
-        let catalog = self.motion.attributes.clone();
         let _ = live.read(
-            &catalog,
+            &self.motion.attributes,
             KIND,
             "minecraft:movement_speed",
             sunrise_world::attribute_map::ValueKind::Computed,
             Vec::new,
         );
         if let Some(map) = live.built() {
-            for s in syncable(map) {
+            for s in syncable_snapshots(map) {
                 let (attribute, base) = (s.attribute, s.base);
-                *instance(&mut out, attribute, base) = s;
+                *instance(out, attribute, base) = s;
             }
         }
-        out
     }
 
     /// The instances a server player's tick creates, and

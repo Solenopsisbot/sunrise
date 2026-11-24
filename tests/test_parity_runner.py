@@ -30,6 +30,12 @@ class ParityRunnerTests(unittest.TestCase):
                          [["example", "c", "fast", [], True]])
         self.assertEqual(parity.artifacts_of(["cargo", "build", "--example", "d"]), [["example", "d", "dev", [], True]])
 
+    def test_the_test_profile_builds_into_devs_folder(self):
+        # lab.parity_fixtures() builds sunrise-parity-fixtures with --profile test: its dep-info is under debug/.
+        self.assertEqual(parity.artifact_path("bin", "sunrise-parity-fixtures", "test"),
+                         parity.TARGET / "debug" / "sunrise-parity-fixtures")
+        self.assertEqual(parity.artifact_path("example", "probe", "fast"), parity.TARGET / "fast" / "examples" / "probe")
+
     def test_artifacts_keep_the_package_and_feature_selection(self):
         self.assertEqual(parity.artifacts_of(["cargo", "build", "--locked", "--profile=fast", "-j", "4", "--package",
                                               "sunrise-client", "--bins", "-F", "x"]),

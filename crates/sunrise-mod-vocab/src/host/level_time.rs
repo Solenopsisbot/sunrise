@@ -30,6 +30,12 @@ pub trait LevelTimeBackend {
     /// the clock does not define, a time past `i64::MAX`, a level without a default clock, a stale
     /// handle and a client.
     fn level_clock_marker_time(&self, level: LevelRef, marker: &Identifier) -> Option<i64>;
+    /// Side: server.
+    /// The clock the level follows (`DimensionType.defaultClock`), whose time
+    /// [`level_clock_time`](Self::level_clock_time) reads: to set it, run it at a rate of its
+    /// own or pause it. None for a level without a default clock (the Nether), a stale handle
+    /// and a client.
+    fn level_clock(&self, level: LevelRef) -> Option<WorldClockRef>;
 }
 /// The handles' writes of the `level_time` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -44,4 +50,20 @@ pub trait LevelTimeBackendMut {
     /// the clock already shows is true and changes nothing. False for a negative time, a level
     /// without a default clock, a stale handle, a client, and when a mod kept the old time.
     fn level_set_clock_time(&mut self, level: LevelRef, time: i64) -> bool;
+    /// Side: server.
+    /// `ServerClockManager.setTotalTicks`: the clock's time becomes `ticks` and its fraction of a
+    /// tick restarts, in every level that follows it. Unlike `level_set_clock_time`, no
+    /// `time_skip` is heard, as vanilla's own call tells nothing. Players see the new time with
+    /// the next time sync. False for a negative time, a stale handle and a client.
+    fn world_clock_set_total_ticks(&mut self, clock: WorldClockRef, ticks: i64) -> bool;
+    /// Side: server.
+    /// `ServerClockManager.setRate`: the clock advances `rate` ticks a game tick from now on
+    /// (`ServerClockInstance.tick` adds it to the fraction it keeps), as `/time rate` sets it.
+    /// False for a rate that is not finite or below zero, a stale handle and a client.
+    fn world_clock_set_rate(&mut self, clock: WorldClockRef, rate: f32) -> bool;
+    /// Side: server.
+    /// `ServerClockManager.setPaused`: a paused clock keeps its time, a fixed time for the levels
+    /// that follow it, until it is resumed, as `/time pause` and `/time resume` do. False for a
+    /// stale handle and a client.
+    fn world_clock_set_paused(&mut self, clock: WorldClockRef, paused: bool) -> bool;
 }

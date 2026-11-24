@@ -193,6 +193,9 @@ pub(super) struct Minecart {
     /// `AbstractMinecart.customDisplayOffset` (`DisplayOffset`), in sixteenths.
     pub custom_offset: Option<i32>,
     pub random: LegacyRandom,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub(super) size_answer: Option<sunrise_client::pose::SizeAnswer>,
 }
 /// `EntityType.MINECART`'s `sized(0.98F, 0.7F)`: float dimensions, widened.
 pub(super) const WIDTH: f64 = 0.98_f32 as f64;
@@ -495,6 +498,7 @@ impl Minecart {
     }
     pub fn new(id: u32, kind: CartKind, position: Vec3) -> Self {
         Self {
+            size_answer: None,
             join: Default::default(),
             attachment_lifetime: Default::default(),
             id,
@@ -543,12 +547,19 @@ impl Minecart {
             random: random_source::entity(),
         }
     }
+    /// `EntityType.MINECART & co`'s `getDimensions()`: width, height and eye height.
+    pub(super) const DIMENSIONS: [f32; 3] = [0.98, 0.7, 0.595];
     pub fn bounds(&self) -> Aabb {
-        let (w, p) = (WIDTH / 2.0, self.position);
-        Aabb::new(
+        self.bounds_at(self.position)
+    }
+    /// The box of this cart were its position `p`.
+    fn bounds_at(&self, p: Vec3) -> Aabb {
+        let w = WIDTH / 2.0;
+        let vanilla = Aabb::new(
             Vec3::new(p.x - w, p.y, p.z - w),
             Vec3::new(p.x + w, p.y + HEIGHT, p.z + w),
-        )
+        );
+        sunrise_client::pose::SizeAnswer::sized_box(self.size_answer, Self::DIMENSIONS, p, vanilla)
     }
     fn horizontal(&self) -> f64 {
         sunrise_core::geometry::length(self.velocity.x, self.velocity.z)
@@ -602,14 +613,14 @@ impl CartModels {
 }
 impl Game<'_> {
     /// `getCurrentBlockPosOrRailBelow`.
-    fn rail_block(&self, p: Vec3) -> [i32; 3] {
+    pub(super) fn rail_block(&self, p: Vec3, improved: bool) -> [i32; 3] {
         let (x, y, z) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
-        let below = if self.minecart_improvements() {
+        let below = if improved {
             (p.y - 0.1 - f64::from(1.0e-5_f32)).floor() as i32
         } else {
             y - 1
         };
-        if self.rail(None, x, below, z).is_some() {
+        if self.tagged_rail(self.world.block(x, below, z)) {
             [x, below, z]
         } else {
             [x, y, z]
@@ -625,7 +636,7 @@ impl Game<'_> {
     /// `OldMinecartBehavior.getPos`: the point on the rail under (x, y, z), on the track the
     /// rail lays for `cart`.
     fn rail_pos(&self, cart: Option<u32>, x: f64, y: f64, z: f64) -> Option<[f64; 3]> {
-        let [xt, yt, zt] = self.rail_block(Vec3::new(x, y, z));
+        let [xt, yt, zt] = self.rail_block(Vec3::new(x, y, z), self.minecart_improvements());
         let rail = self.rail(cart, xt, yt, zt)?;
         let (e0, e1) = rail.shape.exits();
         let (fx, fy, fz) = (f64::from(xt), f64::from(yt), f64::from(zt));
@@ -660,7 +671,7 @@ impl Game<'_> {
         mut z: f64,
         offs: f64,
     ) -> Option<[f64; 3]> {
-        let [xt, yt, zt] = self.rail_block(Vec3::new(x, y, z));
+        let [xt, yt, zt] = self.rail_block(Vec3::new(x, y, z), self.minecart_improvements());
         let rail = self.rail(cart, xt, yt, zt)?;
         let mut y = f64::from(yt) + if rail.shape.is_slope() { 1.0 } else { 0.0 };
         let (e0, e1) = rail.shape.exits();
@@ -868,12 +879,7 @@ impl Game<'_> {
     /// left it. `slot` is where the cart is stored.
     fn cart_inside_blocks(&mut self, c: &mut Minecart, slot: usize, from: Vec3, to: Vec3) {
         let shrink = f64::from(1.0e-5f32);
-        let half = WIDTH / 2.0;
-        let bounds = Aabb::new(
-            Vec3::new(to.x - half, to.y, to.z - half),
-            Vec3::new(to.x + half, to.y + HEIGHT, to.z + half),
-        )
-        .deflate(Vec3::new(shrink, shrink, shrink));
+        let bounds = c.bounds_at(to).deflate(Vec3::new(shrink, shrink, shrink));
         let mut hits = Vec::new();
         let behaviours = self.res.behaviours();
         let world = &self.world;
@@ -1065,7 +1071,7 @@ impl Game<'_> {
         let mut step_start = c.previous;
         while first || movement_left > f64::from(1.0e-5_f32) {
             let initial = c.velocity;
-            let pos = self.rail_block(c.position);
+            let pos = self.rail_block(c.position, true);
             let Some(rail) = self.rail(Some(c.id), pos[0], pos[1], pos[2]) else {
                 c.on_rails = false;
                 if !self.come_off_track(c) {
@@ -1395,8 +1401,9 @@ impl Game<'_> {
             c.damage -= 1.0;
         }
         // NewMinecartBehavior.tick snaps a newly created cart before gravity.
-        if self.minecart_improvements() && c.first_tick {
-            let pos = self.rail_block(c.position);
+        let improved = self.minecart_improvements();
+        if improved && c.first_tick {
+            let pos = self.rail_block(c.position, true);
             if let Some(rail) = self.rail(Some(c.id), pos[0], pos[1], pos[2]) {
                 c.on_rails = true;
                 Self::adjust_cart_to_rails(c, pos, rail.shape);
@@ -1406,13 +1413,13 @@ impl Game<'_> {
         }
         // applyGravity
         c.velocity.y -= c.get_gravity();
-        let pos = self.rail_block(c.position);
-        if self.minecart_improvements() {
+        if improved {
             if !self.move_along_track_new(c, intent) {
                 return false;
             }
         } else {
             // OldMinecartBehavior.tick writes `onRails` every tick, before the move.
+            let pos = self.rail_block(c.position, false);
             let rail = self.rail(Some(c.id), pos[0], pos[1], pos[2]);
             c.on_rails = rail.is_some();
             if let Some(rail) = rail {
@@ -2016,6 +2023,7 @@ impl Game<'_> {
     /// two inside sounds when the player got in one; then what the sound
     /// instances read this tick (the ridden cart and every cart).
     pub(super) fn start_cart_sounds(&mut self) -> (Option<u32>, Vec<CartSound>) {
+        let improved = self.minecart_improvements();
         let carts: Vec<CartSound> = self
             .carts
             .iter()
@@ -2024,6 +2032,8 @@ impl Game<'_> {
                 position: [c.position.x, c.position.y, c.position.z],
                 // Vec3.horizontalDistance.
                 speed: (c.velocity.x * c.velocity.x + c.velocity.z * c.velocity.z).sqrt(),
+                new_behavior: improved,
+                on_rails: c.on_rails,
             })
             .collect();
         self.cart_sounds

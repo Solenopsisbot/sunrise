@@ -435,6 +435,7 @@ mod tests {
         use sunrise_client::entities::{ExperienceOrb, ItemEntity};
         let at = Vec3::new(5.5, 65.0, 5.5);
         let mut item = ItemEntity {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: [0.0; 2],
             join: Default::default(),

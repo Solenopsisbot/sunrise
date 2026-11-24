@@ -143,11 +143,11 @@ fn leaves_are_what_a_mod_writes() {
 #[test]
 fn the_reader_refuses_with_a_typed_error() {
     let text = sample().to_json();
-    let older = text.replacen("\"schema\": 3", "\"schema\": 2", 1);
-    assert_eq!(Surface::read(older.as_bytes()), Err(ReadError::Schema(2)));
+    let older = text.replacen("\"schema\": 3", "\"schema\": 1", 1);
+    assert_eq!(Surface::read(older.as_bytes()), Err(ReadError::Schema(1)));
     assert_eq!(
-        ReadError::Schema(2).to_string(),
-        "surface schema 2, this tool reads 3"
+        ReadError::Schema(1).to_string(),
+        "surface schema 1, this tool reads 2 and 3"
     );
     assert!(matches!(
         Surface::read(&text.as_bytes()[..text.len() / 2]),
@@ -168,6 +168,42 @@ fn the_reader_refuses_with_a_typed_error() {
         Surface::read(doubled.as_bytes()),
         Err(ReadError::DuplicateId("fn:world::ground".into()))
     );
+}
+
+#[test]
+fn a_schema_2_document_reads_with_schema_3_hashes() {
+    let mut current = sample();
+    current.traits = vec![api_trait("trait:Host", Role::Call, &[], &["player"])];
+    current.hash = current.document_hash();
+    // Independent of the code: schema 2 hashed each method and function with a `wasm` bit.
+    use sha2::{Digest, Sha256};
+    let old = |json: &str| -> String {
+        Sha256::digest(json.as_bytes())[..16]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    let mut published = current.clone();
+    published.schema = 2;
+    published.traits[0].methods[0].hash = old(
+        r#"{"signature":"fn player(&self)","required":false,"wasm":true,"refs":["trait:Host"]}"#,
+    );
+    for function in &mut published.functions {
+        function.hash = old(match function.id.as_str() {
+            "fn:spawn" => r#"{"signature":"fn spawn()","wasm":true}"#,
+            _ => r#"{"signature":"fn ground()","wasm":false,"refs":["type:Block"]}"#,
+        });
+    }
+    published.hash = published.document_hash();
+    let (read, unsealed) = Surface::read_sealed(published.to_json().as_bytes()).unwrap();
+    assert_eq!((read, unsealed), (current, vec![]));
+    // A stored hash the old recipe does not give its contract is not made good.
+    let mut forged = published;
+    let spawn = forged.functions.iter_mut().find(|f| f.id == "fn:spawn");
+    spawn.unwrap().hash = "0".repeat(32);
+    forged.hash = forged.document_hash();
+    let (_, unsealed) = Surface::read_sealed(forged.to_json().as_bytes()).unwrap();
+    assert_eq!(unsealed, ["fn:spawn"]);
 }
 
 #[test]

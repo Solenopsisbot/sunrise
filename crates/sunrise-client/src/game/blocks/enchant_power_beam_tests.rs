@@ -300,6 +300,7 @@ pub(in crate::game) fn enchant_particles(game: &Game<'_>) -> usize {
         creaking_active: false,
         sky_darken: 0,
         marker: None,
+        ambient_particles: None,
         model_offset: &|_, _, _| None,
         gateway_particles: &|_, _| 0,
         thundering: false,

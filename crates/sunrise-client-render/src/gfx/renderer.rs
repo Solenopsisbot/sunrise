@@ -475,6 +475,17 @@ pub struct Renderer {
     pub(crate) shared_material_maps: [Option<wgpu::Texture>; 2],
     /// The pack's terrain program reads flat draws' vertices (`pack_terrain_inputs`).
     pub(crate) pack_terrain_flat: bool,
+    /// Vertex shaders read the section arena's pages (`flat::pages_readable`): a pack's terrain
+    /// program can read its quad's corners there in per-section draws too (`pack_terrain_draws`).
+    pub(crate) terrain_pages: bool,
+    /// The pack's terrain programs read their pages in per-section draws: decided as
+    /// `pack_terrain_inputs` last took them, from `pack_terrain_bindings`.
+    pub(crate) pack_terrain_pages: bool,
+    /// What the pack being loaded binds in its terrain programs' vertex stage
+    /// (`set_pack_terrain_bindings`).
+    pub(crate) pack_terrain_bindings: pack_atlas::TerrainBindings,
+    /// The section arena's pages are storage too (`arena_storage`, `follow_arena_storage`).
+    pub(crate) arena_storage: bool,
     /// OptiFine/Iris separate ambient occlusion: pass vertex alpha to hz_Color.a.
     pub separate_ao: bool,
     /// Shader-pack terrain pages used by post processing, retained between frames.

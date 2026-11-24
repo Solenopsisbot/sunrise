@@ -40,7 +40,20 @@ fn checked_records_have_declared_field_bytes() {
     let key = ItemKey::from_slot(0).unwrap();
     let mut stack = ItemStack::new(key, 7).unwrap();
     stack.set_damage(11);
-    fields(stack, (key, 7u32, Some(11u32), None::<Components>));
+    fields(stack.clone(), (key, 7u32, Some(11u32), None::<Components>));
+    fields(
+        MenuSlotChange::new(MenuContainer::Main, 1, Some(stack.clone()), None),
+        (
+            MenuContainer::Main,
+            1usize,
+            Some(stack.clone()),
+            None::<ItemStack>,
+        ),
+    );
+    fields(
+        MenuSlotWrite::new(MenuContainer::Main, 2, Some(stack.clone())),
+        (MenuContainer::Main, 2usize, Some(stack)),
+    );
     let block = BlockKey::from_slot(0).unwrap();
     let state: BlockState = crate::__private::block_state_from_ordinal(block, 9);
     fields(state, (block, 9u16));

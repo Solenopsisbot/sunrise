@@ -53,7 +53,7 @@ A mod released to the [Sunrise mod registry](https://github.com/sunrise-org/sunr
 - **One signed list.** The registry publishes its releases as one list signed with its own key, and a takedown
   there removes a release or a whole project.
 
-When the launcher installs a registry release, or switches to another port, it checks the file's hash and its
+When the launcher installs or updates a registry release, or switches to another port, it checks the file's hash and its
 attestation against the repository and workflow the registry lists before anything is installed. The first
 install remembers that repository and workflow as the mod's publisher on this computer. If a later release comes
 from a different publisher, the launcher stops and asks, naming the old and new repositories and workflows (and

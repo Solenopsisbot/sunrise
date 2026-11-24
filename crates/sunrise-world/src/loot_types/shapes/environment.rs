@@ -282,6 +282,8 @@ pub(super) fn value(id: &str) -> Option<Kind> {
         },
         AttributeKind::RgbColor => Named("rgb_string"),
         AttributeKind::ArgbColor => Named("argb_string"),
-        AttributeKind::Other => OTHER.iter().find(|row| row.name == attribute.id)?.kind,
+        AttributeKind::AmbientParticles | AttributeKind::Other => {
+            OTHER.iter().find(|row| row.name == attribute.id)?.kind
+        }
     })
 }

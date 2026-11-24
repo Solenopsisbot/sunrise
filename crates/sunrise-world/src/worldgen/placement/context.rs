@@ -322,6 +322,12 @@ pub trait PlacementContext {
     ) -> Result<crate::worldgen::biome::BiomeId, PlacementQueryError> {
         Err(PlacementQueryError::Unavailable)
     }
+    /// The mod API's key of the biome [`biome_identity`](Self::biome_identity) reads at
+    /// `position`, in the world's published `ModBiomeKeys`: what a mod feature's
+    /// `FeatureContext::biome` answers.
+    fn biome_key(&mut self, _position: [i32; 3]) -> Result<mod_api::BiomeKey, PlacementQueryError> {
+        Err(PlacementQueryError::Unavailable)
+    }
     fn top_feature(&self) -> Option<FeatureIdentity> {
         None
     }

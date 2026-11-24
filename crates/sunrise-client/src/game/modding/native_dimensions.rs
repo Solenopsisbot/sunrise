@@ -69,7 +69,7 @@ fn dimension_type(settings: &DimensionSettings) -> Value {
         ),
     };
     json["timelines"] = timelines;
-    if let Some(clock) = clock {
+    if let Some(clock) = settings.clock.as_deref().or(clock) {
         json["default_clock"] = json!(clock);
     }
     json
@@ -656,6 +656,71 @@ mod rule_tests {
             ..Default::default()
         };
         assert!(bad.invalid_field().unwrap().contains("day_cycle"));
+    }
+
+    /// A world clock a mod registers is a `minecraft:world_clock` entry, and a dimension naming it
+    /// in `clock` has it as its type's `default_clock`, over `day_cycle`'s, with `day_cycle`'s
+    /// timelines kept. A dimension naming a clock nobody registered, a vanilla clock registered
+    /// again and a clock registered twice refuse the mods at startup.
+    #[test]
+    fn a_registered_world_clock_is_a_dimensions_default_clock() {
+        use crate::game::api_values::install_parts;
+        use mod_api::{Hooks, ModEntry, Registrar};
+        use sunrise_world::dimension_type::DimensionFacts;
+        struct Clocks;
+        #[mod_api::__subscriptions]
+        impl Hooks for Clocks {
+            fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+                r.register_world_clock("dungeon");
+                r.register_dimension(
+                    "crypt",
+                    DimensionSettings {
+                        clock: Some("test:dungeon".into()),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        install_parts(&[ModEntry::new("test", Box::new(Clocks))]).unwrap();
+        assert_eq!(
+            mod_api::__private::world_clock_declarations(),
+            ["test:dungeon"]
+        );
+        let crypt = installed_dimensions().pop().unwrap();
+        let facts = DimensionFacts::patched(
+            DimensionFacts::overworld(),
+            "test:crypt",
+            &serde_json::from_str(&crypt.dimension_type).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(facts.default_clock.as_deref(), Some("test:dungeon"));
+        assert!(facts.has_timeline("minecraft:day"));
+
+        struct Unknown;
+        #[mod_api::__subscriptions]
+        impl Hooks for Unknown {
+            fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+                r.register_world_clock("minecraft:overworld");
+                r.register_world_clock("twice");
+                r.register_world_clock("twice");
+                r.register_dimension(
+                    "lost",
+                    DimensionSettings {
+                        clock: Some("test:nowhere".into()),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        let errors = install_parts(&[ModEntry::new("test", Box::new(Unknown))]).unwrap_err();
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(errors.iter().any(|e| e.contains("minecraft:overworld")));
+        assert!(errors.iter().any(|e| e.contains("test:twice twice")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("unknown world clock \"test:nowhere\""))
+        );
     }
 
     /// The bed rule goes into the dimension type as vanilla's `bed_rule` attribute, and the game's

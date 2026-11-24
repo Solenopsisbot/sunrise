@@ -21,7 +21,7 @@ mod anger_tests;
 mod hurt_by_refs;
 #[cfg(test)]
 #[path = "persist/lookup_order_tests.rs"]
-mod lookup_order_tests;
+pub(in crate::game) mod lookup_order_tests;
 
 use super::{FallingBlock, Game};
 
@@ -1396,6 +1396,7 @@ impl Game<'_> {
             .then(|| super::interactions::InteractionState::from_tag(tag));
         let rotation = entity_nbt::rotation(tag);
         Some(super::commands::OtherEntity {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             join: Default::default(),
             id,
@@ -2342,7 +2343,7 @@ impl Game<'_> {
     }
 
     /// A loaded projectile's `Owner`: living hit credit and vehicle collision identity.
-    fn claim_owner(&self, p: &mut sunrise_client::projectiles::Projectile) {
+    pub(in crate::game) fn claim_owner(&self, p: &mut sunrise_client::projectiles::Projectile) {
         let Some(uuid) = p.owner_uuid else {
             return;
         };
@@ -2754,7 +2755,7 @@ fn join_saved_team(board: &mut Scoreboard, name: &str, tag: &Tag) -> bool {
 
 #[cfg(test)]
 #[path = "persist/tests.rs"]
-mod tests;
+pub(in crate::game) mod tests;
 #[cfg(test)]
 mod interaction_saved_defaults_tests {
     use super::*;

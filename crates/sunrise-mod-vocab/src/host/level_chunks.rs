@@ -67,15 +67,20 @@ pub trait LevelChunksBackendMut {
     /// Side: server.
     /// Load chunk `pos` (`[x, z]`, in chunks) of the level from its save, or generate it, to
     /// FULL, as vanilla's `Level.getChunk(x, z)` does (`ServerChunkCache.getChunk(x, z,
-    /// ChunkStatus.FULL, true)`), then read or write it with the level's other calls. True once
-    /// the chunk is full, its initial light done; a chunk already full answers true at once.
+    /// ChunkStatus.FULL, true)`), then read or write it with the level's other calls.
+    /// `Ok` once the chunk is full, its initial light done; a chunk already full answers `Ok` at
+    /// once. A chunk among the level's four most recent FULL lookups (this
+    /// call's, or a resident read's such as `host.chunk`), cleared at the end of every tick of
+    /// the level's chunks, answers with no ticket (`ServerChunkCache.getChunk`'s cache).
     /// To light it, the 8 chunks around it are loaded too (vanilla only generates them part of
     /// the way); they hold no ticket and unload with the next unload sweep.
     ///
     /// **The call blocks the server tick until the chunk is loaded or generated**, as
     /// vanilla's does: a chunk that has never been generated can take a long while, so load the
     /// chunks a mod needs ahead of time rather than many in one tick. There is no timeout, as in
-    /// vanilla; the call only gives up, false, if the level closes meanwhile.
+    /// vanilla; the call gives up with `ChunkLoadError::Unloaded` if the level closes meanwhile,
+    /// and with `ChunkLoadError::Failed` once generation panics for the chunk or one its generation needs around it (a
+    /// mod's chunk generator: vanilla would crash, Sunrise contains it and reports it).
     ///
     /// Like vanilla, the call places an `UNKNOWN` ticket at FULL's level on the chunk: it keeps
     /// the chunk loaded, not ticking, through the next ticket purge and expires at the one after
@@ -89,10 +94,10 @@ pub trait LevelChunksBackendMut {
     /// (`set_block`) still answer `LevelWriteError::Unavailable` there. The `chunk_load`
     /// listeners of each chunk the call brings in run during the call, while that chunk is
     /// loaded and before the call returns, as NeoForge's `ChunkEvent.Load` does inside
-    /// `getChunk`. False for a
+    /// `getChunk`. `Unloaded`, with no ticket, for a
     /// stale handle, on a client, for a level the server has not opened, for a chunk past
     /// `ChunkPos.isValid` (beyond `ChunkPyramid.MAX_CHUNK_COORDINATE_VALUE` on x or z, where
-    /// vanilla's block reads and writes stop, `Level.isInValidBounds`), and while the level's
-    /// generation is paused or stopped.
-    fn level_load_chunk(&mut self, level: LevelRef, pos: [i32; 2]) -> bool;
+    /// vanilla's block reads and writes stop, `Level.isInValidBounds`, and vanilla's future is
+    /// `ChunkHolder.UNLOADED_CHUNK`), and while the level's generation is paused or stopped.
+    fn level_load_chunk(&mut self, level: LevelRef, pos: [i32; 2]) -> Result<(), ChunkLoadError>;
 }

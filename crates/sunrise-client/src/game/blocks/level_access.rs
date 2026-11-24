@@ -963,8 +963,8 @@ impl LevelAccess for GameLevel<'_> {
         )
     }
     fn biome_name(&self, pos: BlockPos) -> Option<&str> {
-        let chunk = self.world.chunks.get(&(pos.x >> 4, pos.z >> 4))?;
-        Some(&self.biomes.get(chunk.biome(pos.x, pos.y, pos.z)).name)
+        let biome = self.world.biome_at(self.biome_zoom, pos.x, pos.y, pos.z)?;
+        Some(&self.biomes.get(biome).name)
     }
     fn world_seed(&self) -> i64 {
         self.seed

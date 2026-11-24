@@ -248,9 +248,11 @@ impl Metadata {
             .map(|ids| ids.into_iter().map(str::to_owned).collect())
     }
 
+    /// What compiling the mods' registry graph adds, judged against `plan`'s game lock: a package
+    /// the game locks at the same version is the game's own native library provider.
     pub fn inventory(
         &self,
-        game: &super::registry_lock::RegistryLock,
+        plan: &super::registry_plan::Plan,
         links: &[NativeLink],
     ) -> Result<Inventory, String> {
         let reachable = self.reachable(false)?;
@@ -263,18 +265,17 @@ impl Metadata {
                 continue;
             }
             let label = format!("{} {}", package.name, package.version);
-            // The game's own copy is reused, not compiled again, so it provides no second library.
-            if game
+            // The package the game locks at this version links the same library the game does,
+            // so it is no second provider. It is still compiled here, build script included.
+            let games_own = plan
+                .game
                 .packages
                 .keys()
-                .any(|id| id.name == package.name && id.version.to_string() == package.version)
-            {
-                continue;
-            }
+                .any(|id| id.name == package.name && id.version.to_string() == package.version);
             if let Some(library) = package
                 .links
                 .as_ref()
-                .filter(|_| runtime.contains(package.id.as_str()))
+                .filter(|_| !games_own && runtime.contains(package.id.as_str()))
                 && let Some(existing) = links.iter().find(|claim| &claim.library == library)
             {
                 return Err(format!(
@@ -344,11 +345,13 @@ mod tests {
             ]
         })).unwrap()
     }
+    /// A plan whose game locks no registry package.
+    fn no_game() -> super::super::registry_plan::Plan {
+        super::super::registry_plan::Plan::read("package = []", &[], &[]).unwrap()
+    }
     #[test]
     fn consent_counts_only_reachable_build_packages_and_names_executable_code() {
-        let inventory = metadata()
-            .inventory(&super::super::registry_lock::RegistryLock::default(), &[])
-            .unwrap();
+        let inventory = metadata().inventory(&no_game(), &[]).unwrap();
         assert_eq!(inventory.added_crates, 2);
         assert_eq!(inventory.build_scripts, ["native-sys 2.0.0"]);
         assert_eq!(inventory.proc_macros, ["derive-example 1.0.0"]);
@@ -359,7 +362,7 @@ mod tests {
         metadata.resolve.nodes[0].deps[0].dep_kinds[0].kind = Some("build".into());
         let inventory = metadata
             .inventory(
-                &super::super::registry_lock::RegistryLock::default(),
+                &no_game(),
                 &[NativeLink {
                     name: "sdk-sys".into(),
                     version: "1.0.0".into(),
@@ -375,7 +378,7 @@ mod tests {
     fn a_second_native_provider_is_refused_with_both_packages_versions_and_library() {
         let error = metadata()
             .inventory(
-                &super::super::registry_lock::RegistryLock::default(),
+                &no_game(),
                 &[NativeLink {
                     name: "sdk-sys".into(),
                     version: "1.0.0".into(),
@@ -388,36 +391,49 @@ mod tests {
         }
     }
 
-    /// The SDK's lock and its claim on native library `example`, held by `native-sys` at `version`.
-    fn sdk_with_native_sys(
-        version: &str,
-    ) -> (super::super::registry_lock::RegistryLock, NativeLink) {
-        let lock = super::super::registry_lock::RegistryLock::parse(&format!(
+    /// The plan the build makes from the SDK's `sunrise-prebuilt.json`, whose lock holds
+    /// `native-sys` at `version` and which names it as the provider of native library `example`.
+    fn sdk_plan(version: &str) -> (super::super::registry_plan::Plan, Vec<NativeLink>) {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = format!(
             "[[package]]\nname = \"native-sys\"\nversion = \"{version}\"\nsource = \"{}\"\nchecksum = \"{}\"\n",
             sunrise_addresses::CARGO_CRATES_IO_SOURCE,
             "0".repeat(64)
-        ))
+        );
+        std::fs::write(
+            dir.path().join("sunrise-prebuilt.json"),
+            serde_json::json!({
+                "package_format": sunrise_mod_package::sdk::PACKAGE_FORMAT,
+                "commit": "0".repeat(40),
+                "rustc": "rustc",
+                "target": "x86_64-unknown-linux-gnu",
+                "side": "client",
+                "registry_lock": lock,
+                "native_links": [{"name": "native-sys", "version": version, "library": "example"}],
+            })
+            .to_string(),
+        )
         .unwrap();
-        let link = NativeLink {
-            name: "native-sys".into(),
-            version: version.into(),
-            library: "example".into(),
-        };
-        (lock, link)
+        let sdk = super::super::prebuilt::identity(dir.path()).unwrap();
+        let plan =
+            super::super::registry_plan::Plan::read(sdk.registry_lock.as_ref().unwrap(), &[], &[])
+                .unwrap();
+        (plan, sdk.native_links.unwrap())
     }
 
     #[test]
-    fn the_sdks_own_native_provider_at_the_same_version_is_reused() {
-        let (game, link) = sdk_with_native_sys("2.0.0");
-        let inventory = metadata().inventory(&game, &[link]).unwrap();
-        assert_eq!(inventory.added_crates, 1);
-        assert!(inventory.build_scripts.is_empty());
+    fn the_sdks_own_native_provider_at_the_same_version_is_no_second_provider() {
+        let (plan, links) = sdk_plan("2.0.0");
+        let inventory = metadata().inventory(&plan, &links).unwrap();
+        // It is still compiled for the mod, so it still asks for consent.
+        assert_eq!(inventory.added_crates, 2);
+        assert_eq!(inventory.build_scripts, ["native-sys 2.0.0"]);
     }
 
     #[test]
     fn the_sdks_native_provider_at_another_version_is_refused() {
-        let (game, link) = sdk_with_native_sys("1.0.0");
-        let error = metadata().inventory(&game, &[link]).unwrap_err();
+        let (plan, links) = sdk_plan("1.0.0");
+        let error = metadata().inventory(&plan, &links).unwrap_err();
         for detail in ["native-sys 2.0.0", "native-sys 1.0.0", "example"] {
             assert!(error.contains(detail), "{error}");
         }

@@ -457,6 +457,22 @@ impl Menu {
         self.start_click(env, slot_index, button, input).map(|_| ())
     }
 
+    /// Like [`Self::click`], resolving each creative-screen `Input::Throw` drop
+    /// through `on_creative_drop` before charging the throttler and deciding the
+    /// next take in a repeated throw loop.
+    pub fn click_with_creative_drop(
+        &mut self,
+        env: &Env,
+        slot_index: i32,
+        button: i32,
+        input: Input,
+        mut on_creative_drop: impl FnMut(&ItemStack) -> bool,
+    ) -> Result<(), &'static str> {
+        let rest = self.click_planned(env, slot_index, button, input, &mut on_creative_drop)?;
+        let _ = self.with_result_notifications(rest);
+        Ok(())
+    }
+
     /// Start a click that may suspend at the first take or `createResult`.
     pub fn start_click(
         &mut self,
@@ -465,7 +481,7 @@ impl Menu {
         button: i32,
         input: Input,
     ) -> Result<Option<ClickContinuation>, &'static str> {
-        let rest = self.click_planned(env, slot_index, button, input)?;
+        let rest = self.click_planned(env, slot_index, button, input, &mut |_| false)?;
         Ok(self.with_result_notifications(rest))
     }
 
@@ -503,6 +519,7 @@ impl Menu {
                 previous: None,
                 checked: true,
             },
+            &mut |_| false,
         ))
     }
 
@@ -512,6 +529,7 @@ impl Menu {
         slot_index: i32,
         button: i32,
         input: Input,
+        on_creative_drop: &mut dyn FnMut(&ItemStack) -> bool,
     ) -> Result<Option<ClickContinuation>, &'static str> {
         self.touch();
         let size = self.state.slots.len() as i32;
@@ -581,6 +599,7 @@ impl Menu {
                                 source,
                                 remaining,
                             },
+                            on_creative_drop,
                         ));
                     }
                     let quick_slots = self.state.quick_slots.clone();
@@ -661,6 +680,7 @@ impl Menu {
                         previous: None,
                         checked: false,
                     },
+                    on_creative_drop,
                 ));
             } else {
                 if slot_index < 0 {
@@ -711,6 +731,7 @@ impl Menu {
                     previous: None,
                     repeat: button == 1,
                 },
+                on_creative_drop,
             ));
         } else if input == Input::PickupAll && slot_index >= 0 {
             if !in_range(slot_index) {
@@ -726,6 +747,7 @@ impl Menu {
                         step,
                         pass: 0,
                     },
+                    on_creative_drop,
                 ));
             }
         }
@@ -1100,7 +1122,7 @@ impl Menu {
                         return if self.take_pending() {
                             Some(ClickContinuation(rest))
                         } else {
-                            self.run_click_step(env, rest)
+                            self.run_click_step(env, rest, &mut |_| false)
                         };
                     }
                     self.state.containers[PLAYER][inv_slot] = Some(taken.clone());
@@ -1301,7 +1323,12 @@ impl Menu {
 
     /// Run until the next take or the end of this click. The menu and its rules are borrowed
     /// anew after dispatch, so a listener can change the next step's inputs.
-    fn run_click_step(&mut self, env: &Env, step: ClickStep) -> Option<ClickContinuation> {
+    fn run_click_step(
+        &mut self,
+        env: &Env,
+        step: ClickStep,
+        on_creative_drop: &mut dyn FnMut(&ItemStack) -> bool,
+    ) -> Option<ClickContinuation> {
         match step {
             ClickStep::QuickCraft {
                 slots,
@@ -1378,6 +1405,7 @@ impl Menu {
                                 original,
                                 pass: MovePass::new(0, 2, false),
                             },
+                            on_creative_drop,
                         );
                     }
                     let Some(now) = self.quick_move_noted(env, slot) else {
@@ -1419,6 +1447,7 @@ impl Menu {
                             previous: Some(previous),
                             checked: false,
                         },
+                        on_creative_drop,
                     );
                 }
             }
@@ -1434,6 +1463,9 @@ impl Menu {
                 {
                     break;
                 }
+                if !self.can_throw() {
+                    break;
+                }
                 let Some(taken) = self.safe_take(env, slot, amount, u32::MAX) else {
                     break;
                 };
@@ -1445,8 +1477,8 @@ impl Menu {
                         repeat,
                     }));
                 }
-                self.drop_stack(&taken, env.items);
-                if !repeat {
+                self.throw_stack(&taken, env.items, on_creative_drop);
+                if !repeat || taken.is_empty() {
                     break;
                 }
                 previous = Some(taken);
@@ -1465,8 +1497,8 @@ impl Menu {
                 taken,
                 repeat,
             } => {
-                self.drop_stack(&taken, env.items);
-                if repeat {
+                self.throw_stack(&taken, env.items, on_creative_drop);
+                if repeat && !taken.is_empty() {
                     return self.run_click_step(
                         env,
                         ClickStep::Throw {
@@ -1475,6 +1507,7 @@ impl Menu {
                             previous: Some(taken),
                             repeat,
                         },
+                        on_creative_drop,
                     );
                 }
             }
@@ -1601,7 +1634,7 @@ impl Menu {
         if self.advance_result_notification(env) {
             return Some(rest);
         }
-        let next = self.run_click_step(env, rest.0);
+        let next = self.run_click_step(env, rest.0, &mut |_| false);
         self.with_result_notifications(next)
     }
 }

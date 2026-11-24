@@ -129,7 +129,7 @@ impl ParticleEngine {
             {
                 return true;
             }
-            self.pending.push(PendingParticle::Ordinary(particle));
+            self.push(particle);
         }
         true
     }

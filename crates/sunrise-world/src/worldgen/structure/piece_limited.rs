@@ -235,7 +235,7 @@ pub fn assemble(
         return None;
     }
     let mut first = PoolPiece {
-        bounding_box: element.bounding_box(start, rotation),
+        bounding_box: element.bounding_box(resources, start, rotation),
         ground_level_delta: element.ground_level_delta(),
         element,
         position: start,
@@ -257,7 +257,7 @@ pub fn assemble(
         }
         None => start[1],
     };
-    first.moved(cy - (b.min[1] + first.ground_level_delta));
+    first.moved(cy.wrapping_sub(b.min[1].wrapping_add(first.ground_level_delta)));
     let start_box = first.bounding_box;
     let (start_position, start_rotation) = (first.position, first.rotation);
     let counts = Counts::new(limits, resources);
@@ -273,7 +273,7 @@ pub fn assemble(
         if attempts > 0 {
             let element = pool.random_template(&mut random);
             pieces = vec![PoolPiece {
-                bounding_box: element.bounding_box(start_position, start_rotation),
+                bounding_box: element.bounding_box(resources, start_position, start_rotation),
                 ground_level_delta: element.ground_level_delta(),
                 element,
                 position: start_position,
@@ -441,7 +441,7 @@ fn adjust(
     if limits.no_liquid || !ocean_floor {
         land = land.max(sea);
     } else {
-        land = land.min(sea - box0.span()[1]);
+        land = land.min(sea.wrapping_sub(box0.span()[1]));
     }
     // offsetToNewHeight.
     if limits.max_y.is_some()
@@ -719,7 +719,7 @@ impl Assembler<'_> {
         };
         let (context_free, depth) = self.states[source].clone();
         let mut source_free: Option<Rc<RefCell<Free>>> = None;
-        for jigsaw in element.shuffled_jigsaws(self.resources, position, rotation, random) {
+        for jigsaw in element.shuffled_jigsaws(self.resources, position, rotation, &mut *random) {
             let Some(target) = self.pool(&jigsaw.pool) else {
                 continue;
             };
@@ -834,8 +834,8 @@ impl Assembler<'_> {
             shuffle(&mut rotations, random);
             for rotation in rotations {
                 let target_jigsaws =
-                    target.shuffled_jigsaws(self.resources, [0; 3], rotation, random);
-                let hack_box = target.bounding_box([0; 3], rotation);
+                    target.shuffled_jigsaws(self.resources, [0; 3], rotation, &mut *random);
+                let hack_box = target.bounding_box(self.resources, [0; 3], rotation);
                 let expand_to = if self.config.use_expansion_hack && hack_box.span()[1] <= 16 {
                     target_jigsaws
                         .iter()
@@ -845,10 +845,11 @@ impl Assembler<'_> {
                                 return 0;
                             }
                             let child = self.pool(&tj.pool);
-                            let child_size = child.as_ref().map_or(0, |p| p.max_size());
+                            let child_size =
+                                child.as_ref().map_or(0, |p| p.max_size(self.resources));
                             let fallback_size = child
                                 .and_then(|p| self.pool(&p.fallback))
-                                .map_or(0, |p| p.max_size());
+                                .map_or(0, |p| p.max_size(self.resources));
                             child_size.max(fallback_size)
                         })
                         .max()
@@ -863,7 +864,7 @@ impl Assembler<'_> {
                     let target_local = target_jigsaw.pos;
                     let raw_position: [i32; 3] =
                         std::array::from_fn(|i| slot.target_pos[i] - target_local[i]);
-                    let raw_box = target.bounding_box(raw_position, rotation);
+                    let raw_box = target.bounding_box(self.resources, raw_position, rotation);
                     let target_rigid = target.projection() == Projection::Rigid;
                     let delta_y = local_y - target_local[1] + step(jigsaw.front)[1];
                     let target_y = if source_rigid && target_rigid {
@@ -886,7 +887,7 @@ impl Assembler<'_> {
                         continue;
                     }
                     let target_ground = if target_rigid {
-                        source_ground - delta_y
+                        source_ground.wrapping_sub(delta_y)
                     } else {
                         target.ground_level_delta()
                     };

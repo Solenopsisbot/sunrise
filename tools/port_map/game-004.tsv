@@ -77,12 +77,12 @@ Display.setTransformation	port	crates/sunrise-client/src/game/modding/native_ent
 Display.addAdditionalSaveData	port	crates/sunrise-client/src/game/world/persist/display.rs::Game::write_display_nbt	the display transformation, duration, culling, brightness, billboard and shadow settings in the saved compound
 Display.BlockDisplay.addAdditionalSaveData	inline	crates/sunrise-client/src/game/world/persist/display.rs::Game::write_display_nbt	block_state, defaulting to air
 Display.ItemDisplay.addAdditionalSaveData	inline	crates/sunrise-client/src/game/world/persist/display.rs::Game::write_display_nbt	item_display context and the nonempty item stack
-Display.getInterpolatedBoundingBox	port	crates/sunrise-client/src/text_display.rs::culling_box	width-centred XZ box from y to y+height at the interpolated origin; used by Game::display_in_view
+Display.getInterpolatedBoundingBox	port	crates/sunrise-client/src/game/entities/text_displays.rs::RemoteTextDisplay::interpolated_bounding_box	translates the cached culling box to the interpolated origin for Game::display_in_view_with_frustum
 Display.setBrightnessOverride	missing		minor: server side setter; there is no local display entity
 Display.getBrightnessOverride	inline	crates/sunrise-client/src/game/entities/text_displays.rs::Game::text_display_geometry	the packed sky and block light of the brightness entry (-1 uses the world light)
 Display.calculateInterpolationProgress	port	crates/sunrise-client/src/game/entities/text_displays.rs::RemoteTextDisplay::progress
 Display.updateCulling	port	crates/sunrise-client/src/text_display.rs::culling_box	noCulling when width or height is 0 (`no_culling`); else the width/height AABB
-Display.shouldRenderAtSqrDistance	inline	crates/sunrise-client/src/game/entities/text_displays.rs::Game::display_in_view_with_frustum	view_range * 64 * view scale squared; frustum when width and height are set
+Display.shouldRenderAtSqrDistance	port	crates/sunrise-client/src/game/entities/text_displays.rs::RemoteTextDisplay::in_range	strict squared-distance comparison at the live position against (view_range * 64 * view scale)^2
 Display.getTeamColor	missing		minor: glow_color_override is read but a glowing display gets no coloured outline
 Display.createFreshRenderState	inline	crates/sunrise-client/src/game/entities/text_displays.rs::RemoteTextDisplay::tick	the copy of the synced data when no interpolation runs
 Display.createInterpolatedRenderState	inline	crates/sunrise-client/src/game/entities/text_displays.rs::RemoteTextDisplay::tick	the new start state is the old one blended to the last drawn progress (TextDisplayData::blend)

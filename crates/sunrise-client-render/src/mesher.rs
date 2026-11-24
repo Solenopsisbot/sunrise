@@ -25,7 +25,7 @@ pub use visibility_plan::{
 };
 #[cfg(test)]
 #[path = "mesher/source_tests.rs"]
-mod source_tests;
+pub(crate) mod source_tests;
 use crate::connected::{FaceNeighbours, Overlay, Pick, TileLayer};
 use crate::{
     assets::{Assets, RenderAssets},
@@ -537,6 +537,11 @@ impl SectionMesh {
     /// leave out those facing away from the eye (`sides`).
     /// Then lays them out compactly (`packed`) while the renderer reads that.
     pub fn sort_solid(&mut self) {
+        self.sort_solid_as(packed::packing());
+    }
+
+    /// `sort_solid`, then the compact layout only when `compact`.
+    pub(crate) fn sort_solid_as(&mut self, compact: bool) {
         let quads = self.solid.len() / 4;
         if !self.solid_tints.is_empty() {
             self.solid_tints.resize(quads, packed::UNKNOWN_TINT);
@@ -549,7 +554,7 @@ impl SectionMesh {
         self.bounds = self.compute_bounds();
         self.packed.clear();
         self.packed_far = false;
-        if packed::packing() && quads > 0 && self.solid_tints.len() == quads {
+        if compact && quads > 0 && self.solid_tints.len() == quads {
             packed::layout_into(&self.solid, &self.solid_tints, &mut self.packed);
         }
         self.solid_tints.clear();

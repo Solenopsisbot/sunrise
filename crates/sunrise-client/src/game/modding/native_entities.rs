@@ -16,17 +16,8 @@ impl super::commands::OtherEntity {
     pub(in crate::game) fn display_marker_or_interaction_bounds(
         &self,
     ) -> Option<sunrise_core::geometry::Aabb> {
-        if !matches!(
-            self.kind.as_str(),
-            "minecraft:block_display"
-                | "minecraft:item_display"
-                | "minecraft:text_display"
-                | "minecraft:marker"
-                | "minecraft:interaction"
-        ) {
-            return None;
-        }
-        Some(if let Some(settings) = self.interaction {
+        let dimensions = self.vanilla_dimensions()?;
+        let vanilla = if let Some(settings) = self.interaction {
             let mut interaction = super::interactions::RemoteInteraction::new([
                 self.position.x,
                 self.position.y,
@@ -39,6 +30,34 @@ impl super::commands::OtherEntity {
         } else {
             // Display and Marker have zero-sized physical dimensions.
             sunrise_core::geometry::Aabb::new(self.position, self.position)
+        };
+        Some(sunrise_client::pose::SizeAnswer::sized_box(
+            self.size_answer,
+            dimensions,
+            self.position,
+            vanilla,
+        ))
+    }
+
+    /// `Entity.getDimensions(pose)` of a display, a marker or an interaction this list holds,
+    /// the kinds whose box follows their size here: an interaction's
+    /// `EntityDimensions.scalable(width, height)`, none for a display or a marker. None for
+    /// every other kind the list keeps without simulating it (a leash knot, an eye of ender),
+    /// which isn't asked.
+    pub(in crate::game) fn vanilla_dimensions(&self) -> Option<[f32; 3]> {
+        if !matches!(
+            self.kind.as_str(),
+            "minecraft:block_display"
+                | "minecraft:item_display"
+                | "minecraft:text_display"
+                | "minecraft:marker"
+                | "minecraft:interaction"
+        ) {
+            return None;
+        }
+        Some(match self.interaction {
+            Some(settings) => [settings.width, settings.height, settings.height * 0.85],
+            None => [0.0; 3],
         })
     }
 }
@@ -1075,6 +1094,7 @@ mod tests {
                 );
                 drop(seen);
                 game.tnts.push(super::super::tnt::PrimedTnt {
+                    size_answer: None,
                     attachment_lifetime: Default::default(),
                     rotation: [0.0, 0.0],
                     join: Default::default(),

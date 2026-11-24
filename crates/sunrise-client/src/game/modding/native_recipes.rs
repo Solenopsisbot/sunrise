@@ -330,6 +330,14 @@ impl Game<'_> {
             return Err(CreativeGiveError::NotCreative);
         }
         let mut stack = stack.try_into_engine(self.items())?;
+        if self.remote.is_some()
+            && !self
+                .creative_screen
+                .catalog()
+                .item_enabled(&stack, self.enabled_feature_ids())
+        {
+            return Err(CreativeGiveError::FeatureDisabled);
+        }
         let max = self.stack_max_size(&stack);
         let inventory = self.inventory[..36].to_vec();
         let offhand = self.offhand.clone();

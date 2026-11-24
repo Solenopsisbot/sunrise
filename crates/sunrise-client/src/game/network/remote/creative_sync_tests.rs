@@ -184,6 +184,15 @@ mod give_stack {
                             mod_api::StackWriteError::StackableDamageable
                         ))
                     );
+                    let synced = game.remote.as_ref().unwrap().synced.clone();
+                    game.remote.as_mut().unwrap().features = Vec::<String>::new().into();
+                    assert_eq!(
+                        game.give_stack(&stone),
+                        Err(CreativeGiveError::FeatureDisabled)
+                    );
+                    assert_eq!(game.remote.as_ref().unwrap().synced, synced);
+                    game.remote.as_mut().unwrap().features =
+                        ["minecraft:vanilla".to_owned()].into();
                     game.options.execution_role =
                         crate::game::execution_role::ExecutionRole::IntegratedServer;
                     assert_eq!(game.give_stack(&stone), Err(CreativeGiveError::Unavailable));

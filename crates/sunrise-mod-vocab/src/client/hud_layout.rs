@@ -133,6 +133,22 @@ pub enum GuiDraw {
         scale: [f32; 2],
         pivot: [f32; 2],
     },
+    /// `PlayerFaceExtractor.extractRenderState` of the player `uuid`'s skin: the face, then the
+    /// hat layer when `hat`, each `size` GUI pixels square at `x, y`, tinted ARGB `color`, under
+    /// the current pose and clip. `flip` draws it upside down; nothing is read from a name.
+    /// The skin is the one the client has: a player on the connection's player list draws its
+    /// `PlayerInfo` skin, any other UUID its profile's, looked up once in the background as a
+    /// player head's is. Until that skin is downloaded and uploaded, and when there is none,
+    /// the UUID's default skin is drawn (`DefaultPlayerSkin.get`), so the op never waits.
+    PlayerFace {
+        uuid: u128,
+        x: i32,
+        y: i32,
+        size: i32,
+        hat: bool,
+        flip: bool,
+        color: u32,
+    },
     /// `pose().pushMatrix()` followed by `ops`.
     Push(Vec<PoseOp>),
     /// `pose().popMatrix()`.

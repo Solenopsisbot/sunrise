@@ -634,7 +634,7 @@ def main():
         expected_render = f'{len(RENDER_WITNESS_TESTS)} passed; 0 failed'
         assert expected_render in render_log.read_text(encoding='utf-8'), f'expected "{expected_render}" in {render_log}'
 
-        client_bin = build_test_binary(build, 'sunrise-client', 'sunrise_client', env)
+        client_bin = lab.parity_fixtures()
         # Game fixtures register process-global keys and providers. Don't let another test replace them.
         for index, test in enumerate(CLIENT_WITNESS_TESTS):
             client_root = scratch / f'client-{index}'

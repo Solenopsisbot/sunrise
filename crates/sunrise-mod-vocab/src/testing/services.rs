@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 // no wire: in-process testing harness state, not a mod boundary payload.
 /// The server's command service: the commands run, in order, of which those listed as known
-/// succeed, and the feedback given.
+/// succeed, and the feedback and failure lines given.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct FakeCommands {
@@ -14,6 +14,8 @@ pub struct FakeCommands {
     pub ran: Vec<String>,
     /// Each feedback line given, in order.
     pub feedback: Vec<Text>,
+    /// Each failure line given, in order.
+    pub failure: Vec<Text>,
 }
 
 impl FakeCommands {
@@ -35,6 +37,11 @@ impl Commands for FakeCommands {
     fn feedback(&mut self, line: Text) -> Result<(), crate::text::TextFormError> {
         line.validate_depth()?;
         self.feedback.push(line);
+        Ok(())
+    }
+    fn failure(&mut self, line: Text) -> Result<(), crate::text::TextFormError> {
+        line.validate_depth()?;
+        self.failure.push(line);
         Ok(())
     }
 }

@@ -69,7 +69,9 @@
 //! [`Surface::read`] refuses an unknown `schema` number and malformed or truncated JSON with a
 //! typed [`ReadError`], and ignores fields it does not know. It does not recompute record
 //! hashes: a newer writer may hash contract fields this reader does not know, and the file's
-//! integrity is the signature's job. [`Surface::unsealed`] does, for a release gate that judges a
+//! integrity is the signature's job. The one exception is a schema 2 document, whose method and
+//! function records it rehashes to schema 3's recipe, so a mod pinned to such a build compares
+//! with current ones. [`Surface::unsealed`] does, for a release gate that judges a
 //! newer writer's file with this reader.
 pub mod build_data;
 pub mod child;
@@ -179,7 +181,11 @@ impl std::fmt::Display for ReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Json(error) => write!(f, "surface.json is not a valid surface: {error}"),
-            Self::Schema(schema) => write!(f, "surface schema {schema}, this tool reads {SCHEMA}"),
+            Self::Schema(schema) => write!(
+                f,
+                "surface schema {schema}, this tool reads {} and {SCHEMA}",
+                legacy_hash::OLD_RECIPE_SURFACE
+            ),
             Self::DuplicateId(id) => write!(f, "surface.json lists {id} twice"),
         }
     }
@@ -967,11 +973,14 @@ impl Surface {
         }
         let header: Header =
             serde_json::from_slice(bytes).map_err(|e| ReadError::Json(e.to_string()))?;
-        if header.schema != SCHEMA {
+        if ![legacy_hash::OLD_RECIPE_SURFACE, SCHEMA].contains(&header.schema) {
             return Err(ReadError::Schema(header.schema));
         }
-        let surface: Self =
+        let mut surface: Self =
             serde_json::from_slice(bytes).map_err(|e| ReadError::Json(e.to_string()))?;
+        if surface.schema == legacy_hash::OLD_RECIPE_SURFACE {
+            legacy_hash::rehash(&mut surface);
+        }
         let mut seen = BTreeSet::new();
         for (id, _) in surface.entries_with_engine() {
             if !seen.insert(id) {

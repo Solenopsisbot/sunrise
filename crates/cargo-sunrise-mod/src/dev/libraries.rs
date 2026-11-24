@@ -1,13 +1,18 @@
-//! Select the add-on's library projects before invoking the native build.
+//! Select the add-on's library mods before invoking the native build: the ones given with
+//! `--with`, then the signed v2 registry for every other required one.
 use crate::registry_source::{Registry, write_files};
 use std::{
-    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 use sunrise_mod_package::{
     Manifest, Package,
-    index::{self, Index, Kind, Project, Version, native::Bundle, resolve},
+    dependencies::{self, Dependency},
+    index::{
+        Kind,
+        native::Bundle,
+        v2::{Project, Release},
+    },
     manifest::Side,
 };
 
@@ -18,12 +23,47 @@ struct LocalSource {
 
 pub(super) struct Libraries {
     local: BTreeMap<String, LocalSource>,
-    index: Index,
+    /// Read only when a required library isn't given with `--with`.
+    registry: Option<Registry>,
     side: Side,
 }
 
+/// What fills one library slot.
+enum Source<'a> {
+    Local(&'a LocalSource),
+    Registry(Taken<'a>),
+}
+
+/// A registry release whose package was verified and whose manifest was read.
+struct Taken<'a> {
+    project: &'a Project,
+    release: &'a Release,
+    archive: PathBuf,
+    manifest: Manifest,
+    /// A native library's source files; none for a content library.
+    files: Option<BTreeMap<String, Vec<u8>>>,
+}
+
+impl Source<'_> {
+    fn manifest(&self) -> &Manifest {
+        match self {
+            Source::Local(source) => &source.package.manifest,
+            Source::Registry(taken) => &taken.manifest,
+        }
+    }
+}
+
+/// Whether a registry release can fill its slot: `Err` is why it can't, and the next older
+/// release is tried; the outer `Err` stops the build.
+type Take<'a> = Result<Result<Taken<'a>, String>, String>;
+
 impl Libraries {
-    pub(super) fn read(project: &Manifest, paths: &[&Path], side: Side) -> Result<Self, String> {
+    pub(super) fn read(
+        project: &Manifest,
+        paths: &[&Path],
+        side: Side,
+        cache: &Path,
+    ) -> Result<Self, String> {
         let mut local = BTreeMap::new();
         for path in paths {
             let path =
@@ -45,52 +85,156 @@ impl Libraries {
             local.insert(id.clone(), LocalSource { path, package });
         }
         // Walk libraries supplied with --with, including explicit optional libraries. Only an
-        // unsupplied required edge needs the index.
+        // unsupplied required edge needs the registry.
         let mut todo = vec![project];
         let mut seen = BTreeSet::new();
-        let mut index = Index::default();
+        let mut registry = None;
         'local_closure: while let Some(manifest) = todo.pop() {
-            for dep in
-                sunrise_mod_package::dependencies::from_manifest(&manifest.dependencies, side)
-            {
+            for dep in dependencies::from_manifest(&manifest.dependencies, side) {
                 if let Some(source) = local.get(&dep.id) {
                     if seen.insert(source.package.manifest.id.as_str()) {
                         todo.push(&source.package.manifest);
                     }
                 } else if !dep.optional && dep.id != project.id {
-                    index = Registry::default().read_index().map_err(|error| format!(
+                    registry = Some(Registry::read(cache).map_err(|error| format!(
                         "{} needs {} {}. Supply the library with --with <path> or use the Sunrise mod registry. Could not read the mod registry: {error}",
                         manifest.id, dep.id, dep.requirement
-                    ))?;
+                    ))?);
                     break 'local_closure;
                 }
             }
         }
-        Ok(Self { local, index, side })
+        Ok(Self {
+            local,
+            registry,
+            side,
+        })
     }
 
-    fn plan(
-        &self,
+    /// Fill every slot the project's required edges reach. A library given with `--with` takes
+    /// its slot whatever the registry holds; an optional edge never adds a registry library but
+    /// still constrains a library that is present. Each registry slot takes the newest release
+    /// that satisfies the requirements known when it is reached and that `take` accepts; a later
+    /// requirement it doesn't satisfy is reported, not solved.
+    fn select<'a>(
+        &'a self,
         project: &Manifest,
-        game: &str,
-        native_fits: impl Fn(&Project, &Version) -> bool,
-    ) -> Result<resolve::ManifestPlan<'_>, String> {
-        let archives: BTreeMap<_, _> = self
-            .local
+        mut take: impl FnMut(&'a Project, &'a Release) -> Take<'a>,
+    ) -> Result<BTreeMap<String, Source<'a>>, String> {
+        let mut chosen = BTreeMap::new();
+        let mut needs: Vec<(String, Dependency)> = Vec::new();
+        let mut todo = vec![(
+            project.id.clone(),
+            dependencies::from_manifest(&project.dependencies, self.side),
+        )];
+        while let Some((owner, edges)) = todo.pop() {
+            for dep in edges {
+                let (id, optional) = (dep.id.clone(), dep.optional);
+                needs.push((owner.clone(), dep));
+                if id == project.id || chosen.contains_key(&id) {
+                    continue;
+                }
+                let source = if let Some(local) = self.local.get(&id) {
+                    Source::Local(local)
+                } else if optional {
+                    continue;
+                } else {
+                    let wanted: Vec<_> = needs.iter().filter(|(_, d)| d.id == id).collect();
+                    Source::Registry(self.registry_release(&id, &wanted, &mut take)?)
+                };
+                todo.push((
+                    id.clone(),
+                    dependencies::from_manifest(&source.manifest().dependencies, self.side),
+                ));
+                chosen.insert(id, source);
+            }
+        }
+        for (owner, dep) in &needs {
+            let version = match chosen.get(&dep.id) {
+                Some(source) => &source.manifest().version,
+                None if dep.id == project.id => &project.version,
+                None => continue,
+            };
+            if !dep.requirement.matches(version) {
+                return Err(format!(
+                    "{owner} needs {id} {}, but {id} {version} was selected. Supply a matching library with --with <path>.",
+                    dep.requirement,
+                    id = dep.id,
+                ));
+            }
+        }
+        Ok(chosen)
+    }
+
+    fn registry_release<'a>(
+        &'a self,
+        id: &str,
+        wanted: &[&(String, Dependency)],
+        take: &mut impl FnMut(&'a Project, &'a Release) -> Take<'a>,
+    ) -> Result<Taken<'a>, String> {
+        let needs = wanted
             .iter()
-            .filter(|(_, source)| !source.path.is_dir())
-            .map(|(id, source)| index::sha256_file(&source.path).map(|hash| (id, hash)))
-            .collect::<Result<_, _>>()?;
-        let locals: Vec<_> = self
-            .local
+            .map(|(owner, dep)| format!("{owner} needs {id} {}", dep.requirement))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let index = &self
+            .registry
+            .as_ref()
+            .ok_or_else(|| format!("{needs}. Supply the library with --with <path>."))?
+            .index;
+        // A slot is the in-game ID; the provider is never picked by the index's order.
+        let providers: Vec<_> = index
+            .projects
             .iter()
-            .map(|(id, source)| resolve::LocalMod {
-                manifest: &source.package.manifest,
-                sha256: archives.get(id).map(String::as_str),
+            .filter(|p| {
+                p.mod_id == id
+                    && matches!(p.kind, Kind::Mod | Kind::NativeMod)
+                    && index.revoked(&p.id, "").is_none()
             })
             .collect();
-        resolve::for_manifest(&self.index, project, &locals, game, self.side, native_fits)
-            .map_err(|error| format!("{}: {error}. Supply the library with --with <path> or use a matching version in the Sunrise mod registry.", project.id))
+        let project = match providers[..] {
+            [project] => project,
+            [] => {
+                return Err(format!(
+                    "{needs}: no project in the Sunrise mod registry provides it. Supply the library with --with <path>."
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "{needs}: several projects in the Sunrise mod registry provide it ({}). Supply the one to use with --with <path>.",
+                    providers
+                        .iter()
+                        .map(|p| format!("{} from {}", p.id, p.repository.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        };
+        let mut releases: Vec<_> = project
+            .releases
+            .iter()
+            .filter(|release| {
+                wanted
+                    .iter()
+                    .all(|(_, dep)| dep.requirement.matches(&release.version))
+                    && index.revoked(&project.id, &release.file.sha256).is_none()
+            })
+            .collect();
+        releases.sort_by(|a, b| b.version.cmp_precedence(&a.version));
+        let mut rejected = Vec::new();
+        for release in releases {
+            match take(project, release)? {
+                Ok(taken) => return Ok(taken),
+                Err(why) => rejected.push(format!("{id} {}: {why}", release.version)),
+            }
+        }
+        Err(std::iter::once(format!(
+            "{needs}: no release of registry project {} satisfies it and fits this build. Supply the library with --with <path>.",
+            project.id
+        ))
+        .chain(rejected)
+        .collect::<Vec<_>>()
+        .join("\n"))
     }
 
     pub(super) fn stage(
@@ -101,74 +245,76 @@ impl Libraries {
         root: &Path,
         release: bool,
     ) -> Result<BTreeMap<String, PathBuf>, String> {
-        let registry = Registry::default();
-        let build_data = RefCell::new(None);
-        let rejected = RefCell::new(Vec::new());
-        let unavailable = RefCell::new(None);
-        let selected = self.plan(&bundle.manifest, &bundle.native().game, |project, row| {
-            if unavailable.borrow().is_some() {
-                return false;
-            }
-            // The old registry index's sources carry no attestation, so a release never
-            // compiles one.
-            if release {
-                *unavailable.borrow_mut() = Some(format!(
-                    "{} {}: a release can't take a library from the old registry index, whose sources aren't attested",
-                    project.id, row.version
-                ));
-                return false;
-            }
-            let candidate = (|| {
-                let source = registry.native_source(cache, &self.index, project, row)?;
-                if source
-                    .manifest
-                    .native
-                    .as_ref()
-                    .expect("native source")
-                    .sunrise
-                    == sdk.index.build.commit
-                {
-                    return Ok(None);
+        let mut build_data = None;
+        let game = &bundle.native().game;
+        let selected = self.select(&bundle.manifest, |project, row| {
+            let registry = self.registry.as_ref().expect("a registry release");
+            let archive = registry.package(cache, project, row)?;
+            let failed = |e: String| format!("{}: {e}", archive.display());
+            let (manifest, files) = if project.kind == Kind::NativeMod {
+                let source = Bundle::read(&archive).map_err(failed)?;
+                (source.manifest, Some(source.files))
+            } else {
+                let package = Package::read(&archive).map_err(failed)?;
+                if package.is_native() {
+                    return Ok(Err(
+                        "the registry lists content, but its package is native".into()
+                    ));
                 }
-                let candidate = tempfile::tempdir_in(cache).map_err(|e| e.to_string())?;
-                write_files(candidate.path(), source.files)?;
-                Ok(check_fit(
-                    &bundle.dir,
-                    sdk,
-                    candidate.path(),
-                    &source.manifest,
-                    &mut build_data.borrow_mut(),
-                    None,
-                )
-                .err())
-            })();
-            match candidate {
-                Ok(None) => true,
-                Ok(Some(why)) => {
-                    rejected
-                        .borrow_mut()
-                        .push(format!("{} {}: {why}", project.id, row.version));
-                    false
+                (package.manifest, None)
+            };
+            if manifest.id != project.mod_id || manifest.version != row.version {
+                return Ok(Err(format!(
+                    "its package is {} {}",
+                    manifest.id, manifest.version
+                )));
+            }
+            if let (Some(files), Some(native)) = (&files, &manifest.native) {
+                if native.game != *game {
+                    return Ok(Err(format!("it is made for Minecraft {}", native.game)));
                 }
-                Err(error) => {
-                    *unavailable.borrow_mut() = Some(error);
-                    false
+                if native.sunrise != sdk.index.build.commit {
+                    let candidate = tempfile::tempdir_in(cache).map_err(|e| e.to_string())?;
+                    write_files(candidate.path(), files)?;
+                    if let Err(why) = check_fit(
+                        &bundle.dir,
+                        sdk,
+                        candidate.path(),
+                        &manifest,
+                        &mut build_data,
+                        release.then_some(root),
+                    ) {
+                        return Ok(Err(why));
+                    }
                 }
             }
-        });
-        if let Some(error) = unavailable.into_inner() {
-            return Err(error);
-        }
-        let selected = selected.map_err(|error| {
-            std::iter::once(error)
-                .chain(rejected.into_inner())
-                .collect::<Vec<_>>()
-                .join("\n")
+            Ok(Ok(Taken {
+                project,
+                release: row,
+                archive,
+                manifest,
+                files,
+            }))
         })?;
-        let mut build_data = build_data.into_inner();
         let mut origins = BTreeMap::new();
-        for id in selected.local {
-            let source = &self.local[&id];
+        for (id, source) in selected {
+            let source = match source {
+                Source::Local(source) => source,
+                Source::Registry(taken) => {
+                    match taken.files {
+                        Some(files) => write_files(&root.join(super::stage_name(&id)), files)?,
+                        None => super::copy(
+                            &taken.archive,
+                            &root.join(format!("{}.smod", super::stage_name(&id))),
+                        )?,
+                    }
+                    println!(
+                        "Using library {id} {} from the Sunrise mod registry (project {})",
+                        taken.release.version, taken.project.id
+                    );
+                    continue;
+                }
+            };
             if let Some(native) = &source.package.manifest.native {
                 let into = root.join(super::stage_name(&id));
                 let files = if source.path.is_dir() {
@@ -203,16 +349,6 @@ impl Libraries {
                 source.package.manifest.version,
                 source.path.display()
             );
-        }
-        for (project, row) in selected.registry {
-            if project.kind == Kind::NativeMod {
-                let source = registry.native_source(cache, &self.index, project, row)?;
-                write_files(&root.join(super::stage_name(&project.id)), source.files)?;
-                println!(
-                    "Using library {} {} from the Sunrise mod registry",
-                    project.id, row.version
-                );
-            }
         }
         Ok(origins)
     }

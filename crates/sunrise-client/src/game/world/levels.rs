@@ -754,12 +754,16 @@ impl Levels {
             .map(|(_, level)| &mut level.streaming)
     }
 
-    /// `TicketStorage.purgeStaleTickets` for the `UNKNOWN` tickets of the parked levels that
-    /// `purge` names.
-    pub(super) fn purge_unknown_tickets(&mut self, purge: impl Fn(Dim) -> bool) {
+    /// `ServerChunkCache.tick` of the parked levels that `tick` names: their `UNKNOWN` tickets
+    /// purged (`TicketStorage.purgeStaleTickets`) when `purge`, then their recent FULL lookups
+    /// forgotten (`clearCache`).
+    pub(super) fn tick_parked_chunk_caches(&mut self, purge: bool, tick: impl Fn(Dim) -> bool) {
         for (&dim, level) in &mut self.parked {
-            if purge(dim) {
-                level.streaming.purge_unknown_tickets();
+            if tick(dim) {
+                if purge {
+                    level.streaming.purge_unknown_tickets();
+                }
+                level.streaming.clear_full_lookups();
             }
         }
     }
@@ -803,15 +807,11 @@ impl Levels {
         }
     }
 
-    pub(super) fn install_mob_map_snapshots(
-        &self,
-        snapshot: &Arc<sunrise_client::neoforge_mob_maps::NeoForgeMobMaps>,
-    ) {
-        for level in self.parked.values() {
-            if let Some(terrain) = &level.locator {
-                terrain.set_mob_maps(snapshot);
-            }
-        }
+    /// The generators of the parked levels, for the world snapshots their workers read.
+    pub(in crate::game) fn parked_terrains(&self) -> impl Iterator<Item = &Arc<VanillaTerrain>> {
+        self.parked
+            .values()
+            .filter_map(|level| level.locator.as_ref())
     }
 
     pub(super) fn parked_worlds(&self) -> impl Iterator<Item = &World> {
@@ -949,6 +949,7 @@ impl Game<'_> {
         save.install_profession_snapshot(self.stations().professions.clone());
         if let Some(terrain) = &locator {
             terrain.set_mob_maps(self.mob_map_snapshot());
+            terrain.set_biome_keys(&self.biome_key_snapshot());
         }
         let mut world = Game::authoritative_world_for_mods(&self.res, seed);
         world.attachments = save.load_attachments();
@@ -1551,6 +1552,11 @@ impl Game<'_> {
             });
             self.tick_spawn_tickets(running == Some(true), true);
             sunrise_client::spans::time("update_world", || self.update_world());
+            // The end of ServerChunkCache.tick, after its unloads: `clearCache`. A paused or held
+            // server ticks no level.
+            if running.is_some() {
+                self.streaming.clear_full_lookups();
+            }
             let tick_span = sunrise_client::spans::guard("level_tick");
             // This level's moving colliders, solid to its movers for this tick only.
             let colliders = self.placed_moving_colliders();
@@ -1622,10 +1628,10 @@ impl Game<'_> {
             }
         }
         // Vanilla ticks the chunk source of every level, ticked here or not: the levels left
-        // parked purge their tickets too.
-        if running == Some(true) {
+        // parked purge their tickets and forget their recent lookups too.
+        if running.is_some() {
             self.levels
-                .purge_unknown_tickets(|dim| !order.contains(&dim));
+                .tick_parked_chunk_caches(running == Some(true), |dim| !order.contains(&dim));
         }
         // Levels held only by loading tickets: stream them without running the world tick.
         if result.is_ok() {
@@ -2087,34 +2093,45 @@ impl Game<'_> {
     /// timeout, as vanilla's `managedBlock`. Each column the wait brings in is announced while
     /// it is resident, before this returns: its `dynamic_light` cells asked (the light job
     /// waits for them) and `chunk_load` fired, at the same point as vanilla's FULL task fires
-    /// NeoForge's `ChunkEvent.Load` inside `getChunk`. False when `begin_full_column` refuses,
-    /// when the level is gone, and when generation is aborted during the wait.
+    /// NeoForge's `ChunkEvent.Load` inside `getChunk`. `Ok` once FULL; `Failed` when a
+    /// generation the column needs panicked, before or during the wait
+    /// (`Streaming::full_column_failed`); `Unloaded` when `begin_full_column` refuses, when
+    /// the level is gone, and when generation is aborted during the wait.
     pub(in crate::game) fn load_full_chunk(
         &mut self,
         parked: Option<mod_api::LevelRef>,
         chunk: (i32, i32),
-    ) -> bool {
+    ) -> std::result::Result<(), mod_api::ChunkLoadError> {
+        use mod_api::ChunkLoadError;
         use sunrise_client::streaming::{FullColumn, full_column_ready};
         let id = parked.map(|level| level.dimension_id());
         let Some((streaming, world)) = self.full_load_level(id) else {
-            return false;
+            return Err(ChunkLoadError::Unloaded);
         };
         match streaming.begin_full_column(world, chunk) {
-            FullColumn::Ready => return true,
-            FullColumn::Refused => return false,
+            FullColumn::Ready => return Ok(()),
+            FullColumn::Refused => return Err(ChunkLoadError::Unloaded),
+            FullColumn::Failed => return Err(ChunkLoadError::Failed),
             FullColumn::Pending => {}
         }
         loop {
             let Some((streaming, world)) = self.full_load_level(id) else {
-                return false;
+                return Err(ChunkLoadError::Unloaded);
             };
             let alive = streaming.pump_column(world);
             self.announce_synchronous_loads(parked);
             let Some((streaming, world)) = self.full_load_level(id) else {
-                return false;
+                return Err(ChunkLoadError::Unloaded);
             };
-            if !alive || full_column_ready(world, chunk) {
-                return streaming.end_full_column(world, chunk);
+            let failed = streaming.full_column_failed(chunk);
+            if !alive || failed || full_column_ready(world, chunk) {
+                return if streaming.end_full_column(world, chunk) {
+                    Ok(())
+                } else if failed {
+                    Err(ChunkLoadError::Failed)
+                } else {
+                    Err(ChunkLoadError::Unloaded)
+                };
             }
             streaming.wait(Duration::from_millis(5));
         }

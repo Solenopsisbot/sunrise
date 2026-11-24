@@ -68,24 +68,31 @@ fn registry(url: &str) -> Result<Option<String>, String> {
 }
 
 #[test]
-fn registration_is_the_repository_id_package_path_mod_id_and_kind() {
+fn registration_is_the_repository_id_package_path_and_mod_id() {
     for remote in [
         "https://github.com/Author/example.git",
         "ssh://git@github.com/author/example.git",
         "git@github.com:author/example.git",
     ] {
-        registered(&registry, remote, "mods/example", "example", "native-mod").unwrap();
-        assert!(registered(&registry, remote, "mods", "example", "native-mod").is_err());
-        assert!(registered(&registry, remote, "mods/example", "other", "native-mod").is_err());
-        assert!(registered(&registry, remote, ".", "example", "native-mod").is_err());
+        assert_eq!(
+            registered(&registry, remote, "mods/example", "example").unwrap(),
+            "native-mod"
+        );
+        // The kind is reported, not required: the registry's pull request for a release of
+        // another kind changes the project's.
+        assert_eq!(
+            registered(&registry, remote, ".", "example").unwrap(),
+            "mod"
+        );
+        assert!(registered(&registry, remote, "mods", "example").is_err());
+        assert!(registered(&registry, remote, "mods/example", "other").is_err());
     }
     assert!(
         registered(
             &registry,
             "https://github.com.example/author/example",
             ".",
-            "example",
-            "mod"
+            "example"
         )
         .is_err()
     );
@@ -95,23 +102,10 @@ fn registration_is_the_repository_id_package_path_mod_id_and_kind() {
         "https://api.github.com/repos/author/example" => Ok(Some(r#"{"id":102}"#.into())),
         _ => registry(url),
     };
-    registered(
-        &fetch,
-        "git@github.com:author/renamed.git",
-        ".",
-        "example",
-        "mod",
-    )
-    .unwrap();
+    registered(&fetch, "git@github.com:author/renamed.git", ".", "example").unwrap();
     // Repository 102 has no registration file.
     assert_eq!(
-        registered(
-            &fetch,
-            "git@github.com:author/example.git",
-            ".",
-            "example",
-            "mod"
-        ),
+        registered(&fetch, "git@github.com:author/example.git", ".", "example"),
         Err(NOT_REGISTERED.into())
     );
     let unknown = format!("unknown = true\n{REPOSITORY}");
@@ -119,16 +113,7 @@ fn registration_is_the_repository_id_package_path_mod_id_and_kind() {
         true => Ok(Some(unknown.clone())),
         false => registry(url),
     };
-    assert!(
-        registered(
-            &fetch,
-            "git@github.com:author/example.git",
-            ".",
-            "example",
-            "mod"
-        )
-        .is_err()
-    );
+    assert!(registered(&fetch, "git@github.com:author/example.git", ".", "example").is_err());
 }
 
 #[test]

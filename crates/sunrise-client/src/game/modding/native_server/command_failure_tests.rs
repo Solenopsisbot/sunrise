@@ -23,6 +23,15 @@ impl mod_api::Hooks for FailingCommand {
         _: &mut dyn mod_api::ServerHost,
         event: &mut mod_api::RegisterCommandsEvent<'_>,
     ) {
+        // Java's `source.sendFailure(text); return 0;`.
+        event
+            .commands
+            .push(mod_api::Command::new("failzero").executes(|host, _, _| {
+                host.commands()
+                    .failure(mod_api::Text::literal("Not enough mana"))
+                    .expect("a shallow line");
+                Ok(0)
+            }));
         let calls = self.0.clone();
         event.commands.push(
             mod_api::Command::new("rejecttest").executes(move |_, _, _| {
@@ -189,6 +198,75 @@ fn executor_failure_respects_source_silence_and_stores_zero() {
                         )));
                         assert!(game.run_guest_command(command(
                             "execute if data storage test:out {success:0,result:0}",
+                            true,
+                        )));
+                    });
+                },
+            );
+        },
+    );
+}
+
+/// `CommandSourceStack.sendFailure` then `return 0`: the red line reaches the source whatever
+/// `sendCommandFeedback` says, a silent source gets nothing, and the command succeeds with
+/// result 0, which `execute store result` stores, where a returned failure stores 0 for success
+/// too.
+#[test]
+#[ignore = "daily"]
+fn a_failure_line_then_zero_is_a_red_line_and_a_zero_result() {
+    in_own_process(
+        "game::native_server::command_failure_tests::a_failure_line_then_zero_is_a_red_line_and_a_zero_result",
+        || {
+            mod_platform::testing::with_mods(
+                vec![mod_api::ModEntry::new(
+                    "failure_test",
+                    Box::new(FailingCommand(Arc::default())),
+                )]
+                .into(),
+                || {
+                    with_guests(|game| {
+                        game.build_registries();
+                        game.register_native_commands();
+                        assert!(
+                            game.ui
+                                .rules
+                                .set("send_command_feedback", gamerules::Value::Bool(false))
+                        );
+                        let command = |line: &str, quiet| GuestCommand {
+                            conn: 12,
+                            command: line.into(),
+                            permission: 2,
+                            integrated: true,
+                            quiet,
+                        };
+
+                        let ((ok, chat), outcome) = game.recording_command_outcome(|game| {
+                            game.run_guest_command_told(command("failzero", false))
+                                .unwrap()
+                        });
+                        assert!(ok, "the command ran");
+                        assert_eq!(outcome, Some((true, 0)));
+                        assert_eq!(chat.len(), 1);
+                        assert_eq!(chat[0].plain(), "Not enough mana");
+                        assert_eq!(chat[0].spans[0].style.color, Some(text::RED));
+
+                        let (ok, chat) = game
+                            .run_guest_command_told(command("failzero", true))
+                            .unwrap();
+                        assert!(ok);
+                        assert!(chat.is_empty(), "a silent source gets no line");
+
+                        assert!(game.run_guest_command(command(
+                            "data merge storage test:out {success:42,result:42}",
+                            true,
+                        )));
+                        assert!(game.run_guest_command(command(
+                            "execute store success storage test:out success int 1 \
+                             store result storage test:out result int 1 run failzero",
+                            true,
+                        )));
+                        assert!(game.run_guest_command(command(
+                            "execute if data storage test:out {success:1,result:0}",
                             true,
                         )));
                     });

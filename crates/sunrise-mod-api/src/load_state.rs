@@ -41,6 +41,12 @@ impl Drop for RegistrationGuard {
     }
 }
 
+/// Runs `declare` with startup registration open on the current thread.
+pub fn with_registration_open(declare: &mut dyn FnMut()) {
+    let _registration = RegistrationGuard::open();
+    declare();
+}
+
 struct PackageInventory {
     entries: Arc<[PackageInfo]>,
     authority: Arc<mod_vocab::__private::NamespaceAuthority>,

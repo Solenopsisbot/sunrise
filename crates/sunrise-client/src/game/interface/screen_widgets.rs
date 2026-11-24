@@ -12,6 +12,7 @@ use mod_api::{
     },
 };
 use std::cell::{Cell, RefCell};
+use std::time::Instant;
 use sunrise_client::{
     clipboard::EditShortcut,
     hud::HudBatch,
@@ -680,6 +681,10 @@ impl Game<'_> {
     /// Pre-guarded contents pass, before Foreground and tooltips
     /// (`Screen.extractRenderState`).
     pub(super) fn draw_mounted_screen_widgets(&self, batch: &mut HudBatch) {
+        self.draw_mounted_screen_widgets_at(batch, Instant::now());
+    }
+
+    pub(super) fn draw_mounted_screen_widgets_at(&self, batch: &mut HudBatch, now: Instant) {
         let len = self.screen_state.widgets.inner.borrow().entries.len();
         if len == 0 {
             return;
@@ -716,9 +721,11 @@ impl Game<'_> {
                                 &self.gui.atlas,
                                 state.rect,
                                 &label,
-                                state.active,
-                                hovered,
-                                focused,
+                                ui::ButtonVisualState {
+                                    active: state.active,
+                                    hovered,
+                                    focused,
+                                },
                                 state.sprites.as_ref(),
                                 |rect| Narratable::button(label.plain(), rect, state.active),
                             );
@@ -735,7 +742,7 @@ impl Game<'_> {
                         if *visible {
                             edit_box.focused = focused && *active;
                             let mark = widgets::frame_mark();
-                            edit_box.draw(batch, &self.gui.atlas, None);
+                            edit_box.draw_at(batch, &self.gui.atlas, None, now);
                             widgets::mark_mounted(mark, entry.id.raw(), true);
                             if let Some(hint) = hint
                                 && edit_box.value.is_empty()

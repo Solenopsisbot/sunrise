@@ -342,6 +342,7 @@ impl Game<'_> {
         }
         let owner_uuid = self.acting_player_uuid();
         self.tridents.push(ThrownTrident {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             join: Default::default(),
             id,

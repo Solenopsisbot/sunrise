@@ -66,8 +66,11 @@ impl CommandSource {
 pub enum CommandArgumentValue {
     /// A `word` or greedy `text` argument, exactly as the dispatcher parsed it.
     String(String),
-    /// A signed `integer` argument.
+    /// A signed `integer` argument, within the bounds of `integer(min,max)`.
     Integer(i32),
+    /// A signed `long` argument, within the bounds of `long(min,max)`: Brigadier's
+    /// `LongArgumentType.getLong`.
+    Long(i64),
     /// A finite double-precision `number` argument.
     Number(f64),
     /// A `boolean` argument.

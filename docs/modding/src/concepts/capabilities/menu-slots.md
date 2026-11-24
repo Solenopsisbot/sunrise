@@ -153,49 +153,72 @@ queries the rule directly against the current slots.
 
 ## Taking from a slot
 
-`menu_slot_take` is `Slot.onTake` for a mod menu type open on your block entity: heard on the server after a player
-took a stack out of one of the block's own slots, once per take. It refuses nothing (`may_pickup` above refuses); a
-result slot uses it to give experience, unlock a recipe or use up its inputs, through the `Host`. `item_crafted` and
-`item_smelted` stay the crafting grid's and the furnaces' events and are never heard for a mod menu.
+`menu_slot_take` (v3) is `Slot.onTake` for a mod menu type, on its `MenuPart`: heard on the server after a player
+took a stack out of one of the menu's own slots, once per take. It refuses nothing (`may_pickup` above refuses); a
+result slot uses it to give experience, unlock a recipe, play a sound or use up its inputs, through the `Host`.
+`item_crafted` and `item_smelted` stay the crafting grid's and the furnaces' events and are never heard for a mod menu.
+
+`event.subject: BlockEntityScope<'_>` lends the server `Host` (`subject.host()`) and atomic transactions
+(`subject.transaction(...)`) on every menu. On a block-backed menu it also lends the live resident block entity
+through `subject.with_view(...)`, which returns `None` on a blockless [`owned_slots`](#menu-owned-slots) menu or once
+the block entity was removed or replaced during the call. A blockless menu's listener edits its transient slots
+through `ItemPlace::MenuSlot` inside `subject.transaction(...)`.
 
 ```rust,ignore
 struct PotOutput;
 #[mod_api::sunrise_part]
-impl mod_api::BlockPart for PotOutput {}
-#[mod_api::sunrise_part]
-impl mod_api::BlockEntityPart for PotOutput {
+impl mod_api::MenuPart for PotOutput {
     fn menu_slot_take(&self, event: &mut mod_api::MenuSlotTakeEvent<'_>) {
         // Slot 6 is the result: each item taken uses up one input from slot 0.
-        if event.slot == 6 {
-            event.subject.with_view(|mut entity| {
-                if let Some(input) = entity.item_slot(0).and_then(|s| s.to_owned()) {
-                    let _ = entity.set_item_slot(0, input.shrink(event.taken.count()));
-                }
-            });
+        if event.slot != 6 {
+            return;
+        }
+        let used = event.taken.count();
+        let on_block = event.subject.with_view(|mut entity| {
+            if let Some(input) = entity.item_slot(0).and_then(|s| s.to_owned()) {
+                let _ = entity.set_item_slot(0, input.shrink(used));
+            }
+        });
+        if on_block.is_none() {
+            // A blockless menu: its inputs are the open menu's transient slots.
+            let player = event.player;
+            let _: Result<(), mod_api::TransactionError<()>> =
+                event.subject.transaction(|scope, tx| {
+                    let host = scope.host();
+                    let menu = host.player(player).and_then(|p| p.container_menu(host)).ok_or(())?;
+                    if let Some(input) = menu.slot(host, 0).flatten() {
+                        let place = mod_api::ItemPlace::MenuSlot { menu, slot: 0 };
+                        let _ = place.extract(host, tx, &mod_api::ItemResource::of(&input), used);
+                    }
+                    Ok(())
+                });
         }
     }
 }
+// In Hooks::register:
+// registrar.menu_part("mymod:cooking_pot", PotOutput);
 ```
 
 `taken` is a copy of what left the slot and `left` what the slot holds afterwards (`None` when it was emptied). A
 click hands over what it took: all of the slot or half of it rounded up to an empty cursor, all of a result onto a
 matching cursor, the slot's stack on a hotbar or offhand swap, each throw, and each slot a double-click's pick-all
-took from (with the part taken). A shift-click hands over the amount it moved, and a shift-click on a crafting result
-is heard once for each craft it repeats. An exchange of the cursor and the slot, putting a stack in, a drag, a creative
-clone and a refused take are not takes. Taking from a linked container or from the player's inventory does not notify
-the block behind the menu.
+took from (with the part taken). A shift-click hands over the amount it moved, and a shift-click on a crafting or
+processing result is heard once for each craft it repeats. An exchange of the cursor and the slot, putting a stack in,
+a drag, a creative clone and a refused take are not takes. Taking from a linked container or from the player's
+inventory does not fire it.
 
-`menu_slot_take` (contract version 2) lends the live resident block entity and the server `Host` sequentially through
-`event.subject: BlockEntityScope<'_>` (`with_view` returns `None` if the block entity was removed or replaced during
-the call). Writes through `with_view` validate at the boundary and apply in place, marking the chunk dirty and firing
-container updates when items change (matching vanilla `BlockEntity.setChanged`). The two take routes differ in their
-transaction boundary:
+Writes through `with_view` validate at the boundary and apply in place, marking the chunk dirty and firing container
+updates when items change (matching vanilla `BlockEntity.setChanged`). The two take routes differ in their transaction
+boundary:
 
-- **Game-routed clicks** (pickup, swap, throw, pick-all, crafting, or a shift-click left unhandled by `menu_quick_move`):
-  each take runs inside the click's enclosing transaction before the click commits, and before the next iteration (so a
-  listener can refill a crafting grid and the next iteration sees it). A panicking listener is contained and disabled
-  for `menu_slot_take` for the rest of the session, and the click aborts its enclosing transaction (undoing both the
-  click and the listener's writes) before resending the menu.
+- **Game-routed clicks** (pickup, swap, throw, pick-all, crafting or processing results, or a shift-click left
+  unhandled by `menu_quick_move`), on block-backed and blockless menus alike: each take runs inside the click's
+  enclosing transaction before the click commits, and before the next iteration. If the listener changed the menu's
+  non-result slots, [`menu_slot_changed`](#reacting-to-slot-changes) runs again before the click continues, so a
+  listener can refill a crafting grid or use up a processing menu's inputs and the next iteration sees the new result.
+  A panicking listener is contained and disabled for `menu_slot_take` for the rest of the session, and the click
+  aborts its enclosing transaction (the cursor, the inventory, the block entity or the blockless menu's transient
+  slots, the listener's writes and its deferred effects) before resending the menu.
 - **Handled `menu_quick_move` shift-clicks**: `menu_quick_move` settles its remainder to the actual clicked source:
   the resident or linked container slot, the player's inventory slot, or the stored crafting result. It publishes
   any resulting `BlockEntity.setChanged` notices before calling `menu_slot_take`, with no enclosing click transaction. Wrap
@@ -204,7 +227,67 @@ transaction boundary:
   writes made outside a transaction survive (and still publish container updates), and the earlier quick-move
   settlement survives.
 
-Nothing is asked when no mod listens.
+Nothing is asked when no part listens for the menu type.
+
+## Reacting to slot changes
+
+`MenuPart::menu_slot_changed` lets a mod menu type's outputs follow its inputs, as vanilla processing menus do in
+`AbstractContainerMenu.slotsChanged`. Its contract is Sunrise's own design. Vanilla calls `slotsChanged` from the
+menu's own transient container on each `setItem`, one slot at a time, and a block entity's container never notifies
+an open menu. Sunrise reports batches instead, and reports block writes too:
+
+- **One call per batch.** A batch is the non-result slots of the menu's own container that differ between two points,
+  in `event.changed` in ascending menu slot order (`MenuSlotChange { container, slot, before, after }`). Result,
+  hidden, linked and player inventory slots never count, and a count-0 stack counts as empty.
+- **Clicks** report each click step, inside the click's transaction: a whole multi-slot drag, a swap, a throw or a
+  pickup-all is one step, and a take whose `menu_slot_take` listener changes the inputs adds a step before the click
+  continues. This covers default clicks on blockless `owned_slots` and block-backed mod menus, `menu_quick_move`
+  handlers, and `menu_clicked` overrides returning `Flow::Cancel`.
+- **Committed host writes** (`ItemPlace::MenuSlot`, `ItemPlace::BlockEntity`, `BlockEntityRef::set_item_slot`,
+  transactional `merge_data` / `replace_data`) are one batch per menu for each outermost committed transaction,
+  never on abort: owned menus by menu generation, then block-backed menus by block position.
+- **Writes outside a transaction** to the block entity behind an open block-backed menu (a hopper,
+  `/item replace block`, non-transactional `merge_data`) are one batch at the write.
+
+Batches give a listener a whole action and a consistent `event.context` rather than the states in between, and block
+writes report so a menu a hopper fills shows the output a click would have made. A write to a block nobody has a
+listening menu open on costs one lookup in the open-menu index. `event.context` gives a read-only `MenuSlotContext`
+of the menu's own slots (with `pos: None` for blockless menus), and `event.outputs` accepts authoritative
+`MenuSlotWrite { container, slot, stack }` updates, applied atomically and never reported again. Viewers see a
+click's outputs in the click's reply and any other write's at the next `broadcastChanges`, as for any container
+write:
+
+```rust,ignore
+use mod_api::{MenuContainer, MenuSlotWrite};
+
+struct Combiner;
+#[mod_api::sunrise_part]
+impl mod_api::MenuPart for Combiner {
+    fn menu_slot_changed(
+        &self,
+        _host: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::MenuSlotChangedEvent<'_>,
+    ) {
+        let a = event.context.slot(MenuContainer::Main, 0);
+        let b = event.context.slot(MenuContainer::Main, 1);
+        let result = match (a, b) {
+            (Some(a), Some(_)) => Some(a.clone()),
+            _ => None,
+        };
+        event
+            .outputs
+            .push(MenuSlotWrite::new(MenuContainer::Main, 2, result));
+    }
+}
+```
+
+On a blockless `owned_slots` menu, `outputs` may target any declared non-hidden owned `MenuContainer::Main` slot up
+to its declared slot limit and item limit; on a block-backed menu, `outputs` may target declared non-hidden
+`results` slots in `MenuContainer::Main`. A listener panic, an invalid output write (wrong container,
+undeclared/hidden/linked slot, unknown item, or count over the slot or item cap), or a changed slot holding a stack
+the mod API can't carry (an item with no API key, or a component patch the API rejects) undoes the whole click and
+resends the menu. Outside a click the write itself stands: the listener's own writes roll back, and an unreportable
+change is logged and not reported. Nothing runs when no part subscribes.
 
 ## Crafted-by processing for held stacks
 
@@ -410,12 +493,14 @@ one's place and the mouse stays where it is. Opening from the player's inventory
 
 ## Menu-owned slots
 
-A blockless mod menu can own transient storage, like the container holding a crafting grid or a
-stonecutter's input. A type with `owned_slots` can only open without a block and cannot declare
-`results` or a `crafting` grid. Declare one stack limit (1–99) per container slot:
+A blockless mod menu can own transient storage, like the container holding a crafting grid, a
+combiner's inputs, or a stonecutter's input. A type with `owned_slots` can only open without a
+block and cannot declare a `crafting` grid. It may declare `results` for take-only output slots
+(for example a crafting-table-like or combiner-like processing menu). Declare one stack limit
+(1–99) per container slot:
 
 ```json
-{ "slots": 2, "player_inventory": false, "owned_slots": [1, 4] }
+{ "slots": 3, "owned_slots": [64, 64, 64], "inputs": [0, 1], "results": [2] }
 ```
 
 Each window starts with empty slots. Read them with `MenuRef::slot` and edit them through
@@ -423,16 +508,26 @@ Each window starts with empty slots. Read them with `MenuRef::slot` and edit the
 Insertion respects the smaller of the slot limit and the item's limit. Neither `back_mod_menu_slots`
 nor `menu_set_items` replaces this storage. The client gets normal slot updates, with no new packet.
 
-Ordinary clicks move items up to the slot cap on both sides. To make a filter slot, handle `menu_clicked`:
+Ordinary clicks move items up to the slot cap on both sides, while declared `results` slots refuse
+placement and shift-click insertion into them. To make a filter slot, handle `menu_clicked`:
 read the cursor, insert a copy without extracting from it, and return `Flow::Cancel`. The server sends the
 committed menu and cursor regardless of whether their item IDs and counts match the prediction.
 
-The storage is never saved. `menu_closed` v2 sees its final `owned_slots` in slot order and the supplied
-`opening_hand`, if any. The old window and its handles are already stale. Unlike vanilla's `clearContainer`,
-the game does not return or drop those values automatically. A part that wants real inputs returned must
-return them using the server Host. A listener can instead write a filter selection to the held item. Check
-that the player and item are still available before writing; do not give filter copies back as real items.
-The cursor's ordinary close behavior is unchanged.
+The storage is never saved. Close behavior depends on whether the menu declares `results`:
+
+- **Generic owned menus** (no `results` declared): `menu_closed` v3 sees the final `owned_slots` in
+  slot order and the supplied `opening_hand`, if any. The old window and its handles are already
+  stale. Unlike vanilla's `clearContainer`, the game does not return or drop those values
+  automatically. A part that wants real inputs returned must return them using the server Host; a
+  listener can instead write a filter selection to the held item (check that the player and item are
+  still available before writing, and do not give filter copies back as real items).
+- **Processing owned menus** (`results` declared): on close the game automatically returns all
+  non-result slots to the closing player's inventory and drops any overflow at the player (or drops
+  them on disconnect or death), matching vanilla `AbstractContainerMenu.clearContainer`. Declared
+  `results` slots are discarded and never returned. `menu_closed` still fires with an empty
+  `owned_slots` list so items cannot be duplicated.
+
+The cursor's ordinary close behavior is unchanged in both cases.
 
 ## Slots backed by a held item or an entity's handler
 
@@ -506,7 +601,26 @@ fn menu_transfer(
 ```
 
 Return `None` to hand the transfer on to the game's grid transfer (`NotIntoMenu` for a menu without a
-crafting grid). A dry run, the viewer's check, must move nothing. Vanilla menu types are never asked. A solo
+crafting grid). A dry run, the viewer's check, must move nothing. Vanilla menu types are never asked.
+
+A dry run can also say which of the recipe's cells it can't fill: push their indices (width by height for a
+shaped recipe, else its ingredients in order) to `event.missing_cells`, and the ones the menu lacks but could
+craft, as a storage network's autocrafting does, to `event.craftable_cells`. Both start empty. The viewer gets
+them as `RecipeTransferCheck::missing_cells` and `craftable_cells` with whatever the part answers, so a part may
+answer `Moves` and still mark the cells it would craft. The game keeps both lists below the recipe's cell count,
+from its known layout (one for a stonecutting recipe, three for smithing, the placement's slots for crafting and
+cooking; 256 for a recipe it can't inspect, such as a mod's own type), each once, in ascending order, and ignores
+both outside a dry run.
+
+```rust,ignore
+if event.dry_run {
+    event.missing_cells.extend([0, 2]); // nothing fills these
+    event.craftable_cells.push(1); // the network can craft this one
+    return Some(mod_api::RecipeTransferResult::Missing);
+}
+```
+
+This is version 2 of `menu_transfer`: update your `Hooks` implementation and rebuild. A solo
 world and a LAN host's own player get the same contract: the game is the server there and asks the part of the
 player's open block menu before its own grid transfer, on the same thread.
 

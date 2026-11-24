@@ -501,6 +501,7 @@ impl Game<'_> {
             Screen::Social => "social",
             Screen::ServerLinks => "server-links",
             Screen::ConfirmLink => "confirm-link",
+            Screen::DemoIntro => "demo-intro",
             Screen::DialogWarning => "dialog-warning",
             Screen::CommandBlock => "command-block",
             Screen::BlockEditor => "block-editor",

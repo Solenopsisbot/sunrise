@@ -6,10 +6,10 @@
 //! camera and lets go when the player sneaks.
 #[cfg(test)]
 #[path = "tests/camera_mount_tests.rs"]
-mod camera_mount_tests;
+pub(in crate::game) mod camera_mount_tests;
 #[cfg(test)]
 #[path = "tests/remote_camera_tests.rs"]
-mod camera_tests;
+pub(in crate::game) mod camera_tests;
 
 use super::{Game, remote::Remote};
 #[cfg(test)]

@@ -14,7 +14,9 @@ pub trait LevelsHost {
     #[static_call]
     fn is_loaded(&self, id: &str) -> bool;
     /// Side: both.
-    /// Find a loaded chunk in an open server level.
+    /// Find a loaded chunk in an open server level (`ServerChunkCache.getChunkNow`). As there,
+    /// a FULL chunk found becomes one of the level's recent FULL lookups, so a
+    /// `level.load_chunk` of it before the end of the level's next chunk tick places no ticket.
     fn chunk(&self, level: LevelRef, pos: [i32; 2]) -> Option<ChunkRef>;
 }
 /// The handles' client writes of the `levels` area, implemented by the game and reached through [`ClientBackendMut`].

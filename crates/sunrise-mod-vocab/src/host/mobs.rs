@@ -107,6 +107,12 @@ pub trait MobsBackend {
     /// clients as `DATA_MOB_FLAGS_ID`).
     fn mob_is_aggressive(&self, mob: MobRef) -> Option<bool>;
     /// Side: server.
+    /// `TamableAnimal.isInSittingPose`: the synced sitting pose, apart from
+    /// `TamableAnimal.isOrderedToSit` (the order the AI keeps and the save
+    /// stores). None for a horse, another mob kind, the dragon, a stale or
+    /// removed handle, or a client.
+    fn mob_is_in_sitting_pose(&self, mob: MobRef) -> Option<bool>;
+    /// Side: server.
     /// `Mob.isPersistenceRequired`. The dragon never despawns
     /// (`EnderDragon.checkDespawn` is empty), but keeps and saves the flag
     /// (`PersistenceRequired`).
@@ -346,6 +352,13 @@ pub trait MobsBackendMut {
     /// `Mob.setPersistenceRequired`, which sets the flag and cannot clear it.
     /// False for an unavailable mob.
     fn mob_set_persistence_required(&mut self, mob: MobRef) -> bool;
+    /// Side: server.
+    /// `TamableAnimal.setInSittingPose`: writes the synced sitting pose and
+    /// marks the mob for sync. The saved order is left alone, so the pet's
+    /// own sit goal may write the pose again on its next tick, as vanilla.
+    /// False for a horse, another mob kind, the dragon, a stale or removed
+    /// handle, or a client.
+    fn mob_set_in_sitting_pose(&mut self, mob: MobRef, sitting: bool) -> bool;
     /// Side: server.
     /// `Mob.setNoAi`: whether the mob's own AI runs. With no AI the mob
     /// stands (what NoAI keeps in vanilla still runs), and the flag is

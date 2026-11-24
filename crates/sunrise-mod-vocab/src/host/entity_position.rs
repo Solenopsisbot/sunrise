@@ -137,7 +137,11 @@ pub trait EntityPositionBackendMut {
     /// tell it, the entity's later moves there are told as any entity's, and this
     /// call adds no report of its own. A player arrives after the current tick,
     /// still (its client holds its motion), and `player_teleported` and
-    /// `player_changed_dimension` report the move. In the entity's own level it
+    /// `player_changed_dimension` report the move. `player_changed_dimension`
+    /// (NeoForge's `PlayerChangedDimensionEvent`) is the point after which the
+    /// player is in the target level, that level in place and the player's state
+    /// in it: a mod's "entered" and "left" go by that hook, not by this call's
+    /// return, when the player is still in the level it left. In the entity's own level it
     /// moves as `entity_teleport_to` does, keeping its motion. False for a stale
     /// handle, what `entity_teleport_to` refuses, a dimension that isn't
     /// registered, a primed TNT a mob rides, and the kinds it cannot move into

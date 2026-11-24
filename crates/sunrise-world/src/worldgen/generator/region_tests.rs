@@ -62,6 +62,7 @@ fn structure_biome_checks_read_the_region_at_their_own_quart() {
     let generator = OverworldGenerator {
         pipeline: pipeline.clone(),
         noise_clamped: None,
+        mod_biome_keys: Default::default(),
     };
     let mut worker = generator.worker();
     assert!(matches!(pipeline.source, ResolvedBiomeSource::Regions(_)));

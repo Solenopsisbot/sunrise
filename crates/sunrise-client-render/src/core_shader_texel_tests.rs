@@ -8,6 +8,7 @@ const GLUE: Glue = Glue {
     setup: "",
     finish: "",
     vertex_id: "int(gl_VertexIndex)",
+    interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
 };
 
 /// `clouds.vsh` in shape: a block of its own and an integer texel buffer read with `texelFetch`

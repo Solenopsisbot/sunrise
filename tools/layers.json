@@ -76,6 +76,7 @@
     "sunrise-server": "sunrise",
     "sunrise-bots": "tool",
     "sunrise-perf": "tool",
+    "sunrise-parity-fixtures": "tool",
     "sunrise-mod-api-gen-tests": "tool",
     "sunrise-stage": "tool",
     "xtask": "tool",

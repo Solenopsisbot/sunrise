@@ -6,6 +6,7 @@ impl Crystal {
     /// ground with no fall (what `Entity`'s constructor leaves).
     pub(in crate::game) fn new(id: u32, position: Vec3, show_bottom: bool, time: i32) -> Self {
         Self {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             join: Default::default(),
             id,

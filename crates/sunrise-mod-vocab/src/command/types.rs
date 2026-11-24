@@ -37,7 +37,11 @@ pub fn split_command_registration(
 /// last in brackets `[name:kind]`:
 /// `pay <player:player> <amount:integer>`, `balance [player:player]`,
 /// `eco give <player:player> <amount:integer>`. Kinds: `word`, `text` (the
-/// rest of the line, last), `integer`, `number`, `boolean`, `player`, `players`,
+/// rest of the line, last), `integer`, `integer(min,max)` (Brigadier's
+/// `IntegerArgumentType.integer(min, max)`; either bound may be left empty, `integer(0,)`, and a
+/// value out of range is refused with `argument.integer.low` / `big` before the executor runs),
+/// `long` and `long(min,max)` (`LongArgumentType.longArg(min, max)`, delivered as `Long`, refused
+/// with `argument.long.low` / `big`), `number`, `boolean`, `player`, `players`,
 /// `entity`, `entities`, `item`, `block_pos`, `vec3` (a point, `Vec3Argument.vec3()`; delivered
 /// as `Vec3`), `id` (a free `namespace:path` identifier, delivered as that canonical string),
 /// `mod_id` (a loaded package id, delivered as a
@@ -51,6 +55,19 @@ pub fn split_command_registration(
 /// the same node, each later accepted registration overwrites that node's executor (matching
 /// Brigadier's `CommandNode.addChild`) and updates Sunrise's paired execution permission
 /// level for that node.
+///
+/// A usage whose first word is a vanilla command's merges into it, as NeoForge's
+/// `RegisterCommandsEvent` registers into vanilla's dispatcher (`CommandDispatcher.register`,
+/// Brigadier's `CommandNode.addChild`): `time season <name:word>` adds `season` beside vanilla's
+/// `time set`, `add` and `query`, which stay. Vanilla's nodes keep their permission, so the
+/// mod's words under `/time` are reached only by who may use `/time`. A usage that executes at a
+/// vanilla node replaces vanilla's executor there, as the later registration does in
+/// Brigadier. A mod argument cannot share the place of a vanilla node of the same name, and a
+/// mod literal cannot share a vanilla argument's: the usage is left out, with the reason in the
+/// log. Sunrise's own `/modprofile` and `/pregen` are never merged into. The dedicated server's
+/// console runs a few vanilla commands itself before the dispatcher (`kick`, `say` and the
+/// others in its console handling), so a mod word merged under one of those is reached by players
+/// and functions but not from that console.
 ///
 /// Side: server. Selector arguments use vanilla's source position, permissions,
 /// cardinality and selection order; `player`/`entity` require one result and

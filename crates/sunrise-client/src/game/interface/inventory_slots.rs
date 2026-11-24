@@ -371,7 +371,7 @@ impl Game<'_> {
         self.draw_slot_highlight(batch, front, ox + sx, oy + sy);
     }
     pub(super) fn slot_mut(&mut self, i: usize) -> &mut Option<ItemStack> {
-        if i >= MOD_MENU_SLOT_BASE {
+        if i >= MOD_MENU_SLOT_BASE && !self.is_mount_chest_slot(i) {
             return self.container_slot_mut(i - MOD_MENU_SLOT_BASE);
         }
         if i >= mount_menu::SADDLE {
@@ -402,7 +402,9 @@ impl Game<'_> {
             309 if matches!(self.container_kind(), Some(BlockEntity::Crafter(_))) => {
                 self.crafter_result()
             }
-            i if i >= MOD_MENU_SLOT_BASE => self.container_slot(i - MOD_MENU_SLOT_BASE).clone(),
+            i if i >= MOD_MENU_SLOT_BASE && !self.is_mount_chest_slot(i) => {
+                self.container_slot(i - MOD_MENU_SLOT_BASE).clone()
+            }
             i if i >= mount_menu::SADDLE => self.mount_slot(i).clone(),
             i if i >= stations::INPUT => self.station_slot(i).clone(),
             500..=503 => self.armor[i - 500].clone(),

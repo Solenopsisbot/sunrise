@@ -8,6 +8,12 @@ impl Session {
     /// acknowledgement; one that did would reach the server as a
     /// configuration packet, and Velocity drops such a client.
     pub fn send(&self, packet: play::Serverbound) {
+        let _ = self.try_send(packet);
+    }
+
+    /// Like [`Self::send`], returning true only when the packet was encoded and
+    /// accepted by the active play writer.
+    pub fn try_send(&self, packet: play::Serverbound) -> bool {
         if self.debug
             && !matches!(
                 packet,
@@ -22,18 +28,21 @@ impl Session {
             Ok(body) => body,
             Err(error) => {
                 eprintln!("[net] send refused: {error}");
-                return;
+                return false;
             }
         };
         let mut writer = self.writer.lock().unwrap();
         if self.configuring.load(Ordering::Relaxed) {
-            return;
+            return false;
         }
-        if let Some(w) = writer.as_mut()
-            && w.send(&body).is_err()
-        {
+        let Some(w) = writer.as_mut() else {
+            return false;
+        };
+        if w.send(&body).is_err() {
             w.shutdown();
+            return false;
         }
+        true
     }
 
     /// Physical connection and play incarnation; changes even after Play/CFG/Play.

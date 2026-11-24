@@ -8,21 +8,27 @@ use std::{
 };
 use sunrise_core::{
     geometry::Direction,
-    position::BlockPos,
+    position::{BlockPos, ChunkPos},
     random::{LegacyRandom, RandomSource, position_seed},
 };
 use {
     super::{
         LazyTemplate, Mirror, Rotation, StructureResources, StructureTemplate,
-        processor::{PlaceSettings, Processor, ProcessorList, place_in_world},
+        legacy::{
+            PieceContext, PieceDraws, PieceRandom, PieceWorld, Result as LegacyResult, SolidRender,
+        },
+        processor::{PlaceSettings, Processor, ProcessorList, ProcessorRandom, place_in_world},
     },
     sunrise_core::bounding_box::BoundingBox,
 };
 use {
     crate::{
+        fluid::{FluidKind, FluidState},
         heightmap::HeightmapType,
+        registry::BlockStateId,
         worldgen::{
             DecodeError,
+            biome::BiomeId,
             block_feature::FeatureBlockBindings,
             feature::FeatureWorld,
             placement::{PlacementContext, PlacementQueryError},
@@ -72,6 +78,36 @@ pub enum PoolElement {
         elements: Vec<PoolElement>,
         projection: Projection,
     },
+    /// An element of a type a mod registered (`StructurePoolElementType`),
+    /// with its registered id (`element_type`).
+    Mod {
+        id: Arc<str>,
+        element: Arc<dyn super::mod_elements::ModPoolElement>,
+        /// The element's own projection, or the list's that holds it
+        /// (`ListPoolElement.setProjectionOnEachElement`).
+        projection: Projection,
+    },
+}
+/// A feature a piece places: a configured feature
+/// (`minecraft:worldgen/feature`) or a placed one
+/// (`minecraft:worldgen/placed_feature`), by id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeatureKey<'a> {
+    Configured(&'a str),
+    Placed(&'a str),
+}
+/// Where and how an element is placed: `StructurePoolElement.place`'s
+/// arguments besides the level, the random and the chunk's box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ElementAt {
+    pub position: [i32; 3],
+    pub reference: [i32; 3],
+    pub rotation: Rotation,
+    /// `LiquidSettings.APPLY_WATERLOGGING` (true) or `IGNORE_WATERLOGGING`.
+    pub waterlogging: bool,
+    /// Leave the jigsaw blocks as they are (`/place template`'s and
+    /// `/place jigsaw`'s `keepJigsaws`).
+    pub keep_jigsaws: bool,
 }
 #[derive(Clone, Debug)]
 pub struct Jigsaw<'a> {
@@ -110,9 +146,9 @@ pub(super) fn step(d: Direction) -> [i32; 3] {
     [n[0], n[1], n[2]]
 }
 /// Util.shuffle.
-pub(super) fn shuffle<T>(list: &mut [T], random: &mut impl RandomSource) {
+pub fn shuffle<T>(list: &mut [T], random: &mut (impl ProcessorRandom + ?Sized)) {
     for i in (2..=list.len()).rev() {
-        let swap = random.next_int_bound(i as i32).unwrap_or(0) as usize;
+        let swap = random.int(i as i32) as usize;
         list.swap(i - 1, swap);
     }
 }
@@ -193,8 +229,29 @@ impl PoolElement {
                     projection: p,
                 }
             }
-            _ => return Err(DecodeError::Field("pool element type")),
+            _ => {
+                let Some(kind_type) = super::mod_elements::mod_pool_element_type(kind) else {
+                    return Err(DecodeError::Field("pool element type"));
+                };
+                let element = kind_type
+                    .decode(value, resources, bindings)
+                    .map_err(|e| DecodeError::Registry(format!("{kind}: {e}")))?;
+                Self::Mod {
+                    id: kind.into(),
+                    projection: inherited.unwrap_or_else(|| element.projection()),
+                    element,
+                }
+            }
         })
+    }
+    /// `StructurePoolElement.CODEC`'s decoding of one element (a template
+    /// pool entry's `element`), mods' element types included.
+    pub fn decode_element(
+        value: &Value,
+        resources: &StructureResources,
+        bindings: &FeatureBlockBindings<'_>,
+    ) -> Result<Self, DecodeError> {
+        Self::decode(value, resources, bindings, None)
     }
     /// `StructurePoolElement.CODEC`'s encoding, as a jigsaw piece saves it.
     pub fn save(&self) -> Tag {
@@ -252,6 +309,11 @@ impl PoolElement {
                 ),
                 ("projection", text(projection.saved_name())),
             ]),
+            Self::Mod { id, element, .. } => {
+                let mut fields = element.save();
+                fields.insert("element_type".into(), text(id));
+                Tag::Compound(fields)
+            }
         }
     }
     pub fn projection(&self) -> Projection {
@@ -259,31 +321,29 @@ impl PoolElement {
             Self::Empty => Projection::TerrainMatching,
             Self::Single { projection, .. }
             | Self::Feature { projection, .. }
-            | Self::List { projection, .. } => *projection,
+            | Self::List { projection, .. }
+            | Self::Mod { projection, .. } => *projection,
         }
     }
-    pub fn size(&self, rotation: Rotation) -> [i32; 3] {
-        match self {
-            Self::Empty | Self::Feature { .. } => [0; 3],
-            Self::Single { template, .. } => template.size(rotation),
-            Self::List { elements, .. } => elements.iter().fold([0; 3], |acc, e| {
-                let s = e.size(rotation);
-                std::array::from_fn(|i| acc[i].max(s[i]))
-            }),
-        }
-    }
-    pub fn bounding_box(&self, position: [i32; 3], rotation: Rotation) -> BoundingBox {
+    /// `StructurePoolElement.getBoundingBox`.
+    pub fn bounding_box(
+        &self,
+        resources: &StructureResources,
+        position: [i32; 3],
+        rotation: Rotation,
+    ) -> BoundingBox {
         match self {
             Self::Empty => BoundingBox::new(position, position),
             Self::Feature { .. } => BoundingBox::new(position, position),
             Self::Single { template, .. } => {
                 template.bounding_box(position, rotation, [0; 3], Mirror::None)
             }
+            Self::Mod { element, .. } => element.bounding_box(resources, position, rotation),
             Self::List { elements, .. } => {
                 let mut boxes = elements
                     .iter()
                     .filter(|e| !matches!(e, Self::Empty))
-                    .map(|e| e.bounding_box(position, rotation));
+                    .map(|e| e.bounding_box(resources, position, rotation));
                 let mut first = boxes.next().unwrap_or(BoundingBox::new(position, position));
                 for b in boxes {
                     first.encapsulate(&b);
@@ -298,10 +358,13 @@ impl PoolElement {
         resources: &StructureResources,
         position: [i32; 3],
         rotation: Rotation,
-        random: &mut impl RandomSource,
+        random: &mut dyn PieceDraws,
     ) -> Vec<Jigsaw<'a>> {
         match self {
             Self::Empty => Vec::new(),
+            Self::Mod { element, .. } => {
+                element.shuffled_jigsaws(resources, position, rotation, &mut *random)
+            }
             Self::Feature { .. } => vec![Jigsaw {
                 pos: position,
                 front: Direction::Down,
@@ -315,7 +378,7 @@ impl PoolElement {
             }],
             Self::List { elements, .. } => elements
                 .first()
-                .map(|e| e.shuffled_jigsaws(resources, position, rotation, random))
+                .map(|e| e.shuffled_jigsaws(resources, position, rotation, &mut *random))
                 .unwrap_or_default(),
             Self::Single { template, .. } => {
                 let mut jigsaws = template_jigsaws(resources, template, position, rotation);
@@ -328,6 +391,7 @@ impl PoolElement {
     pub fn ground_level_delta(&self) -> i32 {
         match self {
             Self::Single { ground_level, .. } => *ground_level,
+            Self::Mod { element, .. } => element.ground_level_delta(),
             _ => 1,
         }
     }
@@ -412,6 +476,14 @@ pub struct Pool {
     max_size: OnceLock<i32>,
 }
 impl Pool {
+    /// `StructureTemplatePool.templates`: each element repeated by its weight.
+    pub fn templates(&self) -> &[Arc<PoolElement>] {
+        &self.templates
+    }
+    /// The fallback pool's id.
+    pub fn fallback(&self) -> &str {
+        &self.fallback
+    }
     pub(super) fn random_template(&self, random: &mut impl RandomSource) -> Arc<PoolElement> {
         if self.templates.is_empty() {
             return Arc::new(PoolElement::Empty);
@@ -427,12 +499,13 @@ impl Pool {
         shuffle(&mut order, random);
         order.into_iter().map(|i| self.entries[i]).collect()
     }
-    pub(super) fn max_size(&self) -> i32 {
+    /// `StructureTemplatePool.getMaxSize`: the tallest element's height.
+    pub fn max_size(&self, resources: &StructureResources) -> i32 {
         *self.max_size.get_or_init(|| {
             self.templates
                 .iter()
                 .filter(|t| !matches!(t.as_ref(), PoolElement::Empty))
-                .map(|t| t.bounding_box([0; 3], Rotation::None).span()[1])
+                .map(|t| t.bounding_box(resources, [0; 3], Rotation::None).span()[1])
                 .max()
                 .unwrap_or(0)
         })
@@ -680,139 +753,251 @@ impl PoolPiece {
         self.bounding_box = self.bounding_box.moved([0, dy, 0]);
     }
     /// PoolElementStructurePiece.postProcess.
-    #[allow(clippy::too_many_arguments)]
-    pub fn place<W: FeatureWorld + PlacementContext, R: RandomSource>(
+    pub fn place<W: FeatureWorld + PlacementContext, R: RandomSource + 'static>(
         &self,
-        world: &mut W,
-        resources: &StructureResources,
+        site: &mut Site<'_, '_, W, R>,
         random: &mut R,
-        chunk_box: BoundingBox,
         reference: [i32; 3],
         keep_jigsaws: bool,
-        place_feature: &mut PlaceFeature<'_, W, R>,
     ) -> Result<bool, PlacementQueryError> {
-        place_element(
-            &self.element,
-            world,
-            resources,
+        site.place(
             random,
-            chunk_box,
-            self.position,
-            reference,
-            self.rotation,
-            self.waterlogging,
-            keep_jigsaws,
-            place_feature,
+            &self.element,
+            ElementAt {
+                position: self.position,
+                reference,
+                rotation: self.rotation,
+                waterlogging: self.waterlogging,
+                keep_jigsaws,
+            },
         )
     }
 }
 static GRAVITY: OnceLock<Processor> = OnceLock::new();
 static IGNORE_STRUCTURE_BLOCK: OnceLock<Processor> = OnceLock::new();
 static IGNORE_STRUCTURE_AND_AIR: OnceLock<Processor> = OnceLock::new();
-#[allow(clippy::too_many_arguments)]
-fn place_element<W: FeatureWorld + PlacementContext, R: RandomSource>(
-    element: &PoolElement,
-    world: &mut W,
-    resources: &StructureResources,
-    random: &mut R,
-    chunk_box: BoundingBox,
-    position: [i32; 3],
-    reference: [i32; 3],
-    rotation: Rotation,
-    waterlogging: bool,
-    keep_jigsaws: bool,
-    place_feature: &mut PlaceFeature<'_, W, R>,
-) -> Result<bool, PlacementQueryError> {
-    match element {
-        PoolElement::Empty => Ok(true),
-        PoolElement::Feature { feature, .. } => place_feature(world, random, feature, position),
-        PoolElement::List { elements, .. } => {
-            for e in elements {
-                if !place_element(
-                    e,
-                    world,
+
+/// Places a feature (feature pool elements, and pieces placing one) with the
+/// piece random. An id the registry lacks places nothing: `Ok(false)`.
+pub type PlaceFeature<'a, W, R> =
+    dyn FnMut(&mut W, &mut R, FeatureKey<'_>, [i32; 3]) -> Result<bool, PlacementQueryError> + 'a;
+
+/// A generating structure's pieces' view of one chunk: the level, and how
+/// features are placed into it. Pieces reach it as their [`PieceWorld`], so a
+/// mod's piece or element places features and pool elements through it with
+/// the piece random.
+pub struct Site<'s, 'f, W, R> {
+    pub world: &'s mut W,
+    pub resources: &'s StructureResources,
+    /// `BlockState.isSolidRender` of the blocks around the pieces.
+    pub blocks: &'s dyn SolidRender,
+    /// The chunk's writable box the pieces are clipped to.
+    pub chunk_box: BoundingBox,
+    pub place_feature: &'s mut PlaceFeature<'f, W, R>,
+}
+impl<W: FeatureWorld + PlacementContext, R: RandomSource + 'static> Site<'_, '_, W, R> {
+    /// `StructurePoolElement.place`, clipped to the chunk's box.
+    pub fn place(
+        &mut self,
+        random: &mut R,
+        element: &PoolElement,
+        at: ElementAt,
+    ) -> Result<bool, PlacementQueryError> {
+        match element {
+            PoolElement::Empty => Ok(true),
+            PoolElement::Feature { feature, .. } => {
+                (self.place_feature)(self.world, random, FeatureKey::Placed(feature), at.position)
+            }
+            PoolElement::List { elements, .. } => {
+                for e in elements {
+                    if !self.place(random, e, at)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            PoolElement::Mod {
+                element,
+                projection,
+                ..
+            } => {
+                let (resources, blocks, chunk_box) = (self.resources, self.blocks, self.chunk_box);
+                let mut context = PieceContext {
+                    world: self,
                     resources,
+                    blocks,
                     random,
                     chunk_box,
-                    position,
-                    reference,
-                    rotation,
-                    waterlogging,
-                    keep_jigsaws,
-                    place_feature,
-                )? {
-                    return Ok(false);
-                }
+                    chunk: ChunkPos::new(chunk_box.min[0] >> 4, chunk_box.min[2] >> 4),
+                    reference: at.reference,
+                };
+                element.place(&mut context, at, *projection)
             }
-            Ok(true)
-        }
-        PoolElement::Single {
-            template,
-            processors,
-            legacy,
-            projection,
-            waterlogging: override_liquid,
-            ..
-        } => {
-            let ignore = if *legacy {
-                IGNORE_STRUCTURE_AND_AIR.get_or_init(|| {
-                    Processor::BlockIgnore(
-                        [
-                            "minecraft:structure_block".to_owned(),
-                            "minecraft:air".to_owned(),
-                        ]
-                        .into(),
-                    )
-                })
-            } else {
-                IGNORE_STRUCTURE_BLOCK.get_or_init(|| {
-                    Processor::BlockIgnore(["minecraft:structure_block".to_owned()].into())
-                })
-            };
-            let mut settings = PlaceSettings::new(rotation);
-            settings.known_shape = true;
-            // SinglePoolElement.getSettings.
-            settings.finalize_entities = true;
-            settings.bounding_box = Some(chunk_box);
-            settings.waterlogging = override_liquid.unwrap_or(waterlogging);
-            if !*legacy {
-                settings.processors.push(ignore);
-            }
-            // SinglePoolElement.getSettings: keepJigsaws skips the replacement.
-            if !keep_jigsaws {
-                settings.processors.push(&Processor::JigsawReplacement);
-            }
-            settings.processors.extend(processors.0.iter());
-            if *projection == Projection::TerrainMatching {
-                settings
-                    .processors
-                    .push(GRAVITY.get_or_init(|| Processor::Gravity {
-                        heightmap: HeightmapType::WorldSurfaceWg,
-                        offset: -1,
-                    }));
-            }
-            // LegacySinglePoolElement pops the structure-block ignore and
-            // appends STRUCTURE_AND_AIR last, after jigsaw replacement.
-            if *legacy {
-                settings.processors.push(ignore);
-            }
-            place_in_world(
-                world,
-                resources,
+            PoolElement::Single {
                 template,
-                position,
-                reference,
-                &mut settings,
-                Some(random),
-                18,
-            )
+                processors,
+                legacy,
+                projection,
+                waterlogging: override_liquid,
+                ..
+            } => {
+                let ignore = if *legacy {
+                    IGNORE_STRUCTURE_AND_AIR.get_or_init(|| {
+                        Processor::BlockIgnore(
+                            [
+                                "minecraft:structure_block".to_owned(),
+                                "minecraft:air".to_owned(),
+                            ]
+                            .into(),
+                        )
+                    })
+                } else {
+                    IGNORE_STRUCTURE_BLOCK.get_or_init(|| {
+                        Processor::BlockIgnore(["minecraft:structure_block".to_owned()].into())
+                    })
+                };
+                let mut settings = PlaceSettings::new(at.rotation);
+                settings.known_shape = true;
+                // SinglePoolElement.getSettings.
+                settings.finalize_entities = true;
+                settings.bounding_box = Some(self.chunk_box);
+                settings.waterlogging = override_liquid.unwrap_or(at.waterlogging);
+                if !*legacy {
+                    settings.processors.push(ignore);
+                }
+                // SinglePoolElement.getSettings: keepJigsaws skips the replacement.
+                if !at.keep_jigsaws {
+                    settings.processors.push(&Processor::JigsawReplacement);
+                }
+                settings.processors.extend(processors.0.iter());
+                if *projection == Projection::TerrainMatching {
+                    settings
+                        .processors
+                        .push(GRAVITY.get_or_init(|| Processor::Gravity {
+                            heightmap: HeightmapType::WorldSurfaceWg,
+                            offset: -1,
+                        }));
+                }
+                // LegacySinglePoolElement pops the structure-block ignore and
+                // appends STRUCTURE_AND_AIR last, after jigsaw replacement.
+                if *legacy {
+                    settings.processors.push(ignore);
+                }
+                place_in_world(
+                    self.world,
+                    self.resources,
+                    template,
+                    at.position,
+                    at.reference,
+                    &mut settings,
+                    Some(random),
+                    18,
+                )
+            }
         }
     }
+    /// The piece's random as the site's own; a piece hands back the random it
+    /// was given, so another is refused.
+    fn own_random(random: &mut dyn PieceRandom) -> Result<&mut R, PlacementQueryError> {
+        random
+            .as_any()
+            .downcast_mut::<R>()
+            .ok_or_else(|| PlacementQueryError::Failed("not the piece's random".into()))
+    }
 }
-
-/// Places a named placed feature (feature pool elements) with the piece random.
-pub type PlaceFeature<'a, W, R> =
-    dyn FnMut(&mut W, &mut R, &str, [i32; 3]) -> Result<bool, PlacementQueryError> + 'a;
+impl<W: FeatureWorld + PlacementContext, R: RandomSource + 'static> PieceWorld
+    for Site<'_, '_, W, R>
+{
+    fn block(&mut self, pos: [i32; 3]) -> LegacyResult<BlockStateId> {
+        PieceWorld::block(self.world, pos)
+    }
+    fn set(&mut self, pos: [i32; 3], state: BlockStateId, flags: i32) -> LegacyResult<bool> {
+        PieceWorld::set(self.world, pos, state, flags)
+    }
+    fn fluid(&mut self, pos: [i32; 3]) -> LegacyResult<FluidState> {
+        PieceWorld::fluid(self.world, pos)
+    }
+    fn height(&mut self, kind: HeightmapType, x: i32, z: i32) -> LegacyResult<i32> {
+        PieceWorld::height(self.world, kind, x, z)
+    }
+    fn min_y(&mut self) -> LegacyResult<i32> {
+        PieceWorld::min_y(self.world)
+    }
+    fn max_y(&mut self) -> LegacyResult<i32> {
+        PieceWorld::max_y(self.world)
+    }
+    fn entity(&mut self, nbt: Compound) -> LegacyResult<()> {
+        PieceWorld::entity(self.world, nbt)
+    }
+    fn block_entity(&mut self, pos: [i32; 3], nbt: Compound) -> LegacyResult<()> {
+        PieceWorld::block_entity(self.world, pos, nbt)
+    }
+    fn post_process(&mut self, pos: [i32; 3]) -> LegacyResult<()> {
+        PieceWorld::post_process(self.world, pos)
+    }
+    fn fluid_tick(&mut self, pos: [i32; 3], fluid: FluidKind, delay: i32) -> LegacyResult<()> {
+        PieceWorld::fluid_tick(self.world, pos, fluid, delay)
+    }
+    fn seed(&mut self) -> LegacyResult<i64> {
+        PieceWorld::seed(self.world)
+    }
+    fn level_boolean(&mut self) -> LegacyResult<bool> {
+        PieceWorld::level_boolean(self.world)
+    }
+    fn level_float(&mut self) -> LegacyResult<f32> {
+        PieceWorld::level_float(self.world)
+    }
+    fn level_int(&mut self, bound: i32) -> LegacyResult<i32> {
+        PieceWorld::level_int(self.world, bound)
+    }
+    fn sea_level(&mut self) -> LegacyResult<i32> {
+        PieceWorld::sea_level(self.world)
+    }
+    fn face_full(&mut self, pos: [i32; 3], direction: Direction) -> LegacyResult<bool> {
+        PieceWorld::face_full(self.world, pos, direction)
+    }
+    fn face_sturdy(&mut self, pos: [i32; 3], face: Direction) -> LegacyResult<bool> {
+        PieceWorld::face_sturdy(self.world, pos, face)
+    }
+    fn center_sturdy(&mut self, pos: [i32; 3], face: Direction) -> LegacyResult<bool> {
+        PieceWorld::center_sturdy(self.world, pos, face)
+    }
+    fn biome(&mut self, pos: [i32; 3]) -> LegacyResult<BiomeId> {
+        PieceWorld::biome(self.world, pos)
+    }
+    fn place_template(
+        &mut self,
+        resources: &StructureResources,
+        template: &StructureTemplate,
+        position: [i32; 3],
+        reference: [i32; 3],
+        settings: &mut PlaceSettings<'_>,
+        random: &mut dyn ProcessorRandom,
+        flags: i32,
+    ) -> LegacyResult<bool> {
+        PieceWorld::place_template(
+            self.world, resources, template, position, reference, settings, random, flags,
+        )
+    }
+    fn place_feature(
+        &mut self,
+        random: &mut dyn PieceRandom,
+        feature: FeatureKey<'_>,
+        pos: [i32; 3],
+    ) -> LegacyResult<bool> {
+        let random = Self::own_random(random)?;
+        (self.place_feature)(self.world, random, feature, pos)
+    }
+    fn place_element(
+        &mut self,
+        random: &mut dyn PieceRandom,
+        element: &PoolElement,
+        at: ElementAt,
+    ) -> LegacyResult<bool> {
+        let random = Self::own_random(random)?;
+        self.place(random, element, at)
+    }
+}
 
 /// The world queries jigsaw assembly needs from the chunk generator.
 pub trait JigsawContext {
@@ -952,6 +1137,12 @@ pub struct PlacedStart {
     pub position: [i32; 3],
     center: PoolPiece,
 }
+impl PlacedStart {
+    /// The start piece as placed, before any child is laid out.
+    pub fn piece(&self) -> &PoolPiece {
+        &self.center
+    }
+}
 
 /// The first half of [`assemble`]: the start piece drawn, rotated, projected to the
 /// heightmap and checked against the height limits. None when the start is invalid. The
@@ -981,7 +1172,7 @@ pub fn place_start(
     let anchored = match config.start_jigsaw {
         Some(name) => {
             element
-                .shuffled_jigsaws(resources, position, rotation, random)
+                .shuffled_jigsaws(resources, position, rotation, &mut *random)
                 .into_iter()
                 .find(|j| j.name.as_deref() == Some(name))?
                 .pos
@@ -992,7 +1183,7 @@ pub fn place_start(
     let local: [i32; 3] = std::array::from_fn(|i| anchored[i].wrapping_sub(position[i]));
     let adjusted: [i32; 3] = std::array::from_fn(|i| position[i].wrapping_sub(local[i]));
     let mut center = PoolPiece {
-        bounding_box: element.bounding_box(adjusted, rotation),
+        bounding_box: element.bounding_box(resources, adjusted, rotation),
         ground_level_delta: element.ground_level_delta(),
         element: element.clone(),
         position: adjusted,
@@ -1215,8 +1406,8 @@ impl Placer<'_, '_> {
                 shuffle(&mut rotations, random);
                 for rotation in rotations {
                     let target_jigsaws =
-                        target.shuffled_jigsaws(self.resources, [0; 3], rotation, random);
-                    let hack_box = target.bounding_box([0; 3], rotation);
+                        target.shuffled_jigsaws(self.resources, [0; 3], rotation, &mut *random);
+                    let hack_box = target.bounding_box(self.resources, [0; 3], rotation);
                     let expand_to = if self.config.use_expansion_hack && hack_box.span()[1] <= 16 {
                         target_jigsaws
                             .iter()
@@ -1226,10 +1417,11 @@ impl Placer<'_, '_> {
                                     return 0;
                                 }
                                 let child = self.pool(&tj.pool);
-                                let child_size = child.as_ref().map_or(0, |p| p.max_size());
+                                let child_size =
+                                    child.as_ref().map_or(0, |p| p.max_size(self.resources));
                                 let fallback_size = child
                                     .and_then(|p| self.pool(&p.fallback))
-                                    .map_or(0, |p| p.max_size());
+                                    .map_or(0, |p| p.max_size(self.resources));
                                 child_size.max(fallback_size)
                             })
                             .max()
@@ -1244,7 +1436,7 @@ impl Placer<'_, '_> {
                         let target_local = target_jigsaw.pos;
                         let raw_position: [i32; 3] =
                             std::array::from_fn(|i| target_pos[i].wrapping_sub(target_local[i]));
-                        let raw_box = target.bounding_box(raw_position, rotation);
+                        let raw_box = target.bounding_box(self.resources, raw_position, rotation);
                         let raw_y = raw_box.min[1];
                         let target_rigid = target.projection() == Projection::Rigid;
                         let target_local_y = target_local[1];
@@ -1473,5 +1665,143 @@ mod tests {
         assert_eq!(below[..2], [0, 0]);
         assert_eq!(below[2..], [101, 100]);
         assert_eq!(tried(&target, &fallback, &counts, 0, false), [101, 100]);
+    }
+
+    /// A pool entry of a registered mod type decodes through that type, after
+    /// the vanilla types, and saves its fields back beside `element_type`; a
+    /// pool with an entry of a type nobody registered is left out. Inside a
+    /// list, the list's projection is the one in effect.
+    #[test]
+    fn mod_element_types_decode_and_unknown_ones_leave_the_pool_out() {
+        use super::super::mod_elements::{
+            ModPoolElement, ModPoolElementType, ModPoolElementTypes, with_test_pool_element_types,
+        };
+        #[derive(Debug)]
+        struct Post(i32);
+        impl ModPoolElement for Post {
+            fn shuffled_jigsaws(
+                &self,
+                _: &StructureResources,
+                _: [i32; 3],
+                _: Rotation,
+                _: &mut dyn PieceDraws,
+            ) -> Vec<Jigsaw<'static>> {
+                Vec::new()
+            }
+            fn bounding_box(
+                &self,
+                _: &StructureResources,
+                p: [i32; 3],
+                _: Rotation,
+            ) -> BoundingBox {
+                BoundingBox::new(p, [p[0], p[1] + self.0 - 1, p[2]])
+            }
+            fn place(
+                &self,
+                _: &mut super::super::legacy::PieceContext<'_>,
+                _: ElementAt,
+                _: Projection,
+            ) -> super::super::legacy::Result<bool> {
+                Ok(false)
+            }
+            fn projection(&self) -> Projection {
+                Projection::Rigid
+            }
+            fn ground_level_delta(&self) -> i32 {
+                1
+            }
+            fn save(&self) -> Compound {
+                Compound::from_iter([("height".into(), Tag::Int(self.0))])
+            }
+        }
+        struct PostType;
+        impl ModPoolElementType for PostType {
+            fn decode(
+                &self,
+                config: &Value,
+                _: &StructureResources,
+                _: &FeatureBlockBindings<'_>,
+            ) -> Result<Arc<dyn ModPoolElement>, String> {
+                let height = config["height"].as_i64().ok_or("no height")?;
+                Ok(Arc::new(Post(height as i32)))
+            }
+        }
+        let names = ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"];
+        let facts = json!({
+            "states": names.map(|name| json!([name, true, false, "", {"id": name, "properties": {}}])),
+            "defaults": names.iter().enumerate().map(|(i, name)| (name.to_string(), json!(i))).collect::<serde_json::Map<_, _>>(),
+        });
+        let registry: &'static _ = Box::leak(Box::new(
+            crate::registry::BlockRegistry::from_facts_json(facts.to_string().as_bytes()).unwrap(),
+        ));
+        let resources = StructureResources::new(
+            registry,
+            super::super::StateTransforms::default(),
+            std::path::Path::new("/nonexistent"),
+            BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        let bindings = FeatureBlockBindings::new(registry, Default::default()).unwrap();
+        let entry = |element: Value| json!({"weight": 2, "element": element}).to_string();
+        let pools = Pools::new(BTreeMap::from([
+            (
+                "test:posts".to_owned(),
+                format!(
+                    r#"{{"fallback":"minecraft:empty","elements":[{}]}}"#,
+                    entry(json!({"element_type": "test:post", "height": 4}))
+                ),
+            ),
+            (
+                "test:listed".to_owned(),
+                format!(
+                    r#"{{"fallback":"minecraft:empty","elements":[{}]}}"#,
+                    entry(json!({"element_type": "minecraft:list_pool_element",
+                        "projection": "terrain_matching",
+                        "elements": [{"element_type": "test:post", "height": 2}]}))
+                ),
+            ),
+            (
+                "test:unknown".to_owned(),
+                format!(
+                    r#"{{"fallback":"minecraft:empty","elements":[{}]}}"#,
+                    entry(json!({"element_type": "test:missing"}))
+                ),
+            ),
+            (
+                "test:refused".to_owned(),
+                format!(
+                    r#"{{"fallback":"minecraft:empty","elements":[{}]}}"#,
+                    entry(json!({"element_type": "test:post"}))
+                ),
+            ),
+        ]));
+        let types: ModPoolElementTypes =
+            BTreeMap::from([("test:post".to_owned(), Arc::new(PostType) as _)]);
+        with_test_pool_element_types(&types, || {
+            let posts = pools.get("test:posts", &resources, &bindings).unwrap();
+            assert_eq!(posts.templates().len(), 2);
+            let element = &posts.templates()[0];
+            assert!(matches!(&**element, PoolElement::Mod { id, .. } if &**id == "test:post"));
+            assert_eq!(
+                element.bounding_box(&resources, [1, 2, 3], Rotation::None),
+                BoundingBox::new([1, 2, 3], [1, 5, 3])
+            );
+            assert_eq!(
+                element.save(),
+                Tag::compound([
+                    ("height", Tag::Int(4)),
+                    ("element_type", Tag::String("test:post".into())),
+                ])
+            );
+            assert_eq!(posts.max_size(&resources), 4);
+            assert_eq!(element.projection(), Projection::Rigid);
+            let listed = pools.get("test:listed", &resources, &bindings).unwrap();
+            let PoolElement::List { elements, .. } = &*listed.templates()[0] else {
+                panic!("a list element");
+            };
+            assert_eq!(elements[0].projection(), Projection::TerrainMatching);
+            assert!(pools.get("test:unknown", &resources, &bindings).is_none());
+            assert!(pools.get("test:refused", &resources, &bindings).is_none());
+        });
     }
 }

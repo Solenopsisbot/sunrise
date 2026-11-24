@@ -5,6 +5,11 @@ pub(crate) fn installed_dimension_list() -> &'static [crate::world::dimension::D
     installed().map_or(&[], |installed| installed.dimensions.as_slice())
 }
 
+/// The world clocks registered at startup, for the executable's `minecraft:world_clock` registry.
+pub(crate) fn installed_world_clock_list() -> &'static [Box<str>] {
+    installed().map_or(&[], |installed| installed.world_clocks.as_slice())
+}
+
 /// The chunk generators registered at startup, for the executable to hand to the engine.
 pub(crate) fn installed_chunk_generator_list()
 -> &'static [crate::world::chunk_generator::ChunkGeneratorInfo] {
@@ -29,6 +34,17 @@ impl dyn Registrar + '_ {
     /// the mod.
     pub fn register_dimension(&mut self, name: &str, settings: crate::DimensionSettings) {
         self.add_dimension(name, settings);
+    }
+    /// Register world clock `name` (`dungeon` or `mymod:dungeon`) once at startup: a
+    /// `minecraft:world_clock` registry entry (`WorldClock`), as if a data pack below all the
+    /// others gave it, that a dimension type names as its default clock
+    /// ([`DimensionSettings::clock`](crate::DimensionSettings::clock)). It counts its own time,
+    /// saved with the world, which `level.clock(host)` sets for the levels that follow it (a
+    /// paused clock is a fixed time). An unowned namespace, an empty name, a name that is no
+    /// folder of the world, a vanilla clock and an id registered twice refuse the mods at
+    /// startup, naming the mod.
+    pub fn register_world_clock(&mut self, name: &str) {
+        self.add_world_clock(name);
     }
     /// Register chunk generator `name` (`void` or `mymod:void`) once at
     /// startup: a level whose stem names `mymod:void` then has the terrain of
@@ -62,6 +78,8 @@ pub trait DimensionsRegistrar {
     /// Register dimension `name` with `settings`; mods reach it through
     /// `register_dimension`.
     fn add_dimension(&mut self, name: &str, settings: crate::DimensionSettings);
+    /// Register world clock `name`; mods reach it through `register_world_clock`.
+    fn add_world_clock(&mut self, name: &str);
     /// Register chunk generator `name` with `generator`; mods reach it through
     /// `register_chunk_generator`.
     fn add_chunk_generator(&mut self, name: &str, generator: Arc<dyn crate::ChunkGenerator>);

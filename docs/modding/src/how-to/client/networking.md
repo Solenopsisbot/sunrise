@@ -89,8 +89,8 @@ fn player_handshake(
 ```
 
 The requested host is untrusted text, including any suffix after a NUL. Each
-listener sees the last accepted rewrite. Login doesn't route by host, so the
-final value only reaches later listeners. The vanilla limit of 255 UTF-16
+listener sees the last accepted rewrite. Login doesn't route by host; the
+final value is what `PlayerRef::virtual_host` reports for the player. The vanilla limit of 255 UTF-16
 code units applies to decoding the packet, not to the rewrite. Each listener
 gets its own copy of the requested port, protocol version and peer IP, so no
 listener changes what the next one reads. The peer IP is the numeric
@@ -102,6 +102,55 @@ Cancellation sends a login disconnect and closes the connection without
 processing a login hello. The client gets the standard localized
 "Disconnected" text if you leave `reason` unset or it fails Text serialization
 validation.
+
+## Reporting the client identity
+
+Implement `Hooks::client_identity` to choose the brand and any extra configuration
+payloads for a particular server. The hook runs on the network thread once per
+join that reaches initial configuration. The read-only `ClientIdentityHost`
+borrows the original target through `host.server_address()`: a typed address keeps
+its original spelling, before SRV or DNS resolution, and a transfer supplies the
+new destination. The Host exposes no game state or connection operations. An
+integrated single-player connection sends only `vanilla`, without calling the hook.
+Returning from play to configuration on the same connection does not repeat it.
+
+```rust,ignore
+use mod_api::{ClientIdentity, ClientIdentityEvent, ClientIdentityHost, ClientIdentityPayload, Identifier};
+
+// In your Hooks implementation:
+fn client_identity(
+    &self,
+    host: &dyn ClientIdentityHost,
+    _: &mut ClientIdentityEvent,
+) -> Option<ClientIdentity> {
+    if host.server_address() != "example.org:25565" {
+        return None;
+    }
+    let channel = Identifier::parse("example:hello").ok()?;
+    Some(ClientIdentity::new(
+        "example-client",
+        vec![ClientIdentityPayload::new(channel, vec![1, 0])],
+    ))
+}
+```
+
+`None` leaves the decision to the next listener. The first `Some` (by listener
+priority, then dependency order) replaces the whole identity, including any
+extras. If nobody answers, the Sunrise layer's identity is used; if it has none,
+the client sends `vanilla` with no extras. The brand is protocol data, not
+display text. It goes on `minecraft:brand` after login acknowledgement, followed
+by the extra payloads in list order, then client information. Supply an empty
+list to send only the brand.
+
+Use only channels that your server expects before negotiation. Reserved or
+transport-owned channels, including `minecraft:brand`, cannot appear in the extra
+list. Each extra body is sent as-is, with a limit of 32,767 bytes
+(`ServerboundCustomPayloadPacket.MAX_PAYLOAD_SIZE`). The vanilla string limits
+apply to the brand (`BrandPayload.write` / `FriendlyByteBuf.writeUtf`) and to
+channel identifiers (`Identifier.STREAM_CODEC` / `ByteBufCodecs.STRING_UTF8`).
+Rejected channels or encoding errors fail the join. The identity is not a Wire
+record; use registered configuration payload handlers for negotiated traffic.
+Play packet hooks and holds do not intercept these packets.
 
 ## Configuration tasks before play
 

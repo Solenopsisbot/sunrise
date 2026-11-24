@@ -6,9 +6,12 @@
 //! (`PlayerMotion::refresh_dimensions`), so the hook is asked here instead: a pass tells it each
 //! entity whose pose or vanilla size changed since it was last asked (or that was never asked,
 //! the constructor's call), and keeps the answer on the entity (`pose::SizeAnswer`) for as long
-//! as that pose and vanilla size hold. The server's mobs are asked before and after their ticks;
-//! a guest's body once per server tick, with its candidates, before its motion; the client's own
-//! body for its candidates before its tick and for its current pose after it.
+//! as that pose and vanilla size hold. The server's mobs are asked before and after their ticks,
+//! and its other entities (items, minecarts, boats, projectiles, armor stands, TNT, falling
+//! blocks, orbs, rockets, tridents, displays, markers, interactions, end crystals...) at the same
+//! passes, standing, each keeping the answer its box takes; a guest's body once per server tick,
+//! with its candidates, before its motion; the client's own body for its candidates before its
+//! tick and for its current pose after it.
 //! A client's copy of any server entity (a mob, a minecart, an armor stand, a display...) asks
 //! where a client's `refreshDimensions` runs: from its constructor, before `entity_constructing`;
 //! after a synched value that refreshes it (`Entity.onSyncedDataUpdated(DATA_POSE)`, and a
@@ -19,6 +22,7 @@
 //! their tracking row (`remote::Tracked`); the copy's box follows it.
 
 use super::Game;
+use super::entity::{Entity as _, with_entity, with_entity_mut};
 use mod_api::{EntityRef, Pose};
 use sunrise_client::mobs::Mob;
 use sunrise_client::pose::{Dimensions, SizeAnswer};
@@ -84,17 +88,54 @@ impl Game<'_> {
         }
     }
 
+    /// The server's entities other than mobs whose vanilla size changed since they were last
+    /// asked, or that were never asked (the constructor's call), standing: those of the shared
+    /// entity lists that keep an answer (`Entity::vanilla_dimensions`), then displays, markers
+    /// and interactions (`OtherEntity::vanilla_dimensions`), then end crystals.
+    pub(super) fn native_entity_sizes(&mut self) {
+        if !mod_api::__private::listened(mod_api::HookId::EntitySize) {
+            return;
+        }
+        for handle in self.entity_handles() {
+            let asked = with_entity!(self, handle, e => {
+                e.vanilla_dimensions()
+                    .map(|vanilla| (e.id(), vanilla, e.size_answer()))
+            });
+            if let Some((id, vanilla, previous)) = asked
+                && let Some(answer) = self.ask_entity_size(id, Pose::Standing, vanilla, previous)
+            {
+                with_entity_mut!(self, handle, e => e.set_size_answer(answer));
+            }
+        }
+        for i in 0..self.others.len() {
+            let e = &self.others[i];
+            let (id, previous) = (e.id, e.size_answer);
+            let Some(vanilla) = e.vanilla_dimensions() else {
+                continue;
+            };
+            if let Some(answer) = self.ask_entity_size(id, Pose::Standing, vanilla, previous) {
+                self.others.update(i, |e| e.size_answer = Some(answer));
+            }
+        }
+        for i in 0..self.crystals.len() {
+            let c = &self.crystals[i];
+            // A crystal no server tracks yet has no entity id to name.
+            let (id, previous) = (c.id, c.size_answer);
+            if id == 0 {
+                continue;
+            }
+            let vanilla = super::dragon::Crystal::DIMENSIONS;
+            if let Some(answer) = self.ask_entity_size(id, Pose::Standing, vanilla, previous) {
+                self.crystals.update(i, |c| c.size_answer = Some(answer));
+            }
+        }
+    }
+
     /// The vanilla size of a client's copy `id` of a non-mob entity of type `kind`
     /// (`Entity.getDimensions(pose)`): its type's, or what its synched values make it.
     fn client_object_dimensions(&self, id: u32, kind: &str) -> Option<[f32; 3]> {
         if let Some(a) = self.armor_stands.iter().find(|a| a.id == id) {
-            // ArmorStand.getDefaultDimensions: MARKER_DIMENSIONS, or BABY_DIMENSIONS (the
-            // type's at half scale, its eyes at 0.9875) for a small one.
-            return Some(match (a.marker, a.small) {
-                (true, _) => [0.0; 3],
-                (_, true) => [0.25, 0.9875, 0.9875],
-                _ => [0.5, 1.975, 1.7775],
-            });
+            return Some(a.default_dimensions());
         }
         if let Some(i) = self.interactions.get(&(id as i32)) {
             // Interaction.getDimensions: EntityDimensions.scalable(width, height).
@@ -1119,5 +1160,271 @@ mod tests {
             extent(f64::min, f64::INFINITY),
             extent(f64::max, f64::NEG_INFINITY),
         )
+    }
+
+    /// A server game with `Log` listening (`seen`), or with no listener at all.
+    fn with_server(listen: bool, test: impl FnOnce(&mut crate::game::Game<'_>, &Mutex<Seen>)) {
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let mods: mod_api::Mods = if listen {
+            vec![mod_api::ModEntry::new("log", Box::new(Log(seen.clone())))].into()
+        } else {
+            Vec::new().into()
+        };
+        mod_platform::testing::with_mods(mods, || with_game(|game| test(game, &seen)));
+    }
+
+    /// The box `EntityDimensions.makeBoundingBox` makes for `width` by `height` at `at`.
+    fn made_box(at: sunrise_core::geometry::Vec3, [width, height, _]: [f32; 3]) -> [[f64; 3]; 2] {
+        let half = f64::from(width / 2.0);
+        [
+            [at.x - half, at.y, at.z - half],
+            [at.x + half, at.y + f64::from(height), at.z + half],
+        ]
+    }
+
+    fn corners(b: sunrise_core::geometry::Aabb) -> [[f64; 3]; 2] {
+        let (lo, hi) = (b.min_position(), b.max_position());
+        [[lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]]
+    }
+
+    /// The server asks for every family, not only mobs (`EntityEvent.Size` from each
+    /// constructor): an item, two minecarts, an armor stand, a snowball and a block display,
+    /// each from its type's size, standing; a leash knot, whose box doesn't follow its size,
+    /// isn't asked. Their boxes take the answer, and so does what a minecart collides with
+    /// (another cart's box, `Mover::Cart`). An armor stand turned small asks again; nothing
+    /// asks twice for a size already answered.
+    #[test]
+    #[ignore = "daily"]
+    fn server_entities_ask_and_their_boxes_take_the_answer() {
+        use crate::game::collision_source::Mover;
+        use crate::game::minecarts::{CartKind, Minecart};
+        use sunrise_client::entities::ArmorStand;
+        use sunrise_client::projectiles::{Projectile, ProjectileKind};
+        use sunrise_core::geometry::Vec3;
+        if in_fresh_process("server_entities_ask_and_their_boxes_take_the_answer") {
+            return;
+        }
+        with_server(true, |game, seen| {
+            let (cart_at, other_at) = (Vec3::new(8.5, 70.0, 8.5), Vec3::new(10.0, 70.0, 8.5));
+            game.carts
+                .push(Minecart::new(9001, CartKind::Rideable, cart_at));
+            game.carts
+                .push(Minecart::new(9002, CartKind::Rideable, other_at));
+            game.spawn_item(
+                sunrise_client::items::ItemStack::new("minecraft:stone", 1),
+                [4.5, 70.0, 4.5],
+                [0.0; 3],
+                0,
+            );
+            let item = game.dropped.last().unwrap().id;
+            let stand_at = Vec3::new(2.5, 70.0, 6.5);
+            game.armor_stands.push(ArmorStand::new(9004, stand_at, 0.0));
+            let shot_at = Vec3::new(2.5, 70.0, 2.5);
+            let mut shot = Projectile::new(ProjectileKind::Snowball, shot_at, None);
+            shot.id = 9003;
+            game.creatures.projectiles.push(shot);
+            for (id, kind) in [
+                (9005, "minecraft:leash_knot"),
+                (9006, "minecraft:block_display"),
+            ] {
+                game.others.push(crate::game::commands::OtherEntity {
+                    size_answer: None,
+                    attachment_lifetime: Default::default(),
+                    knot_check: None,
+                    eye: None,
+                    join: Default::default(),
+                    id,
+                    kind: kind.into(),
+                    position: Vec3::new(6.5, 70.0, 2.5),
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    item_transformation: None,
+                    interaction: None,
+                });
+            }
+            game.native_entity_sizes();
+            // EntityType.ITEM: 0.25 by 0.25, eyes 0.2125; MINECART: 0.98 by 0.7, eyes 0.595;
+            // ARMOR_STAND: 0.5 by 1.975, eyes 1.7775; SNOWBALL: 0.25 by 0.25, eyes 0.2125.
+            let (item_size, cart, stand) = (
+                [0.25, 0.25, 0.2125],
+                [0.98, 0.7, 0.595],
+                [0.5, 1.975, 1.7775],
+            );
+            let standing = |id, size| (id, Pose::Standing, size, size);
+            assert_eq!(
+                seen.lock().unwrap().sizes,
+                [
+                    standing(item, item_size),
+                    standing(9001, cart),
+                    standing(9002, cart),
+                    standing(9004, stand),
+                    standing(9003, item_size),
+                    // EntityType.BLOCK_DISPLAY: none. The knot (9005) isn't asked.
+                    standing(9006, [0.0; 3]),
+                ]
+            );
+            let cart_box = made_box(cart_at, doubled(cart));
+            assert_eq!(corners(game.carts[0].bounds()), cart_box);
+            let item_at = game.dropped.last().unwrap().position;
+            assert_eq!(
+                corners(game.dropped.last().unwrap().bounds()),
+                made_box(item_at, doubled(item_size))
+            );
+            assert_eq!(
+                corners(game.creatures.projectiles[0].bounds()),
+                made_box(shot_at, doubled(item_size))
+            );
+            assert_eq!(
+                corners(game.armor_stands[0].bounds()),
+                made_box(stand_at, doubled(stand))
+            );
+            // The other cart moves against the first one's answered box.
+            let other = game.carts[1].clone();
+            let solids = game.entity_collisions(Mover::Cart(&other));
+            assert!(solids.iter().any(|b| corners(*b) == cart_box), "{solids:?}");
+            // The same sizes again: nothing to ask. ArmorStand.setSmall refreshes its size.
+            game.native_entity_sizes();
+            assert_eq!(seen.lock().unwrap().sizes.len(), 6);
+            game.armor_stands.update(0, |a| a.small = true);
+            game.native_entity_sizes();
+            assert_eq!(
+                seen.lock().unwrap().sizes.last(),
+                Some(&(9004, Pose::Standing, doubled(stand), [0.25, 0.9875, 0.9875]))
+            );
+        });
+    }
+
+    /// A falling block's landing hurts what its box covers (`FallingBlockEntity.causeFallDamage`
+    /// selects by `getBoundingBox`): an anvil whose answer doubled it hits a pig a block away,
+    /// which its vanilla 0.98-wide box doesn't reach.
+    #[test]
+    #[ignore = "daily"]
+    fn a_resized_falling_anvil_hits_what_its_answer_covers() {
+        use sunrise_core::geometry::Vec3;
+        if in_fresh_process("a_resized_falling_anvil_hits_what_its_answer_covers") {
+            return;
+        }
+        with_server(true, |game, _| {
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
+            let at = Vec3::new(8.5, 64.0, 8.5);
+            let pig = game
+                .spawn_mob_spawned(
+                    "pig",
+                    [9.5, 64.0, 8.5],
+                    crate::game::creatures::SpawnSite::Plain,
+                )
+                .unwrap();
+            let health = game.mobs.iter().find(|m| m.id == pig).unwrap().health;
+            game.falling.push(crate::game::FallingBlock {
+                size_answer: None,
+                attachment_lifetime: Default::default(),
+                rotation: [0.0; 2],
+                join: Default::default(),
+                id: 9101,
+                blocks_building: true,
+                state: game
+                    .pack
+                    .assets
+                    .registry
+                    .default_state("minecraft:anvil")
+                    .unwrap(),
+                start_pos: sunrise_core::position::BlockPos::containing(at),
+                position: at,
+                previous: at,
+                velocity: Vec3::ZERO,
+                age: 1,
+                no_gravity: false,
+                portal: Default::default(),
+                drop_item: true,
+                fall_distance: 2.0,
+                ground: sunrise_world::ground_support::GroundState::from_ground_flag(true),
+                fire_ticks: 0,
+                sync_velocity: false,
+                stuck: Vec3::ZERO,
+                damage: sunrise_client::falling_block::Damage::anvil(),
+                saved: None,
+            });
+            game.native_entity_sizes();
+            let mut anvil = game.falling[0].clone();
+            game.falling.remove(0);
+            game.falling_block_impact(&mut anvil);
+            let hurt = game.mobs.iter().find(|m| m.id == pig).unwrap().health;
+            assert!(hurt < health, "{hurt} < {health}");
+        });
+    }
+
+    /// `AgeableMob.setAge` crossing to grown up refreshes the size (`DATA_BABY_ID` →
+    /// `refreshDimensions`): a server calf that grows up in its tick asks once, from the size
+    /// it had as a calf.
+    #[test]
+    #[ignore = "daily"]
+    fn a_server_calf_asks_when_it_grows_up() {
+        if in_fresh_process("a_server_calf_asks_when_it_grows_up") {
+            return;
+        }
+        with_server(true, |game, seen| {
+            crate::game::native_entity_refs::tests::prepare_entity_ticking_neighborhood(
+                game,
+                sunrise_core::position::ChunkPos::new(0, 0),
+            );
+            let id = game
+                .spawn_mob_spawned(
+                    "cow",
+                    [8.5, 70.0, 8.5],
+                    crate::game::creatures::SpawnSite::Plain,
+                )
+                .unwrap();
+            let i = game.mobs.iter().position(|m| m.id == id).unwrap();
+            sunrise_client::mobs::finalize::set_baby(&mut game.mobs[i], true);
+            let calf = game.mobs[i].vanilla_dims();
+            // One tick from growing up (`AgeableMob.aiStep`: ++age).
+            game.mobs[i].extra.age = -1;
+            game.native_mob_sizes();
+            game.tick_creature_entities().unwrap();
+            let i = game.mobs.iter().position(|m| m.id == id).unwrap();
+            assert!(!game.mobs[i].is_baby(), "the calf grew up in its tick");
+            // EntityType.COW: 0.9 by 1.4, eyes 1.3.
+            let cow = [0.9, 1.4, 1.3];
+            let calls: Vec<_> = seen
+                .lock()
+                .unwrap()
+                .sizes
+                .iter()
+                .filter(|call| call.0 == id)
+                .copied()
+                .collect();
+            assert_eq!(
+                calls,
+                [
+                    (id, Pose::Standing, calf, calf),
+                    (id, Pose::Standing, doubled(calf), cow),
+                ]
+            );
+            assert_eq!(game.mobs[i].height(), 1.4_f32 * 2.0);
+        });
+    }
+
+    /// No listener, no call: the server's entities keep no answer and their vanilla boxes.
+    #[test]
+    #[ignore = "daily"]
+    fn without_a_listener_the_server_asks_nothing() {
+        use crate::game::minecarts::{CartKind, Minecart};
+        use sunrise_core::geometry::Vec3;
+        if in_fresh_process("without_a_listener_the_server_asks_nothing") {
+            return;
+        }
+        with_server(false, |game, _| {
+            let at = Vec3::new(8.5, 70.0, 8.5);
+            game.carts.push(Minecart::new(9001, CartKind::Rideable, at));
+            game.native_mob_sizes();
+            game.native_entity_sizes();
+            assert_eq!(game.carts[0].size_answer, None);
+            assert_eq!(
+                corners(game.carts[0].bounds()),
+                made_box(at, [0.98, 0.7, 0.0])
+            );
+        });
     }
 }

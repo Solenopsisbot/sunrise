@@ -746,6 +746,10 @@ fn crystal_round_trip(game: &mut Game<'_>, rows: &mut Map<String, Value>) {
 #[test]
 #[ignore = "daily"]
 fn server_player_packet_witness() {
+    run_server_player_packet_witness();
+}
+
+pub(in crate::game) fn run_server_player_packet_witness() {
     // Resource loading installs process-wide registries. Use the standard child
     // boundary, with a larger stack on the thread that loads the prepared game.
     let (_, module) = module_path!().split_once("::").unwrap();

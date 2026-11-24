@@ -451,6 +451,7 @@ fn a_composite_program_blends_onto_its_buffer() {
         &draws.layout,
         &pack,
         false,
+        false,
     )
     .unwrap_or_else(|| panic!("the pass builds: {notes:?}"));
     // colortex3 holds (0.75, 0.5, 0.25, 0.5) before the pass.

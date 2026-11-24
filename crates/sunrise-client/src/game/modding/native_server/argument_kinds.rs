@@ -12,12 +12,14 @@ use sunrise_client::command::{
     args::Coordinates, snbt,
 };
 
-/// The argument kinds a native usage may name, each with a [`parser`]; `resource:<registry>`
-/// and `mod_id` come on top.
-pub(super) const KINDS: [&str; 18] = [
+/// The argument kinds a native usage may name, each with a [`parser`]; `resource:<registry>`,
+/// the bounded `integer(min,max)` and `long(min,max)` ([`bounded_parser`]) and `mod_id` come on
+/// top.
+pub(super) const KINDS: [&str; 19] = [
     "word",
     "text",
     "integer",
+    "long",
     "number",
     "boolean",
     "player",
@@ -154,6 +156,14 @@ pub(super) fn parser(kind: &str) -> Option<(&'static str, Value, ArgType)> {
                 max: i32::MAX,
             },
         ),
+        "long" => (
+            "brigadier:long",
+            Value::Null,
+            ArgType::Long {
+                min: i64::MIN,
+                max: i64::MAX,
+            },
+        ),
         "number" => (
             "brigadier:double",
             Value::Null,
@@ -203,6 +213,111 @@ pub(super) fn parser(kind: &str) -> Option<(&'static str, Value, ArgType)> {
         ),
         _ => return None,
     })
+}
+
+/// The parser and properties of a bounded number kind, `integer(min,max)` or `long(min,max)`,
+/// where either bound may be left empty (`integer(0,)`): Brigadier's
+/// `IntegerArgumentType.integer(min, max)` and `LongArgumentType.longArg(min, max)`. `None` for
+/// any other kind; the reason for one that names `integer(` or `long(` but does not parse.
+pub(super) fn bounded_parser(kind: &str) -> Option<Result<(&'static str, Value), String>> {
+    let (name, bounds) = kind.strip_suffix(')')?.split_once('(')?;
+    let integer = match name {
+        "integer" => true,
+        "long" => false,
+        _ => return None,
+    };
+    Some(declared_bounds(kind, integer, bounds))
+}
+
+/// The `min,max` of a bounded number kind, each an `i32` for `integer` and an `i64` for `long`.
+fn declared_bounds(
+    kind: &str,
+    integer: bool,
+    bounds: &str,
+) -> Result<(&'static str, Value), String> {
+    let bound = |text: &str| -> Result<Option<i64>, String> {
+        if text.is_empty() {
+            return Ok(None);
+        }
+        let value = match integer {
+            true => text.parse::<i32>().map(i64::from),
+            false => text.parse::<i64>(),
+        };
+        value
+            .map(Some)
+            .map_err(|_| format!("`{kind}`: `{text}` is not a bound of that kind"))
+    };
+    let (min, max) = bounds
+        .split_once(',')
+        .ok_or_else(|| format!("`{kind}` is not `(min,max)` bounds"))?;
+    let (min, max) = (bound(min)?, bound(max)?);
+    if let (Some(min), Some(max)) = (min, max)
+        && max < min
+    {
+        return Err(format!("`{kind}`: the maximum is below the minimum"));
+    }
+    let parser = match integer {
+        true => "brigadier:integer",
+        false => "brigadier:long",
+    };
+    Ok((parser, number_properties(integer, min, max)))
+}
+
+/// `IntegerArgumentInfo` / `LongArgumentInfo`'s properties: a bound is written only when it is not
+/// the type's own extreme (`min != Integer.MIN_VALUE`, `max != Integer.MAX_VALUE`), so `integer(,)`
+/// is the bare `integer`.
+fn number_properties(integer: bool, min: Option<i64>, max: Option<i64>) -> Value {
+    let (low, high) = match integer {
+        true => (i64::from(i32::MIN), i64::from(i32::MAX)),
+        false => (i64::MIN, i64::MAX),
+    };
+    let mut properties = serde_json::Map::new();
+    if let Some(min) = min.filter(|&min| min != low) {
+        properties.insert("min".into(), min.into());
+    }
+    if let Some(max) = max.filter(|&max| max != high) {
+        properties.insert("max".into(), max.into());
+    }
+    match properties.is_empty() {
+        true => Value::Null,
+        false => Value::Object(properties),
+    }
+}
+
+/// The parser and properties a mod's argument type goes to clients as, from its declared kind.
+/// `None` for a kind this build cannot read.
+pub(super) fn custom_parser(kind: mod_api::CommandArgumentKind) -> Option<(&'static str, Value)> {
+    use mod_api::CommandArgumentKind as Kind;
+    Some(match kind {
+        Kind::Word => ("brigadier:string", json!({"type": "word"})),
+        Kind::Greedy => ("brigadier:string", json!({"type": "greedy"})),
+        Kind::Integer { min, max } => (
+            "brigadier:integer",
+            number_properties(true, min.map(i64::from), max.map(i64::from)),
+        ),
+        Kind::Long { min, max } => ("brigadier:long", number_properties(false, min, max)),
+        _ => return None,
+    })
+}
+
+/// A validated `brigadier:integer` node's bounds, `int`'s extremes where its properties leave
+/// one out.
+fn integer_bounds(node: &Value) -> (i32, i32) {
+    let (min, max) = long_bounds(node);
+    (
+        i32::try_from(min).unwrap_or(i32::MIN),
+        i32::try_from(max).unwrap_or(i32::MAX),
+    )
+}
+
+/// A validated `brigadier:long` node's bounds, `long`'s extremes where its properties leave one
+/// out.
+fn long_bounds(node: &Value) -> (i64, i64) {
+    let properties = &node["properties"];
+    (
+        properties["min"].as_i64().unwrap_or(i64::MIN),
+        properties["max"].as_i64().unwrap_or(i64::MAX),
+    )
 }
 
 /// The type of the argument node that parsed `range`: the parsed node, not the value, says which
@@ -367,11 +482,19 @@ pub(super) fn argument_type(node: &Value, arguments: &CommandArguments) -> ArgTy
                 None
             }
         };
-        // Use the validated tree property rather than calling mod code again.
-        let kind = if node["properties"]["type"] == "greedy" {
-            sunrise_client::command::CustomArgumentKind::Greedy
-        } else {
-            sunrise_client::command::CustomArgumentKind::Word
+        // Use the validated tree properties rather than calling mod code again.
+        use sunrise_client::command::CustomArgumentKind as Kind;
+        let kind = match node["parser"].as_str() {
+            Some("brigadier:integer") => {
+                let (min, max) = integer_bounds(node);
+                Kind::Integer { min, max }
+            }
+            Some("brigadier:long") => {
+                let (min, max) = long_bounds(node);
+                Kind::Long { min, max }
+            }
+            _ if node["properties"]["type"] == "greedy" => Kind::Greedy,
+            _ => Kind::Word,
         };
         let custom = sunrise_client::command::CustomArgument::new(
             id,
@@ -447,6 +570,14 @@ pub(super) fn argument_type(node: &Value, arguments: &CommandArguments) -> ArgTy
     }
     if node["parser"] == "minecraft:vec3" && node[UNCENTERED] == true {
         return ArgType::Vec3 { center: false };
+    }
+    if node["parser"] == "brigadier:integer" {
+        let (min, max) = integer_bounds(node);
+        return ArgType::Integer { min, max };
+    }
+    if node["parser"] == "brigadier:long" {
+        let (min, max) = long_bounds(node);
+        return ArgType::Long { min, max };
     }
     KINDS
         .into_iter()

@@ -380,6 +380,7 @@ fn authoritative_custom_book_rebuilds_cached_geometry_without_observe_screen() {
                     window: 1,
                     generation,
                     name: "geometry:menu".into(),
+                    title: None,
                     block: Some("minecraft:stone".into()),
                     pos: None,
                     mod_type: None,
@@ -388,6 +389,7 @@ fn authoritative_custom_book_rebuilds_cached_geometry_without_observe_screen() {
                 slot_moves: Default::default(),
                 layout_revision: 0,
                 shown: true,
+                detached: false,
                 screen: mod_api::__private::OwnedMenuScreen::new(
                     "geometry",
                     0,
@@ -570,6 +572,7 @@ fn a_moved_slot_takes_its_place_for_drawing_and_input_from_the_next_frame() {
                     window: 1,
                     generation,
                     name: MENU.into(),
+                    title: None,
                     block: Some(STONE.into()),
                     pos: None,
                     mod_type: None,
@@ -578,6 +581,7 @@ fn a_moved_slot_takes_its_place_for_drawing_and_input_from_the_next_frame() {
                 slot_moves: Default::default(),
                 layout_revision: 0,
                 shown: true,
+                detached: false,
                 screen: mod_api::__private::OwnedMenuScreen::new(
                     "geometry",
                     0,
@@ -695,6 +699,7 @@ fn a_hidden_slot_leaves_the_screen_and_comes_back_where_put() {
                     window: 1,
                     generation,
                     name: MENU.into(),
+                    title: None,
                     block: Some(STONE.into()),
                     pos: None,
                     mod_type: None,
@@ -703,6 +708,7 @@ fn a_hidden_slot_leaves_the_screen_and_comes_back_where_put() {
                 slot_moves: Default::default(),
                 layout_revision: 0,
                 shown: true,
+                detached: false,
                 screen: mod_api::__private::OwnedMenuScreen::new(
                     "geometry",
                     0,
@@ -1113,6 +1119,7 @@ fn open_native_screen_set_data_accepts_full_signed_and_mod_data_ranges() {
             window: 7,
             generation: 1,
             name: "minecraft:hopper".into(),
+            title: None,
             block: None,
             pos: None,
             mod_type: None,
@@ -1121,6 +1128,7 @@ fn open_native_screen_set_data_accepts_full_signed_and_mod_data_ranges() {
         slot_moves: Default::default(),
         layout_revision: 0,
         shown: true,
+        detached: false,
         screen: mod_api::__private::OwnedMenuScreen::new(
             "data-range",
             0,

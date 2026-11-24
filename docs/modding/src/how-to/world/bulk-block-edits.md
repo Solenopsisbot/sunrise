@@ -71,9 +71,11 @@ standalone entity and block-entity fixers can retain old root keys alongside the
 
 Unknown mod IDs are preserved, though generic format changes like the item-stack count and
 components still apply. A well-formed compound from the current game version is unchanged.
+Data older than the first schema is read with that schema, as in vanilla. Pass `-1` for
+unversioned data.
 
-`NbtUpgradeError` distinguishes a future source version, a version without a source schema,
-a malformed compound (for example, one missing its `id`, called `Name` on block states before
-DataVersion 5006), and legacy tables that a fix needed but could not read. `TooDeep` and `UpgradedTooDeep` distinguish
+`NbtUpgradeError` distinguishes a future source version, a malformed compound (for example,
+one missing its `id`, called `Name` on block states before DataVersion 5006), and legacy
+tables that a fix needed but could not read. `TooDeep` and `UpgradedTooDeep` distinguish
 input and output past vanilla's NBT read depth. This counts the root at level zero and includes
 wrapper compounds when a mixed list is encoded. The upgrade has no size or node cap.

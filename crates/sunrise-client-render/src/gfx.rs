@@ -163,13 +163,29 @@ pub(crate) fn texture_bytes(texture: &wgpu::Texture) -> u64 {
         * u64::from(size.depth_or_array_layers)
 }
 
+/// Whether the section arena's pages are storage too: where flat draws read them (`flat`), or
+/// while a `shaders/` pack's terrain programs read them per section (`pages`,
+/// `pack_atlas::TerrainDraws::Pages`). Otherwise they are vertex buffers alone, which the device's
+/// storage binding size does not cap (`Arena::page_limit`).
+fn arena_storage(flat: bool, pages: bool) -> bool {
+    flat || pages
+}
+
 /// Whether translucent quads have an arena of their own: with Translucent Batching
 /// (`batching`), unless a shader pack's frames can draw terrain flat (as for `flat_frame`),
 /// which reads them in the section arena through its tables: where flat draws exist and
 /// are on (`flat_draws`), for a `shaders/` pack's terrain programs (`terrain`) or a shadow
-/// pass (`shadow`: a `shaders/` pack's, or the `[shadow]` of one of Sunrise's own).
-fn translucent_split(batching: bool, flat_draws: bool, terrain: bool, shadow: bool) -> bool {
-    batching && !(flat_draws && (terrain || shadow))
+/// pass (`shadow`: a `shaders/` pack's, or the `[shadow]` of one of Sunrise's own). Nor while
+/// a `shaders/` pack's terrain or shadow programs read the section arena's pages in per-section
+/// draws (`pages`, `pack_atlas::TerrainDraws::Pages`): the translucent arena is no storage.
+fn translucent_split(
+    batching: bool,
+    flat_draws: bool,
+    pages: bool,
+    terrain: bool,
+    shadow: bool,
+) -> bool {
+    batching && !(flat_draws && (terrain || shadow)) && !pages
 }
 
 /// The compact layout of solid quads, unless `SUNRISE_PACKED_QUADS=0` (A/B checks).

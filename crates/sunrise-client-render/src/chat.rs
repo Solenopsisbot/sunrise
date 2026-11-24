@@ -58,7 +58,7 @@ pub fn filtered_message(
 /// `CommandHistory.PERSISTED_COMMANDS_FILE_NAME` and its size cap.
 const COMMAND_HISTORY_FILE: &str = "command_history.txt";
 const MAX_PERSISTED_COMMAND_HISTORY: usize = 50;
-/// GuiMessageTag.systemSinglePlayer's indicator colour.
+/// The indicator colour shared by `GuiMessageTag.system` and `systemSinglePlayer`.
 pub const SYSTEM_INDICATOR: u32 = 0xD0D0D0;
 /// `GuiMessageTag.CHAT_MODIFIED_INDICATOR_COLOR`.
 const MODIFIED_INDICATOR: u32 = 0x60_6060;
@@ -271,6 +271,14 @@ pub struct Tag {
     pub text: Text,
 }
 impl Tag {
+    /// `GuiMessageTag.system`: disguised chat and deleted-message markers.
+    pub fn system() -> Self {
+        Self {
+            color: SYSTEM_INDICATOR,
+            icon: false,
+            text: Text::translate("chat.tag.system", &[]),
+        }
+    }
     /// `GuiMessageTag.systemSinglePlayer`, in `color`.
     pub fn system_single_player(color: u32) -> Self {
         Self {
@@ -760,9 +768,7 @@ impl Chat {
             wrapped: 0,
             content: Self::deleted_marker(),
             inline_images: None,
-            tag: Some(std::sync::Arc::new(Tag::system_single_player(
-                SYSTEM_INDICATOR,
-            ))),
+            tag: Some(std::sync::Arc::new(Tag::system())),
             source: ChatSource::Server,
             signature: None,
         };

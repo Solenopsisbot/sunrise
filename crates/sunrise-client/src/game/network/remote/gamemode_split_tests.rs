@@ -347,6 +347,10 @@ fn assert_row_core(
 #[test]
 #[ignore = "daily"]
 fn genpvp_packet_sequence_matches_26_3_oracle_step_by_step() {
+    run_genpvp_packet_sequence_matches_26_3_oracle_step_by_step();
+}
+
+pub(in crate::game) fn run_genpvp_packet_sequence_matches_26_3_oracle_step_by_step() {
     crate::game::in_own_process(
         "game::remote::abilities::gamemode_split_tests::genpvp_packet_sequence_matches_26_3_oracle_step_by_step",
         || {
@@ -396,6 +400,10 @@ fn genpvp_packet_sequence_matches_26_3_oracle_step_by_step() {
 #[test]
 #[ignore = "daily"]
 fn change_game_mode_updates_only_local_mode_and_abilities_26_3() {
+    run_change_game_mode_updates_only_local_mode_and_abilities_26_3();
+}
+
+pub(in crate::game) fn run_change_game_mode_updates_only_local_mode_and_abilities_26_3() {
     crate::game::in_own_process(
         "game::remote::abilities::gamemode_split_tests::change_game_mode_updates_only_local_mode_and_abilities_26_3",
         || {
@@ -476,6 +484,10 @@ fn change_game_mode_updates_only_local_mode_and_abilities_26_3() {
 #[test]
 #[ignore = "daily"]
 fn split_local_and_player_info_physics_matrix_26_3() {
+    run_split_local_and_player_info_physics_matrix_26_3();
+}
+
+pub(in crate::game) fn run_split_local_and_player_info_physics_matrix_26_3() {
     crate::game::in_own_process(
         "game::remote::abilities::gamemode_split_tests::split_local_and_player_info_physics_matrix_26_3",
         || {
@@ -607,6 +619,10 @@ fn split_local_and_player_info_physics_matrix_26_3() {
 #[test]
 #[ignore = "daily"]
 fn live_player_info_updates_toggle_no_physics_while_local_spectator_26_3() {
+    run_live_player_info_updates_toggle_no_physics_while_local_spectator_26_3();
+}
+
+pub(in crate::game) fn run_live_player_info_updates_toggle_no_physics_while_local_spectator_26_3() {
     crate::game::in_own_process(
         "game::remote::abilities::gamemode_split_tests::live_player_info_updates_toggle_no_physics_while_local_spectator_26_3",
         || {
@@ -663,6 +679,10 @@ fn live_player_info_updates_toggle_no_physics_while_local_spectator_26_3() {
 #[test]
 #[ignore = "daily"]
 fn login_and_respawn_set_previous_mode_and_fresh_abilities_26_3() {
+    run_login_and_respawn_set_previous_mode_and_fresh_abilities_26_3();
+}
+
+pub(in crate::game) fn run_login_and_respawn_set_previous_mode_and_fresh_abilities_26_3() {
     crate::game::in_own_process(
         "game::remote::abilities::gamemode_split_tests::login_and_respawn_set_previous_mode_and_fresh_abilities_26_3",
         || {
@@ -709,6 +729,10 @@ fn login_and_respawn_set_previous_mode_and_fresh_abilities_26_3() {
 #[test]
 #[ignore = "daily"]
 fn resolved_player_info_retains_identity_across_remove_and_readd_26_3() {
+    run_resolved_player_info_retains_identity_across_remove_and_readd_26_3();
+}
+
+pub(in crate::game) fn run_resolved_player_info_retains_identity_across_remove_and_readd_26_3() {
     crate::game::in_own_process(
         "game::remote::abilities::gamemode_split_tests::resolved_player_info_retains_identity_across_remove_and_readd_26_3",
         || {
@@ -823,6 +847,10 @@ fn resolved_player_info_retains_identity_across_remove_and_readd_26_3() {
 #[test]
 #[ignore = "daily"]
 fn respawn_keep_data_spectator_info_clears_pending_y_26_3() {
+    run_respawn_keep_data_spectator_info_clears_pending_y_26_3();
+}
+
+pub(in crate::game) fn run_respawn_keep_data_spectator_info_clears_pending_y_26_3() {
     crate::game::in_own_process(
         "game::remote::abilities::gamemode_split_tests::respawn_keep_data_spectator_info_clears_pending_y_26_3",
         || {
@@ -867,6 +895,10 @@ fn respawn_keep_data_spectator_info_clears_pending_y_26_3() {
 #[test]
 #[ignore = "daily"]
 fn retained_player_login_preserves_custom_ability_speeds_26_3() {
+    run_retained_player_login_preserves_custom_ability_speeds_26_3();
+}
+
+pub(in crate::game) fn run_retained_player_login_preserves_custom_ability_speeds_26_3() {
     crate::game::in_own_process(
         "game::remote::abilities::gamemode_split_tests::retained_player_login_preserves_custom_ability_speeds_26_3",
         || {
@@ -979,6 +1011,10 @@ fn player_info_hook_fires_after_motion_clear_and_for_tab_only_profiles() {
 #[test]
 #[ignore = "daily"]
 fn split_mode_hud_rendering_reach_miss_inventory_and_input_rules() {
+    run_split_mode_hud_rendering_reach_miss_inventory_and_input_rules();
+}
+
+pub(in crate::game) fn run_split_mode_hud_rendering_reach_miss_inventory_and_input_rules() {
     crate::game::in_own_process(
         "game::remote::abilities::gamemode_split_tests::split_mode_hud_rendering_reach_miss_inventory_and_input_rules",
         || {
@@ -1473,6 +1509,10 @@ fn contextual_bar_name(bar: sunrise_client::locator_bar::ContextualBar) -> &'sta
 #[test]
 #[ignore = "daily"]
 fn hud_camera_mounts_match_26_3_oracle() {
+    run_hud_camera_mounts_match_26_3_oracle();
+}
+
+pub(in crate::game) fn run_hud_camera_mounts_match_26_3_oracle() {
     crate::game::in_own_process(
         "game::remote::abilities::gamemode_split_tests::hud_camera_mounts_match_26_3_oracle",
         || {

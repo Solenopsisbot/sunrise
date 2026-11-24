@@ -292,3 +292,116 @@ fn a_loot_function_reads_the_bound_damage_type_tags() {
         [[Some(true), Some(false), Some(false), None]]
     );
 }
+
+/// A loot function listing item tags through its context: the item tags an item is in and
+/// every bound item tag's name, as the loot evaluator's own tag source binds them.
+struct ItemTagLister(std::sync::Arc<std::sync::Mutex<Vec<ItemTagLists>>>);
+type ItemTagLists = (
+    Option<Vec<mod_api::Identifier>>,
+    Option<Vec<mod_api::Identifier>>,
+);
+#[mod_api::__subscriptions]
+impl Hooks for ItemTagLister {
+    fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+        r.register_loot_function_type(
+            &mod_api::Identifier::parse("item_tag_lister:probe").unwrap(),
+            ItemTagLister(self.0.clone()),
+        );
+    }
+}
+impl ModLootFunction for ItemTagLister {
+    fn validate(&self, _: &LootEntryData) -> Result<(), String> {
+        Ok(())
+    }
+    fn apply(
+        &self,
+        _: &LootEntryData,
+        stack: LootStack,
+        context: &mut dyn LootTypeContext,
+    ) -> Result<LootStack, String> {
+        let tags = context.tags();
+        let stick = mod_api::__private::item_key("minecraft:stick").unwrap();
+        let sorted = |list: Option<Vec<mod_api::Identifier>>| {
+            list.map(|mut list| {
+                list.sort_by_key(ToString::to_string);
+                list
+            })
+        };
+        self.0
+            .lock()
+            .unwrap()
+            .push((sorted(tags.item_tags(stick)), sorted(tags.item_tag_names())));
+        Ok(stack)
+    }
+}
+
+/// `item_tags` and `item_tag_names` inside a loot callback read the `LootData` tags the pack
+/// loader bound: the stick's tag and the empty one, and no tag whose file name is not an
+/// identifier, which the loader skips as a pack never lists it.
+#[test]
+#[ignore = "daily"]
+fn a_loot_function_lists_the_loot_datas_item_tags() {
+    use crate::game::native_entity_refs::tests::run_fresh_cases;
+    use sunrise_core::random::LegacyRandom;
+    use sunrise_world::loot::{LootData, PackOverlay};
+    if run_fresh_cases(
+        "game::api_values::loot_values::tests::a_loot_function_lists_the_loot_datas_item_tags",
+        "SUNRISE_TEST_LOOT_ITEM_TAG_LISTS",
+        &["loot"],
+    ) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("items.json"), r#"{"minecraft:stick":{}}"#).unwrap();
+    let defaults = sunrise_world::item_defaults::read(root.path()).unwrap();
+    let table = serde_json::json!({"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"minecraft:stick"}]}],
+        "modifier":{"type":"item_tag_lister:probe"}});
+    let files = vec![
+        (
+            "tags/lists:item/sticks".to_owned(),
+            vec![br#"{"values":["minecraft:stick"]}"#.to_vec()],
+        ),
+        (
+            "tags/lists:item/empty".to_owned(),
+            vec![br#"{"values":[]}"#.to_vec()],
+        ),
+        (
+            "tags/lists:item/Bad".to_owned(),
+            vec![br#"{"values":["minecraft:stick"]}"#.to_vec()],
+        ),
+        (
+            "loot_table/lists:probe".to_owned(),
+            vec![serde_json::to_vec(&table).unwrap()],
+        ),
+    ];
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    with_mods(
+        vec![ModEntry::new(
+            "item_tag_lister",
+            Box::new(ItemTagLister(seen.clone())),
+        )]
+        .into(),
+        || {
+            mod_platform::__private::part_tests::install_parts_fixture(mod_api::__private::mods())
+                .unwrap();
+            mod_api::__private::resolve_items(["minecraft:stick"]).unwrap();
+            let loot = LootData::load_with_types(
+                root.path(),
+                &PackOverlay::new(&files),
+                &defaults,
+                crate::game::loot_types::capture(),
+            )
+            .unwrap();
+            let drops = loot.roll("lists:probe", &mut LegacyRandom::new(0), 0.0, None, None);
+            assert_eq!(drops.len(), 1, "the function ran and kept the stick");
+        },
+    );
+    let id = |text: &str| mod_api::Identifier::parse(text).unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(
+            Some(vec![id("lists:sticks")]),
+            Some(vec![id("lists:empty"), id("lists:sticks")])
+        )]
+    );
+}

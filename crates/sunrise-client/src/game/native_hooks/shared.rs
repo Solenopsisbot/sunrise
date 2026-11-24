@@ -166,7 +166,8 @@ impl Game<'_> {
         let overlay = self.observed_overlay_now();
         let inventory_screen = overlay.is_none()
             && self.screen == Screen::Inventory
-            && self.remote_menu_type().is_none();
+            && self.remote_menu_type().is_none()
+            && self.shown_native_screen().is_none();
         let heard = self.screen_hooks_heard();
         let outgoing = heard
             .then(|| {
@@ -181,7 +182,11 @@ impl Game<'_> {
                 }
             })
             .flatten();
+        let detach_native = self.shown_native_screen().is_some();
         self.remote_set_menu(None, None);
+        if detach_native && let Some(screen) = self.mod_screen.as_mut() {
+            screen.detached = true;
+        }
         let has_level = self.remote.as_ref().is_some_and(|r| r.has_level());
         let dead = self
             .player
@@ -525,8 +530,15 @@ impl Game<'_> {
     fn apply_screen(&mut self, screen: Screen, owner: Option<&str>) {
         // `before` may already have closed it. Overlays that keep Inventory
         // underneath don't pass through this replacement path.
-        if screen != Screen::Inventory && self.active_native_screen().is_some() {
-            self.remote_close_container();
+        if screen != Screen::Inventory {
+            if self.active_native_screen().is_some() {
+                self.remote_close_container();
+            } else if self.mod_screen.as_ref().is_some_and(|s| s.detached) {
+                self.remove_remote_menu_screen();
+            }
+        }
+        if screen != Screen::DemoIntro {
+            self.demo_intro = None;
         }
         self.screen = screen;
         if let Some(owner) = owner {
@@ -918,6 +930,7 @@ impl Game<'_> {
                     | "dialog"
                     | "dialog_warning"
                     | "confirm_link"
+                    | "demo_intro"
                     | "link_prompt"
                     | "code_of_conduct"
                     | "world_select"
@@ -992,6 +1005,10 @@ pub(super) struct OpenNativeScreen {
     menu: OpenNativeMenu,
     /// Installed as the window's screen, not merely staged for ScreenOpening.
     shown: bool,
+    /// The server closed the logical menu (`LocalPlayer.clientSideCloseContainer`),
+    /// while the displayed screen stays whole through `screen_closing` or a veto
+    /// until its removal runs (`AbstractContainerScreen` owns its own `menu`).
+    detached: bool,
 }
 
 /// The menu the screen presents: where its slots are stored, the opener,
@@ -1002,6 +1019,8 @@ struct OpenNativeMenu {
     generation: u64,
     /// The menu's type, which its screen factory is keyed by.
     name: String,
+    /// The server title captured for this screen, kept if the logical menu closes first.
+    title: Option<mod_api::Text>,
     /// The mod block whose matching container opened the menu, if any.
     block: Option<String>,
     pos: Option<[i32; 3]>,
@@ -1091,11 +1110,20 @@ impl SlotMoves {
 impl Game<'_> {
     /// The staged or shown native screen belonging to this opening, not a
     /// prior opening of the same numeric window id.
-    fn active_native_screen(&self) -> Option<&OpenNativeScreen> {
+    pub(in crate::game) fn active_native_screen(&self) -> Option<&OpenNativeScreen> {
         let screen = self.mod_screen.as_ref()?;
         let remote = &self.remote.as_ref()?.menu;
-        (remote.generation == screen.menu.generation && remote.as_ref()?.0 == screen.menu.window)
+        (!screen.detached
+            && remote.generation == screen.menu.generation
+            && remote.as_ref()?.0 == screen.menu.window)
             .then_some(screen)
+    }
+
+    /// The shown native screen whose remote window is still the active logical menu.
+    pub(in crate::game) fn shown_active_native_screen(&self) -> Option<&OpenNativeScreen> {
+        self.active_native_screen().filter(|s| {
+            s.shown && self.screen == Screen::Inventory && self.container == Some(s.menu.key)
+        })
     }
 
     /// The menu type resolved for this client's opening, including in ScreenOpening.
@@ -1541,17 +1569,24 @@ impl Game<'_> {
         // Only the inventory screen shows a server's menu: a menu staged for
         // a screen a mod replaced is not the pause or chat screen's.
         let menu_shown = screen == Screen::Inventory;
+        let shown_native = menu_shown.then(|| self.shown_native_screen()).flatten();
         ScreenView::from(mod_api::__private::built::ScreenView {
             id: screen.id(),
             mod_screen: (screen == Screen::Mod).then(|| self.mod_screen()).flatten(),
             menu: self
                 .remote_menu_type()
-                .filter(|m| menu_shown && !m.is_empty()),
+                .filter(|m| menu_shown && !m.is_empty())
+                .or_else(|| {
+                    shown_native
+                        .map(|s| s.menu.name.as_str())
+                        .filter(|m| !m.is_empty())
+                }),
             title: self
                 .remote
                 .as_ref()
                 .and_then(|r| r.menu_title_snapshot())
-                .filter(|_| menu_shown),
+                .filter(|_| menu_shown)
+                .or_else(|| shown_native.and_then(|s| s.menu.title.as_ref())),
             rect,
             slots: self.slot_count(),
             mouse: self.cursor(),
@@ -3324,9 +3359,9 @@ impl Game<'_> {
         mod_menu(c.menu.as_deref()?).map(|(menu, _)| menu)
     }
     /// A data slot of window `window`'s menu (`ContainerSetData`); false
-    /// when no mod screen is showing for that window.
+    /// when no mod screen is showing for that active remote window.
     pub(super) fn native_screen_data(&mut self, window: i32, index: usize, value: i32) -> bool {
-        if self.shown_native_screen().is_none() {
+        if self.shown_active_native_screen().is_none() {
             return false;
         }
         self.mod_screen
@@ -3537,9 +3572,9 @@ impl Game<'_> {
         let Some(button) = screen.screen.click(self, frame, right) else {
             return false;
         };
-        // Numeric container IDs can be reused. Send only for the opening that heard the press.
+        // Numeric container IDs can be reused. Send only for the active opening that heard the press.
         if !self
-            .shown_native_screen()
+            .shown_active_native_screen()
             .is_some_and(|screen| (screen.menu.window, screen.menu.generation) == opening)
             || !self.remote_button_click(button)
         {
