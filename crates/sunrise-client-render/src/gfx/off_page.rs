@@ -32,7 +32,8 @@ pub(super) fn move_off_page<'a>(
         let Some((_, start, vertices)) = part.of(s).filter(|r| r.0 == page) else {
             continue;
         };
-        let bytes = vertices * arena.stride();
+        // With the normal stream, a move copies its entries too (`Arena::copy`).
+        let bytes = vertices * arena.vertex_bytes();
         if moved && bytes > *budget {
             break;
         }

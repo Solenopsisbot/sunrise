@@ -8,8 +8,6 @@ use super::{Game, commands::Target};
 use mod_api::{__private::TransactionFrame, SoundSource};
 use sunrise_client::{
     arrows::{Pickup, back_off, clip_block_hit},
-    collisions::SceneCollisions,
-    enchant::EffectContext,
     items::ItemStack,
     join_seq::JoinSeq,
     mesher::Vertex,
@@ -17,7 +15,7 @@ use sunrise_client::{
     projectiles::{Hit, ProjectileWorld},
 };
 use sunrise_core::{
-    geometry::{Aabb, Vec3, traverse_blocks},
+    geometry::{Aabb, Vec3},
     position::BlockPos,
     random::RandomSource,
 };
@@ -107,9 +105,11 @@ impl Game<'_> {
     }
     /// `TridentItem.use`: start the throw unless one more use would break it.
     /// Returns false for `InteractionResult.FAIL` (about to break, or Riptide
-    /// while dry) so callers neither dip the hand nor consume the click.
+    /// while dry, or a part denied `trident_throw`) so callers neither dip the
+    /// hand nor consume the click.
     pub(super) fn use_trident(&mut self, stack: &ItemStack) -> bool {
-        if &*stack.item != "minecraft:trident" {
+        let throw = super::item_abilities::ability::TRIDENT_THROW;
+        if &*stack.item != "minecraft:trident" || !self.stack_can_perform(stack, throw, true) {
             return false;
         }
         let max = self.trident_max_damage(stack);
@@ -131,79 +131,6 @@ impl Game<'_> {
             == sunrise_client::blocks::Fluid::Water;
         let (at, top) = (p.position, p.bounds().max_position().y);
         water || self.in_rain(at, top)
-    }
-    /// The `summon_entity` and `play_sound` effects of `channeling.json`: in a
-    /// thunderstorm (`weather_check`) a spot that sees the sky (`can_see_sky`)
-    /// gets a lightning bolt and the thunder sound.
-    fn channel_lightning(&mut self, at: [f64; 3], guest: Option<u32>) {
-        // Level.isThundering: the thunder level, in dimensions with weather.
-        if !self.can_have_weather() || self.weather_levels(1.0).1 <= 0.9 {
-            return;
-        }
-        // BlockAndLightGetter.canSeeSky: full sky light.
-        let (x, y, z) = (
-            at[0].floor() as i32,
-            at[1].floor() as i32,
-            at[2].floor() as i32,
-        );
-        if self.world.light(x, y, z) >> 4 != 15 {
-            return;
-        }
-        if !self.lightning_strike_allowed(self.lan_acting_uuid, [x, y, z], "trident") {
-            return;
-        }
-        self.spawn_bolt(at, false);
-        // The summon effect's owner is the thrower: LightningBolt.setCause.
-        if let Some(bolt) = self.bolts.last_mut() {
-            bolt.cause = Some(guest);
-        }
-        self.audio
-            .play("minecraft:item.trident.thunder", Some(at), 5.0, 1.0);
-    }
-    /// `minecraft:hit_block` of Channeling (`AbstractArrow.hitBlockEnchantmentEffects`):
-    /// the block the trident's path first hits, if it is a lightning rod, with
-    /// the hit location clamped into the block (`BlockPos.clampLocationWithin`).
-    fn channel_rod_hit(&mut self, from: Vec3, velocity: Vec3, guest: Option<u32>) {
-        let to = Vec3::new(
-            from.x + velocity.x,
-            from.y + velocity.y,
-            from.z + velocity.z,
-        );
-        let mut scene = SceneCollisions {
-            world: &self.world,
-            binding: self.collision,
-            subject: None,
-        };
-        // ClipContext.Block.COLLIDER with Fluid.NONE.
-        let hit = traverse_blocks(from, to, 1024, |p: BlockPos| {
-            let state = self.world.block(p.x, p.y, p.z);
-            if self.res.facts().is_air(state) {
-                return None;
-            }
-            let shape = self
-                .collision
-                .collision_shape(&mut scene, state, [p.x, p.y, p.z])
-                .ok()?;
-            shape.clip(from, to, p)
-        });
-        let Some(hit) = hit.ok().flatten() else {
-            return;
-        };
-        let state = self.world.block(hit.block.x, hit.block.y, hit.block.z);
-        if !self.res.facts().get(state).name.ends_with("lightning_rod") {
-            return;
-        }
-        let edge = f64::from(1.0e-5f32);
-        let clamp =
-            |v: f64, origin: i32| v.clamp(f64::from(origin) + edge, f64::from(origin) + 1.0 - edge);
-        self.channel_lightning(
-            [
-                clamp(hit.location.x, hit.block.x),
-                clamp(hit.location.y, hit.block.y),
-                clamp(hit.location.z, hit.block.z),
-            ],
-            guest,
-        );
     }
     /// `TridentItem.releaseUsing`.
     pub(super) fn release_trident(&mut self, ticks: u32) {
@@ -306,7 +233,7 @@ impl Game<'_> {
                             LevelSound::new(&sound, at, 1.0, 1.0).in_source(SoundSource::Players);
                         self.play_bound_sound(sound, player, None);
                     }
-                    _ => self.audio.play(&sound, at, 1.0, 1.0),
+                    _ => self.play_audio(&sound, at, 1.0, 1.0),
                 }
                 if let (Some(player), Some(name)) =
                     (self.lan_acting_uuid, self.lan_acting_name.clone())
@@ -335,25 +262,24 @@ impl Game<'_> {
         let (v, on_ground) = self.player.as_ref().map_or((Vec3::ZERO, true), |p| {
             (self.known_player_movement(), p.ground.on_ground)
         });
-        projectile.shoot_from_rotation(self.pitch, self.yaw, 0.0, 2.5, 1.0, v, on_ground);
         let id = self.take_entity_id();
         if let Some(uuid) = projectile.uuid {
             self.persist.uuids.insert(id, uuid);
         }
         let owner_uuid = self.acting_player_uuid();
-        self.tridents.push(ThrownTrident {
+        let mut trident = ThrownTrident {
             size_answer: None,
             attachment_lifetime: Default::default(),
             join: Default::default(),
             id,
-            loyalty: thrown.enchantment_level("minecraft:loyalty"),
+            loyalty: 0,
             stack: thrown,
             position: start,
             previous: start,
-            velocity: projectile.velocity,
+            velocity: Vec3::ZERO,
             needs_sync: false,
-            yaw: projectile.yaw,
-            pitch: projectile.pitch,
+            yaw: 0.0,
+            pitch: 0.0,
             in_ground: false,
             in_ground_time: 0,
             life: 0,
@@ -378,10 +304,19 @@ impl Game<'_> {
             age: 0,
             owner: 0,
             guest: self.lan_acting,
-            random: sunrise_client::projectiles::unique_random(start),
+            random: projectile.random.0.clone(),
             deflected_by: None,
             last_state: None,
-        });
+        };
+        self.resolve_trident_loyalty(&mut trident);
+        // The constructor resolves Loyalty before shootFromRotation, on the same entity stream.
+        projectile.random.0 = trident.random;
+        projectile.shoot_from_rotation(self.pitch, self.yaw, 0.0, 2.5, 1.0, v, on_ground);
+        trident.random = projectile.random.0;
+        trident.velocity = projectile.velocity;
+        trident.yaw = projectile.yaw;
+        trident.pitch = projectile.pitch;
+        self.tridents.push(trident);
         self.player_projectile_shot();
         // level.playSound(null, trident, sound, PLAYERS, 1, 1).
         let throw = LevelSound::new(
@@ -392,6 +327,27 @@ impl Game<'_> {
         )
         .in_source(SoundSource::Players);
         self.play_bound_sound(throw, id, None);
+    }
+    /// `ThrownTrident.getLoyaltyFromItem`, at spawn and after deserializing.
+    pub(in crate::game) fn resolve_trident_loyalty(&mut self, trident: &mut ThrownTrident) {
+        if !self.is_logical_server() {
+            return;
+        }
+        let ctx = sunrise_items::enchant::EffectContext {
+            this: Some("minecraft:trident"),
+            this_motion: Some((trident.fall_distance, false)),
+            ..Default::default()
+        };
+        let acceleration = world_stations!(self).enchantments.modify_entity_value(
+            &trident.stack.all_enchantments(),
+            "minecraft:trident_return_acceleration",
+            &ctx,
+            &mut self.world.random,
+            &mut trident.random,
+            0.0,
+        );
+        // Synched data stores the nonnegative acceleration in a signed byte.
+        trident.loyalty = (acceleration as i32).clamp(0, i8::MAX as i32) as u32;
     }
     /// `settle_dealt_absorbed` for the player who threw a trident: a LAN guest's own
     /// statistics are only reachable inside `as_guest`, so the host is not credited.
@@ -434,7 +390,8 @@ impl Game<'_> {
     }
     /// `ThrownTrident.onHitEntity` on the guest `conn`: the hurt runs as them and
     /// `ServerPlayer.hurtServer` refuses it when the `pvp` game rule or their
-    /// teams forbid it (`canHarmPlayer`); the trident bounces off either way.
+    /// teams forbid it (`canHarmPlayer`); the trident bounces off either way, and
+    /// an accepted hit's post-attack effects follow.
     fn trident_hits_guest(
         &mut self,
         t: &ThrownTrident,
@@ -442,20 +399,19 @@ impl Game<'_> {
         damage: f32,
         attack: sunrise_client::health::Attack,
     ) -> bool {
-        let Some(host) = self.lan.as_ref() else {
+        if self.lan.is_none() {
             return false;
-        };
-        let team_of = |game: &Self, name: &str| game.score.board.players_team(name).cloned();
-        let attacker = match t.guest {
-            Some(c) => host.hub.guest(c).and_then(|g| team_of(self, &g.name)),
-            None => self.player_team().cloned(),
-        };
-        let target = host.hub.guest(conn).and_then(|g| team_of(self, &g.name));
-        let refused = !self.player_may_harm(target.as_ref(), attacker.as_ref());
+        }
+        let refused = !self.guest_may_harm(t.guest, conn);
         let shooter = self.player_attacker(t.guest);
         let from = [t.previous.x, t.previous.y, t.previous.z];
-        self.guest_hit_by(conn, |g| {
-            g.with_attack(attack, |g| {
+        let victim = self
+            .lan
+            .as_ref()
+            .and_then(|host| host.hub.guest(conn))
+            .map(|g| g.entity_id as u32);
+        let hurt = self.guest_hit_by(conn, |g| {
+            g.with_attack(attack.clone(), |g| {
                 g.combat.refuse_player_hit = refused;
                 g.combat.projectile_attacker = shooter;
                 let hurt = g.mob_hits_player(damage, from, "minecraft:trident");
@@ -463,8 +419,20 @@ impl Game<'_> {
                 g.combat.projectile_attacker = None;
                 hurt
             })
-        })
-        .unwrap_or(false)
+        });
+        let hurt = hurt.unwrap_or(false);
+        if hurt && let Some(victim) = victim {
+            let source = attack.player_source("minecraft:trident", attack.attacker);
+            self.post_attack(
+                victim,
+                "minecraft:player",
+                &attack,
+                source,
+                Some(&t.stack),
+                true,
+            );
+        }
+        hurt
     }
     /// The players tridents fly back to or land at: this game's player and the
     /// guests in this level. A server has no player of its own, so its
@@ -536,7 +504,7 @@ impl Game<'_> {
             let pitch = ((self.world.random.next_float() - self.world.random.next_float()) * 0.7
                 + 1.0)
                 * 2.0;
-            self.audio.play(
+            self.play_audio(
                 "minecraft:entity.item.pickup",
                 Some([by.feet.x, by.feet.y, by.feet.z]),
                 0.2,
@@ -558,7 +526,7 @@ impl Game<'_> {
         };
         if extinguished {
             let pitch = 1.6 + (t.random.next_float() - t.random.next_float()) * 0.4;
-            self.audio.play(
+            self.play_audio(
                 "minecraft:entity.generic.extinguish_fire",
                 Some([to.x, to.y, to.z]),
                 0.7,
@@ -690,7 +658,7 @@ impl Game<'_> {
                 let to = t.position;
                 self.entity_section_step(t.id, [from.x, from.y, from.z], [to.x, to.y, to.z]);
                 if t.returning == 0 {
-                    self.audio.play(
+                    self.play_audio(
                         "minecraft:item.trident.return",
                         Some([t.position.x, t.position.y, t.position.z]),
                         10.0,
@@ -817,7 +785,7 @@ impl Game<'_> {
                         if t.deflected_by != Some(breeze_id) {
                             let sound_at =
                                 [breeze.position.x, breeze.position.y, breeze.position.z];
-                            self.audio.play(
+                            self.play_audio(
                                 "minecraft:entity.breeze.deflect",
                                 Some(sound_at),
                                 1.0,
@@ -833,37 +801,23 @@ impl Game<'_> {
                         if let Who::Mob(id) = who {
                             self.redirect_projectile(id, owner_who, t.owner_uuid, t.guest, None);
                         }
-                        // ThrownTrident.getDamage: 8 base plus Impaling on `#sensitive_to_impaling`.
                         let victim = self.entity_kind_for_who(who);
-                        let attacker_kind = owner_who.and_then(|o| self.entity_kind_for_who(o));
-                        let ctx = EffectContext {
-                            this: victim.as_deref(),
-                            attacker: attacker_kind.as_deref(),
-                            direct_attacker: Some("minecraft:trident"),
-                            is_direct: true,
-                            damage_type: Some("minecraft:trident"),
-                            items: None,
-                            ..Default::default()
-                        };
+                        // The thrower's entity id, resolved while a guest victim acts too.
                         let attacker_id = match owner_who {
-                            Some(Who::Player) => Some(self.own_entity_id() as u32),
                             Some(Who::Mob(oid)) => Some(oid),
+                            Some(Who::Player) => Some(
+                                self.player_entity_id_by_connection(t.guest)
+                                    .map_or(0, |id| id as u32),
+                            ),
                             None => None,
                         };
                         let victim_id = match who {
                             Who::Mob(id) => id,
                             Who::Player => self.own_entity_id() as u32,
                         };
-                        let damage = self.evaluate_weapon_damage(
-                            &t.stack,
-                            attacker_id.map(|a| (a, victim_id)),
-                            ctx,
-                            8.0,
-                        );
-                        t.dealt_damage = true;
+                        let causing = attacker_id.map_or(0, |id| id as i32);
                         let mut hurt_mob = None;
                         let mut hurt_player = false;
-                        let mut hurt_guest = None;
                         let mut hurt_stand = None;
                         let mut dodged = false;
                         let aim = self.attacker_aim(owner_who);
@@ -872,7 +826,23 @@ impl Game<'_> {
                         attack.projectile = Some(t.id as i32);
                         attack.projectile_kind = sunrise_client::health::DirectEntity::Arrow;
                         attack.projectile_type = Some("minecraft:trident");
-                        Self::set_projectile_weapon(&mut attack, Some(&t.stack));
+                        attack.enchantment_direct =
+                            Some(sunrise_client::health::EnchantmentActor {
+                                id: t.id as i32,
+                                kind: "minecraft:trident".into(),
+                                motion: None,
+                            });
+                        self.set_projectile_weapon(&mut attack, Some(&t.stack));
+                        // ThrownTrident.getDamage: `EnchantmentHelper.modifyDamage` on 8
+                        // (Impaling hits `#sensitive_to_impaling`, the aquatic tag).
+                        let mut ctx = attack.enchantment_context(
+                            attack.player_source("minecraft:trident", causing),
+                            victim.as_deref().unwrap_or(""),
+                        );
+                        ctx.this = victim.as_deref();
+                        let damage =
+                            self.evaluate_weapon_damage(&t.stack, Some(victim_id), ctx, 8.0);
+                        t.dealt_damage = true;
                         let trident_source = DamageKind::Named(
                             sunrise_client::mobs::NamedDamage::registered(
                                 &self.health_resources.damage,
@@ -883,7 +853,7 @@ impl Game<'_> {
                         match who {
                             Who::Player => {
                                 let from_pos = [t.previous.x, t.previous.y, t.previous.z];
-                                hurt_player = self.with_attack(attack, |g| {
+                                hurt_player = self.with_attack(attack.clone(), |g| {
                                     g.mob_hits_player(damage, from_pos, "minecraft:trident")
                                 });
                             }
@@ -937,15 +907,22 @@ impl Game<'_> {
                                 if let Some(mob_idx) = self.mob_index.find(&self.mobs, id) {
                                     let plan = self
                                         .prepare_knockback_credit(id as i32, owner_who, &attack);
+                                    // The hit's causing entity, lent to its listeners beside the victim.
+                                    let causing = self.causer_id(owner_who);
+                                    let decision =
+                                        crate::game::entity::causer_decision!(self, causing);
                                     let mut credit = plan.lend(&mut self.last_hurt_by_player);
                                     let from_pos = Some([t.position.x, t.position.y, t.position.z]);
                                     let join = self.mobs[mob_idx].join;
-                                    let hurt = self.mobs[mob_idx].damage_projectile(
+                                    let (victim, lend) = crate::game::entity::victim_and_causer!(
+                                        self, mob_idx, causing, decision
+                                    );
+                                    let hurt = victim.damage_projectile(
                                         crate::game::entity::damage_level_of!(
                                             self,
                                             &attack,
                                             &mut credit,
-                                            None
+                                            lend
                                         ),
                                         damage,
                                         Damage {
@@ -983,9 +960,7 @@ impl Game<'_> {
                                         self.thrower_dealt_absorbed(t.guest);
                                     }
                                     if let Some(conn) = self.trident_guest_conn(id) {
-                                        if self.trident_hits_guest(&t, conn, damage, attack) {
-                                            hurt_guest = Some(conn);
-                                        }
+                                        self.trident_hits_guest(&t, conn, damage, attack.clone());
                                     } else {
                                         let stand_pos = self
                                             .armor_stands
@@ -1014,43 +989,33 @@ impl Game<'_> {
                                 }
                             }
                         }
-                        // Post-attack effects (`doPostAttackEffectsWithItemSourceOnBreak` + Channeling)
-                        // on living targets (players, mobs, armor stands).
-                        if let Some((id, _)) = hurt_mob {
-                            self.mob_post_attack(
-                                id,
-                                owner_who,
-                                Some("minecraft:trident"),
-                                Some("minecraft:trident"),
-                            );
-                        } else if let Some((id, _)) = hurt_stand {
-                            self.mob_post_attack(
-                                id,
-                                owner_who,
-                                Some("minecraft:trident"),
-                                Some("minecraft:trident"),
-                            );
+                        // `doPostAttackEffectsWithItemSourceOnBreak`: the victim's equipment,
+                        // then the trident's own effects, Channeling's among them. A guest
+                        // player's continuation ran inside the hit, in their own turn.
+                        let source = sunrise_client::health::HurtSource {
+                            damage_type: "minecraft:trident",
+                            causing,
+                            direct: t.id as i32,
+                            position: Some([t.previous.x, t.previous.y, t.previous.z]),
+                        };
+                        let hurt_living = hurt_mob
+                            .map(|(id, _)| (id, victim.clone()))
+                            .or_else(|| {
+                                hurt_stand
+                                    .map(|(id, _)| (id, Some("minecraft:armor_stand".to_owned())))
+                            })
+                            .or_else(|| {
+                                hurt_player.then(|| {
+                                    (
+                                        self.own_entity_id() as u32,
+                                        Some("minecraft:player".to_owned()),
+                                    )
+                                })
+                            });
+                        if let Some((id, Some(kind))) = hurt_living {
+                            self.post_attack(id, &kind, &attack, source, Some(&t.stack), true);
                         }
-                        if t.stack.enchantment_level("minecraft:channeling") > 0 {
-                            let channeling_at = if hurt_player {
-                                self.player.as_ref().map(|p| p.position.components())
-                            } else if let Some((id, join)) = hurt_mob {
-                                self.mobs
-                                    .iter()
-                                    .find(|m| m.id == id && m.join == join && !m.removed)
-                                    .map(|m| m.position.components())
-                            } else if let Some(conn) = hurt_guest {
-                                self.lan
-                                    .as_ref()
-                                    .and_then(|h| h.hub.guest(conn))
-                                    .map(|g| g.position)
-                            } else {
-                                hurt_stand.map(|(_, pos)| pos)
-                            };
-                            if let Some(at_pos) = channeling_at {
-                                self.channel_lightning(at_pos, t.guest);
-                            }
-                        }
+
                         if owner_who.is_some()
                             && let Some((id, join)) = hurt_mob
                             && let Some(m) = self
@@ -1077,7 +1042,7 @@ impl Game<'_> {
                                 t.velocity.y * (-0.5 * 0.2),
                                 t.velocity.z * (-0.5 * 0.02),
                             );
-                            self.audio.play(
+                            self.play_audio(
                                 "minecraft:item.trident.hit",
                                 Some([t.position.x, t.position.y, t.position.z]),
                                 1.0,
@@ -1114,9 +1079,6 @@ impl Game<'_> {
                     };
                     if !refused_block && let Some((at, block, _)) = clip {
                         let stop = back_off(at, flight);
-                        if t.stack.enchantment_level("minecraft:channeling") > 0 {
-                            self.channel_rod_hit(from, flight, t.guest);
-                        }
                         // 0.05 back along signum(movement), stopped, stuck, shaking.
                         t.position = stop;
                         t.velocity = Vec3::ZERO;
@@ -1130,8 +1092,42 @@ impl Game<'_> {
                         t.last_state = Some(self.world.block(block.x, block.y, block.z));
                         t.shake = 7;
                         let sound = t.hit_ground_sound();
-                        self.audio
-                            .play(&sound, Some([stop.x, stop.y, stop.z]), 1.0, 1.0);
+                        self.play_audio(&sound, Some([stop.x, stop.y, stop.z]), 1.0, 1.0);
+                        let (id, join) = (t.id, t.join);
+                        let holder = owner_who.and_then(|owner| match owner {
+                            Who::Player => self
+                                .player_entity_id_by_connection(t.guest)
+                                .map(|id| id as u32),
+                            Who::Mob(id) => Some(id),
+                        });
+                        let stack = t.stack.clone();
+                        if transaction.is_some() {
+                            self.tridents.put_back(i, t);
+                        } else {
+                            self.tridents.insert(i, t);
+                        }
+                        self.hit_block_enchantment_effects(
+                            &stack,
+                            holder,
+                            id,
+                            "minecraft:trident",
+                            at,
+                            [block.x, block.y, block.z],
+                        );
+                        let Some(row) = self.tridents.locate(join) else {
+                            if let Some(frame) = transaction.take() {
+                                self.close_storage_frame(frame, true);
+                            }
+                            continue;
+                        };
+                        i = row;
+                        t = if transaction.is_some() {
+                            self.tridents
+                                .extract(join)
+                                .expect("the trident was located")
+                        } else {
+                            self.tridents.remove(row)
+                        };
                     }
                 }
                 if !t.in_ground {

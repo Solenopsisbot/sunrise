@@ -18,6 +18,7 @@ impl Game<'_> {
     pub(super) fn prepare_entity_culling(&mut self) {
         // The mods' render hooks: whether any listens this frame, and no entity canceled yet.
         super::native_mob_draw::begin_entity_frame();
+        self.extract_local_player_vehicle();
         // Spans tell the pack's passes which entities are hidden; without them, nothing changes.
         self.occlusion.shadow_casters = match (&self.renderer, &self.pack_ids) {
             (Some(r), Some(_)) => r.pack_shadow_casters(),

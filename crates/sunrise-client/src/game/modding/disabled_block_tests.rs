@@ -435,30 +435,21 @@ mod tests {
                     wet,
                     "the earlier enabled Part can answer"
                 );
-                {
-                    let _owner = mod_platform::content::crash::enter_native_mod(
-                        mod_api::content::crash::ModCall {
-                            id: "enabled_observer",
-                            hook: "test",
-                            part: None,
-                        },
-                    );
-                    let ticket = level
-                        .add_water_ticket(game, at, [POS.x + 1, POS.y + 1, POS.z + 1])
-                        .unwrap();
-                    assert_eq!(
-                        tick(game, three, lava),
-                        wet,
-                        "the ticket wets held farmland even when the earlier Part does not accept the fluid"
-                    );
-                    assert!(mod_api::__private::set_mod_enabled("enabled_prefix", false));
-                    assert_eq!(
-                        tick(game, three, air),
-                        wet,
-                        "an enabled mod's ticket waters it even without fluid"
-                    );
-                    assert!(ticket.remove(game));
-                }
+                let ticket = level
+                    .add_water_ticket(game, at, [POS.x + 1, POS.y + 1, POS.z + 1])
+                    .unwrap();
+                assert_eq!(
+                    tick(game, three, lava),
+                    wet,
+                    "the ticket wets held farmland even when the earlier Part does not accept the fluid"
+                );
+                assert!(mod_api::__private::set_mod_enabled("enabled_prefix", false));
+                assert_eq!(
+                    tick(game, three, air),
+                    wet,
+                    "a water ticket waters it even without fluid"
+                );
+                assert!(ticket.remove(game));
                 assert_eq!(tick(game, dry, water), dry);
 
                 game.install_live_features();

@@ -296,10 +296,17 @@ impl Codec<Commands> for Commands {
         if !acyclic(&nodes, |n| n.redirect.as_slice()) || !acyclic(&nodes, |n| &n.children) {
             return Err(crate::Error::new("Server sent an impossible command tree"));
         }
-        Ok(Self {
-            nodes,
-            root: r.varint()?,
-        })
+        // The root index must name a root node of the tree; a missing, out-of-range or
+        // non-root entry is an impossible tree, never index 0 in its place.
+        let root = r.varint()?;
+        let names_root = usize::try_from(root)
+            .ok()
+            .and_then(|root| nodes.get(root))
+            .is_some_and(|node| node.kind == 0);
+        if !names_root {
+            return Err(crate::Error::new("Server sent an impossible command tree"));
+        }
+        Ok(Self { nodes, root })
     }
     fn write(v: &Self, w: &mut Writer) {
         w.varint(v.nodes.len() as i32);

@@ -3,10 +3,14 @@
 This is the `owner-update` contract for the old registry index. It does not apply to the new release route,
 where a reviewer must approve every release pull request.
 
-The submission service (`crates/sunrise-mod-registry`, `update_trailer`) signs the `owner-update` trailer with
-`REGISTRY_UPDATE_KEY`. The workflow and `scripts/owner_update.py` belong in the registry repository, not here.
-Before merging on the strength of the trailer, the workflow must pass all the checks below. Any failure leaves
-the pull request to a reviewer (remove the label and comment why).
+The submission service (`crates/sunrise-mod-registry`) opens owner updates in
+[sunrise-org/sunrise-mods](https://github.com/sunrise-org/sunrise-mods). Every registry pull request, owner updates
+included, is reviewed before it merges, and the review looks only for malware, dangerous patterns and suspicious or
+obfuscated code in the release (never for licences, provenance or copyright). `update_trailer` signs the
+`owner-update` trailer with `REGISTRY_UPDATE_KEY`. The trailer is an ownership check: it says who submitted the
+update and that they own the project, and it never replaces the review. The checks below belong to the registry
+repository's workflow (`scripts/owner_update.py`), not here, and every one must pass before the review's approval
+can merge. Any check that fails leaves the pull request to a reviewer (comment why).
 
 ## The trailer
 
@@ -55,10 +59,9 @@ owner-update-v2\n<id>\n<version>\n<sha256>\n<file>\n<submitter>\n<submitter_id>
 
 ## Today
 
-The registry repository has no `owner-update` workflow yet (checked at sunrise-mods `e53ad82`): every owner update
-waits for a reviewer, whatever its trailer says. Nothing merges on its own until a workflow doing every check above is
-written there. Until then the v2 trailer and `owner_ids` only make the review's notes and the service's refusals
-decide by ID.
+Every owner update waits for a reviewer's approval, whatever its trailer says. The checks above only confirm who
+submitted the update and what it changes; the v2 trailer and `owner_ids` make the review's notes and the service's
+refusals decide by ID.
 
 ## Order of deployment
 

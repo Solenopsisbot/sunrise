@@ -942,7 +942,7 @@ impl Game<'_> {
                     if button != 0 {
                         return id.is_none();
                     }
-                    self.audio.play_button_click();
+                    self.play_audio_button_click();
                     let accepted =
                         self.with_mounted_widget(idx, |game, entry| entry.press_button(game));
                     if accepted == Some(true)
@@ -1172,7 +1172,7 @@ impl Game<'_> {
                 {
                     return false;
                 }
-                game.audio.play_button_click();
+                game.play_audio_button_click();
                 entry.press_button(game);
                 true
             }

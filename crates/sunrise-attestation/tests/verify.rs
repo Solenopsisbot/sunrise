@@ -14,6 +14,7 @@ fn verifies_public_github_provenance_and_returns_certificate_claims() {
         verify(BUNDLE, DIGEST, PUBLIC_GOOD_TRUSTED_ROOT).unwrap(),
         Attested {
             repository_id: 523043277,
+            owner_id: 115962839,
             repository_name: "astral-sh/ruff".into(),
             signer_workflow_ref: "astral-sh/ruff/.github/workflows/release.yml@refs/heads/main"
                 .into(),

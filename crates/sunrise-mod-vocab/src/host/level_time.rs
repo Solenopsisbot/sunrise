@@ -6,6 +6,12 @@ use crate::*;
 #[doc(hidden)]
 #[sunrise_mod_api_macros::host_area]
 pub trait LevelTimeBackend {
+    /// Side: client.
+    /// The displayed level's configured ticks per second (`ClientLevel.tickRateManager().tickrate()`),
+    /// unchanged by freezing or slow frames. None for any other level, a stale handle, outside a
+    /// client level, or on the server. Returns `Err(LevelReadError::Unavailable)` when the
+    /// host cannot read a client level.
+    fn level_tick_rate(&self, level: LevelRef) -> Result<Option<f32>, LevelReadError>;
     /// Side: both.
     /// The level's game time (`Level.getGameTime`). On clients this is the
     /// synchronized time advanced by the local level tick. API 381.

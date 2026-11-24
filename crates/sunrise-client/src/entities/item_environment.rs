@@ -5,12 +5,14 @@ impl ItemEntity {
         &mut self,
         mut world: &World,
         facts: &BlockFacts,
+        items: &Items,
         registry: &sunrise_world::registry::BlockRegistry,
         can_be_hurt_by: &dyn Fn(&ItemStack, &str) -> bool,
     ) -> ItemEnvironmentTick {
         self.environment_tick_inner(
             &mut world,
             facts,
+            items,
             registry,
             can_be_hurt_by,
             |_, _| false,
@@ -22,6 +24,7 @@ impl ItemEntity {
         &mut self,
         mut world: &mut World,
         facts: &BlockFacts,
+        items: &Items,
         registry: &sunrise_world::registry::BlockRegistry,
         can_be_hurt_by: &dyn Fn(&ItemStack, &str) -> bool,
         mut invulnerable: impl FnMut(&mut World, &str) -> bool,
@@ -29,6 +32,7 @@ impl ItemEntity {
         self.environment_tick_inner(
             &mut world,
             facts,
+            items,
             registry,
             can_be_hurt_by,
             |world, damage| invulnerable(world, damage),
@@ -43,6 +47,7 @@ impl ItemEntity {
         &mut self,
         mut world: &mut World,
         facts: &BlockFacts,
+        items: &Items,
         registry: &sunrise_world::registry::BlockRegistry,
         can_be_hurt_by: &dyn Fn(&ItemStack, &str) -> bool,
         mut invulnerable: impl FnMut(&mut World, &str) -> bool,
@@ -50,6 +55,7 @@ impl ItemEntity {
         self.environment_tick_inner(
             &mut world,
             facts,
+            items,
             registry,
             can_be_hurt_by,
             |world, damage| invulnerable(world, damage),
@@ -60,6 +66,7 @@ impl ItemEntity {
         &mut self,
         world: &mut W,
         facts: &BlockFacts,
+        items: &Items,
         registry: &sunrise_world::registry::BlockRegistry,
         can_be_hurt_by: &dyn Fn(&ItemStack, &str) -> bool,
         mut invulnerable: impl FnMut(&mut W, &str) -> bool,
@@ -80,8 +87,8 @@ impl ItemEntity {
                 if item.health <= 0 {
                     destroyed_by = Some(damage);
                 }
-            } else if let Some(items) = item.hurt(amount) {
-                spilled.extend(items);
+            } else if let Some(contents) = item.hurt(items, amount) {
+                spilled.extend(contents);
                 destroyed_by = Some(damage);
             }
         };

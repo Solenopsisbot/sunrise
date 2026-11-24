@@ -74,17 +74,25 @@ impl SpriteAnimation {
             }
         }
     }
-    pub fn resized_pixels(&self, frame: usize, width: u32, height: u32) -> Vec<u8> {
+    pub(crate) fn resized_pixels(&self, frame: usize, width: u32, height: u32) -> Result<Vec<u8>> {
         let source = self.pixels(frame);
-        let side = (source.len() / 4).isqrt() as u32;
-        let mut out = Vec::with_capacity((width * height * 4) as usize);
+        let side = (source.len() / 4).isqrt();
+        let len = crate::hud::rgba_len([width, height])
+            .ok_or("sprite frame exceeds the address space")?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(len)?;
+        let (width, height) = (width as usize, height as usize);
+        // The source is a validated square RGBA buffer. Computing the scaled coordinate in
+        // u64 also works on 32-bit hosts, before using it as an index into that buffer.
+        let sample = |v: usize, dst: usize| (v as u64 * side as u64 / dst as u64) as usize;
         for y in 0..height {
+            let row = sample(y, height) * side * 4;
             for x in 0..width {
-                let offset = ((y * side / height * side + x * side / width) * 4) as usize;
+                let offset = row + sample(x, width) * 4;
                 out.extend_from_slice(&source[offset..offset + 4]);
             }
         }
-        out
+        Ok(out)
     }
     pub fn pixels(&self, frame: usize) -> &[u8] {
         &self.frames[frame]
@@ -399,6 +407,36 @@ impl Sprites {
             Some(layer) => Ok(layer),
             None => self.load(name, Lookup::Model),
         }
+    }
+    /// Load a sprite id or resource file into [`Sprites::files`] without substituting the
+    /// missing texture on error and without a synthetic byte cap.
+    pub fn try_insert_texture_file(&mut self, name: &str) -> Result<u32> {
+        if let Some(layer) = self.files.get(name) {
+            return Ok(*layer);
+        }
+        let path = if name.contains(':') {
+            crate::atlas_sources::texture_resource(name, "textures")
+        } else {
+            name.to_owned()
+        };
+        let bytes = self.source.read(&path)?;
+        self.load(name, Lookup::File(&bytes))
+    }
+    /// Whether `name` reads as a PNG, without adding a layer: what a caller checks before it
+    /// commits a texture slot to a file that may never be used.
+    pub fn texture_file_readable(&self, name: &str) -> Result<()> {
+        if self.files.contains_key(name) {
+            return Ok(());
+        }
+        let path = if name.contains(':') {
+            crate::atlas_sources::texture_resource(name, "textures")
+        } else {
+            name.to_owned()
+        };
+        let bytes = self.source.read(&path)?;
+        crate::hud::png_bytes_size(&bytes)
+            .map(|_| ())
+            .ok_or_else(|| format!("{name} is not a PNG").into())
     }
     /// Load a sprite id or resource file only when its PNG fits the byte limit,
     /// including cached layers. The checked bytes are reused when decoding.
@@ -1782,7 +1820,7 @@ mod tests {
     fn hud_animation_resampling_uses_the_actual_frame_size() {
         for size in [16, 32, 64] {
             let animation = test_animation(size, 0);
-            let resized = animation.resized_pixels(1, 16, 16);
+            let resized = animation.resized_pixels(1, 16, 16).unwrap();
             let last = (15 * size / 16) as u8;
             assert_eq!(&resized[15 * 4..16 * 4], &[last, 0, 99, 255]);
             assert_eq!(&resized[255 * 4..256 * 4], &[last, last, 99, 255]);
@@ -1813,8 +1851,12 @@ mod tests {
                 animation.pixels(animation.frame(1))
             );
             assert_ne!(
-                animation.resized_pixels(animation.frame(0), 16, 16),
-                animation.resized_pixels(animation.frame(1), 16, 16)
+                animation
+                    .resized_pixels(animation.frame(0), 16, 16)
+                    .unwrap(),
+                animation
+                    .resized_pixels(animation.frame(1), 16, 16)
+                    .unwrap()
             );
             assert_eq!(
                 animation.pixels(animation.frame(0)).len(),

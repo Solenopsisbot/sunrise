@@ -1610,6 +1610,10 @@ impl ChatScreen {
     pub fn value(&self) -> &str {
         &self.input.value
     }
+    /// `ChatScreen.isDraft`: true while the restored draft has not been edited.
+    pub fn is_draft(&self) -> bool {
+        self.is_draft
+    }
     /// Take the most recently accepted suggestion, at most once. Call after
     /// each key or click to observe every acceptance, including Tab cycling.
     pub fn take_suggestion_completion(&mut self) -> Option<SuggestionCompletion> {

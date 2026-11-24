@@ -61,7 +61,26 @@ pub(super) fn load_parts(root: &Path) -> HashMap<String, ModelPart> {
 pub(super) fn load_parts_from_document(
     document: &EntityModelDocument,
 ) -> HashMap<String, ModelPart> {
-    load_parts_from_value(document.value())
+    fn render_part(part: crate::mobs::Part) -> ModelPart {
+        ModelPart {
+            pose: part.pose,
+            polygons: part
+                .polygons
+                .into_iter()
+                .map(|poly| poly.vertices)
+                .collect(),
+            children: part
+                .children
+                .into_iter()
+                .map(|mut child| (std::mem::take(&mut child.name), render_part(child)))
+                .collect(),
+        }
+    }
+    LAYERS
+        .iter()
+        .chain(COPPER_GOLEM_LAYERS.iter())
+        .filter_map(|(key, layer)| Some(((*key).to_owned(), render_part(document.model(layer)?))))
+        .collect()
 }
 
 fn load_parts_from_value(all: &Value) -> HashMap<String, ModelPart> {

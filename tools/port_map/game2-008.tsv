@@ -42,9 +42,9 @@ BlockItem.canPlace	port	crates/sunrise-world/src/level/place.rs::Sim::place	the 
 BlockItem.onDestroyed	port	crates/sunrise-client/src/entities.rs::ItemEntity::hurt	the damage that empties an item's health makes the stack's `container` contents item entities where it lay (`item_data::destroyed_container`)
 BoatItem.getBoat	port	crates/sunrise-client/src/game/entities/boats/mod.rs::Game::place_boat	boat placed at the hit point with the item's stack config
 BucketItem.playEmptySound	port	crates/sunrise-world/src/level/buckets.rs::Sim::empty_sound
-BundleItem.getWeightSafe	port	crates/sunrise-items/src/bundle.rs::Contents::weight_fraction	float fraction; vanilla compares an exact Fraction
-BundleItem.getBarWidth	port	crates/sunrise-items/src/bundle.rs::Contents::bar
-BundleItem.getBarColor	port	crates/sunrise-items/src/bundle.rs::Contents::bar
+BundleItem.getWeightSafe	port	crates/sunrise-items/src/bundle.rs::CustomBundleContents::shown_weight	the exact Fraction; a custom capacity divides it, and an overflowing division reads as Fraction.ONE
+BundleItem.getBarWidth	port	crates/sunrise-items/src/bundle.rs::stack_bar
+BundleItem.getBarColor	port	crates/sunrise-items/src/bundle.rs::stack_bar
 BundleItem.removeOneItemFromBundle	port	crates/sunrise-items/src/bundle.rs::Contents::remove_one
 BundleItem.getTooltipImage	port	crates/sunrise-client/src/item_tooltip.rs::shows_bundle_tooltip	selects the bundle tooltip source when the stack carries `minecraft:bundle_contents` and `minecraft:tooltip_display` shows it; `bundle.rs::Contents::tooltip_layout` lays out the prepared contents
 BundleItem.onDestroyed	port	crates/sunrise-client/src/entities.rs::ItemEntity::hurt	the damage that empties an item's health makes the bundle's contents item entities where it lay (`bundle::destroyed`)

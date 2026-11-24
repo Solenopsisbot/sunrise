@@ -153,6 +153,49 @@ impl Game<'_> {
         let index = self.resident_entities.knots.locate(location.join)?;
         Some(self.resident_entities.knots[index].fence)
     }
+    /// `BlockAttachedEntity.kill`: retire a natural knot before notifying its holders.
+    /// Unlike vanilla's object references, this level's leash links name the fence.
+    pub(super) fn kill_natural_knot(&mut self, id: u32) -> bool {
+        let Some(fence) = self.natural_knot(id) else {
+            return false;
+        };
+        let holder = Some(Holder::Knot(fence));
+        let mobs: Vec<_> = self
+            .mobs
+            .iter()
+            .filter(|mob| !mob.removed && mob.extra.leash == holder)
+            .map(|mob| mob.id)
+            .collect();
+        let boats: Vec<_> = self
+            .boats
+            .iter()
+            .filter(|boat| boat.leash == holder)
+            .map(|boat| boat.id)
+            .collect();
+        self.knot_ids.remove(&fence);
+        self.resident_entities.knots.retain(|knot| knot.id != id);
+        for id in mobs {
+            if self
+                .mobs
+                .iter()
+                .any(|mob| mob.id == id && mob.extra.leash == holder)
+            {
+                self.detach_leash(Target::Mob(id), true);
+            }
+        }
+        for id in boats {
+            if self
+                .boats
+                .iter()
+                .any(|boat| boat.id == id && boat.leash == holder)
+            {
+                self.detach_leash(Target::Boat(id), true);
+            }
+        }
+        self.native_entity_left(id);
+        true
+    }
+
     /// Actual natural knot owners, without allocating or inferring membership from leashes.
     pub(super) fn natural_knot_id_iter(&self) -> impl Iterator<Item = u32> + '_ {
         self.resident_entities.knots.iter().map(|knot| knot.id)
@@ -199,8 +242,7 @@ impl Game<'_> {
         }
     }
     pub(super) fn lead_sound(&mut self, sound: &str, at: [f64; 3]) {
-        self.audio
-            .play(&format!("minecraft:item.lead.{sound}"), Some(at), 1.0, 1.0);
+        self.play_audio(&format!("minecraft:item.lead.{sound}"), Some(at), 1.0, 1.0);
     }
     /// `Leashable.canHaveALeashAttachedTo` for the mob at `index` and a
     /// holder whose box centre is `center`: within the species' snapping
@@ -620,7 +662,7 @@ impl Game<'_> {
                 return Some(LeashInteraction::WithoutItem);
             }
         }
-        if item == "minecraft:shears" {
+        if self.held_shears(super::item_abilities::ability::SHEARS_HARVEST) {
             let mut dropped = false;
             if self.mobs[index].extra.leash.is_some() {
                 self.break_leash_used(id, true);
@@ -641,8 +683,7 @@ impl Game<'_> {
             self.drop_boat_leashes(&boats);
             if dropped {
                 self.lead_game_event("minecraft:shear", at);
-                self.audio
-                    .play("minecraft:item.shears.snip", Some(at), 1.0, 1.0);
+                self.play_audio("minecraft:item.shears.snip", Some(at), 1.0, 1.0);
                 self.damage_held_tool();
                 return Some(LeashInteraction::WithItem);
             }
@@ -720,14 +761,13 @@ impl Game<'_> {
         let held_item = self.held().map(|s| s.item.to_string());
         let sneaking = self.held_mapping(Action::Sneak);
         // Shears snip every lead on the knot.
-        if knot_hit && held_item.as_deref() == Some("minecraft:shears") {
+        if knot_hit && self.held_shears(super::item_abilities::ability::SHEARS_HARVEST) {
             for i in existing {
                 let id = self.mobs[i].id;
                 self.break_leash_used(id, true);
             }
             self.drop_boat_leashes(&existing_boats);
-            self.audio
-                .play("minecraft:item.shears.snip", Some(at), 1.0, 1.0);
+            self.play_audio("minecraft:item.shears.snip", Some(at), 1.0, 1.0);
             self.damage_held_tool();
             return true;
         }

@@ -56,6 +56,55 @@ pub fn is_native_terrain(layer: u32) -> bool {
     )
 }
 
+/// `MeshData.decodeQuadCentroids` + `VertexSorting.DISTANCE_TO_ORIGIN`:
+/// JOML `Vector3f(0, 0, 0).distanceSquared(mid)` using JOML's right-to-left unfused `Math.fma`.
+#[inline]
+pub fn quad_distance_sq(q: &[EntityVertex; 4]) -> f32 {
+    let dx = 0.0 - (q[0].pos[0] + q[2].pos[0]) * 0.5;
+    let dy = 0.0 - (q[0].pos[1] + q[2].pos[1]) * 0.5;
+    let dz = 0.0 - (q[0].pos[2] + q[2].pos[2]) * 0.5;
+    dx * dx + (dy * dy + dz * dz)
+}
+
+/// Sorts quads far to near by [`quad_distance_sq`] (`VertexSorting.DISTANCE_TO_ORIGIN`), quads at
+/// one distance in the order they came, through buffers kept between frames so a sort allocates
+/// nothing once warm.
+#[derive(Default)]
+pub struct QuadSort {
+    /// Each quad's distance and its place before the sort, in the sorted order.
+    keys: alloc::vec::Vec<(f32, u32)>,
+    quads: alloc::vec::Vec<[EntityVertex; 4]>,
+}
+
+impl QuadSort {
+    /// Sorts `quads` in place: the order a stable sort gives, by an unstable one on
+    /// (distance, original index).
+    pub fn sort(&mut self, quads: &mut [[EntityVertex; 4]]) {
+        self.keys.clear();
+        self.keys.extend(
+            quads
+                .iter()
+                .enumerate()
+                .map(|(i, q)| (quad_distance_sq(q), i as u32)),
+        );
+        if quads.len() <= 1 {
+            return;
+        }
+        self.keys
+            .sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        self.quads.clear();
+        self.quads.extend_from_slice(quads);
+        for (quad, &(_, from)) in quads.iter_mut().zip(&self.keys) {
+            *quad = self.quads[from as usize];
+        }
+    }
+
+    /// After [`QuadSort::sort`]: for each quad in its sorted place, the place it came from.
+    pub fn sources(&self) -> impl Iterator<Item = u32> + '_ {
+        self.keys.iter().map(|&(_, from)| from)
+    }
+}
+
 /// Intersects shader identities with overlay runs, without reading posed vertices back.
 pub fn skin_runs(
     skin_jobs: impl IntoIterator<Item = (u32, u32, u32)>, // (dst, count, overlay)

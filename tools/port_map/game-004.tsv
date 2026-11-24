@@ -72,8 +72,8 @@ Display.onSyncedDataUpdated	port	crates/sunrise-client/src/game/entities/text_di
 Display.createTransformation	port	crates/sunrise-client/src/text_display.rs::TextDisplayData::matrix	translation, left rotation, scale, right rotation plus the billboard turn
 Display.tick	port	crates/sunrise-client/src/game/entities/text_displays.rs::RemoteTextDisplay::tick	start tick, interpolation duration and render state refresh; text displays only
 Display.defineSynchedData	port	crates/sunrise-client/src/text_display.rs::TextDisplayData::default	the defaults of entries 8 to 22
-Display.readAdditionalSaveData	port	crates/sunrise-client/src/text_display.rs::display_data	the synched data entries (ids 8 to 22) of a saved display, matrix transformation included
-Display.setTransformation	port	crates/sunrise-client/src/game/modding/native_entities.rs::Game::native_set_display	a display Sunrise keeps as a saved tag (block_display, item_display, text_display) eases from what it showed: the transformation and its interpolation and teleport durations, written for the mod API (native_set_display); nothing writes the brightness, billboard or shadow values back
+Display.readAdditionalSaveData	port	crates/sunrise-client/src/game/world/persist/display.rs::Game::read_display_nbt	decode the resident display fields, matrix transformation included
+Display.setTransformation	port	crates/sunrise-client/src/game/modding/native_display_refs.rs::Game::display_set_transformation	the four transformation components are set directly on the resident display
 Display.addAdditionalSaveData	port	crates/sunrise-client/src/game/world/persist/display.rs::Game::write_display_nbt	the display transformation, duration, culling, brightness, billboard and shadow settings in the saved compound
 Display.BlockDisplay.addAdditionalSaveData	inline	crates/sunrise-client/src/game/world/persist/display.rs::Game::write_display_nbt	block_state, defaulting to air
 Display.ItemDisplay.addAdditionalSaveData	inline	crates/sunrise-client/src/game/world/persist/display.rs::Game::write_display_nbt	item_display context and the nonempty item stack
@@ -90,10 +90,10 @@ Display.BlockDisplay	home	crates/sunrise-client/src/game/entities/text_displays.
 Display.ItemDisplay	home	crates/sunrise-client/src/game/entities/text_displays.rs	an item display submits its item model with the display context (Game::block_item_display_geometry)
 Display.TextDisplay.defineSynchedData	port	crates/sunrise-client/src/text_display.rs::TextDisplayData::default	text, line width 200, background 0x40000000, opacity -1, flags 0
 Display.TextDisplay.onSyncedDataUpdated	port	crates/sunrise-client/src/game/entities/text_displays.rs::RemoteTextDisplay::metadata	the text render state ids mark the render state dirty
-Display.TextDisplay.loadFlag	inline	crates/sunrise-client/src/text_display.rs::text_display_data	each NBT boolean (shadow, see_through, default_background) ORs its bit into the flags, then the alignment
-Display.TextDisplay.readAdditionalSaveData	port	crates/sunrise-client/src/text_display.rs::text_display_data	a saved text display's synched data (ids 23 to 27) is read back from its compound and re-sent
-Display.TextDisplay.storeFlag	missing		minor: writes the style flags to NBT; no local display entity
-Display.TextDisplay.addAdditionalSaveData	port	crates/sunrise-client/src/game/world/persist/display.rs::write_text_display	text, layout, opacity, background and style flags; gap: dynamic text resolution
+Display.TextDisplay.loadFlag	inline	crates/sunrise-client/src/game/world/persist/display.rs::Game::read_display_nbt	load the resident style flags and alignment; the tracker packs the synched byte
+Display.TextDisplay.readAdditionalSaveData	port	crates/sunrise-client/src/game/world/persist/display.rs::Game::read_display_nbt	a saved text display's fields are loaded once as resident settings
+Display.TextDisplay.storeFlag	inline	crates/sunrise-client/src/game/world/persist/display.rs::Game::write_display_nbt	writes the three resident style flags as NBT booleans
+Display.TextDisplay.addAdditionalSaveData	port	crates/sunrise-client/src/game/world/persist/display.rs::Game::write_display_nbt	text, layout, opacity, background and style flags; gap: dynamic text resolution
 Display.TextDisplay.updateRenderSubState	port	crates/sunrise-client/src/text_display.rs::TextDisplayData::blend	text, line width, opacity and background blend over the interpolation
 Display.TextDisplay.createFreshTextRenderState	inline	crates/sunrise-client/src/game/entities/text_displays.rs::RemoteTextDisplay::tick	the plain copy of the synced text data
 Display.TextDisplay.createInterpolatedTextRenderState	port	crates/sunrise-client/src/text_display.rs::TextDisplayData::blend	opacity and the four background channels interpolate linearly

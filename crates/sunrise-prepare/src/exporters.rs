@@ -24,6 +24,7 @@ const SERVER: &[&str] = &[
 const CLIENT: &[&str] = &[
     "VanillaBlockStateBindingOracle",
     "VanillaEntityModelExporter",
+    "VanillaRenderPipelineExporter",
     "VanillaMobAnimationExporter",
     "PrepareWorker",
 ];

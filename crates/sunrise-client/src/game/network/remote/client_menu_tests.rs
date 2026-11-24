@@ -653,11 +653,11 @@ fn retained_effects_rebind_on_reconfiguration_and_refusals_do_not_block_clicks()
                 Slot::read(&mut Reader::new(&wire.data).with_names(mapping)).unwrap()
             };
             let old = configure(false);
-            game.set_registries(old.clone());
+            game.set_registries(old.clone()).unwrap();
             let retained = game.to_stack(&receive(protection(2, vec![1, 5, 7]), &old));
             assert!(retained.as_ref().unwrap().wire_patch().is_some());
             let new = configure(true);
-            game.set_registries(new.clone());
+            game.set_registries(new.clone()).unwrap();
             let sent = game.to_network(&retained).unwrap();
             assert_eq!(
                 sent.component(component::DEATH_PROTECTION),
@@ -777,4 +777,66 @@ fn client_menu_kind_names_the_server_menu_type() {
             });
         },
     );
+}
+
+/// `AbstractContainerMenu.getStateId` on a client (#5323): the open menu's handle reads the state
+/// of the last content or slot packet for its window, not the inventory's, and the inventory's
+/// handle reads its own once the menu closes.
+#[test]
+#[ignore = "daily"]
+fn client_menu_state_id_follows_its_windows_packets() {
+    use crate::game::native_entity_refs::tests::with_game;
+    use sunrise_core::nbt::Tag;
+    use sunrise_protocol::packets::play::{self, Clientbound as C};
+
+    with_game(|game| {
+        let (_reader, _writer) = connect_menu_test(game);
+        spawn_menu_test(game);
+        let table = game
+            .remote
+            .as_ref()
+            .unwrap()
+            .builtin
+            .get("minecraft:menu")
+            .unwrap()
+            .id("minecraft:crafting")
+            .unwrap();
+        game.handle_packet(C::OpenScreen(play::OpenScreen {
+            container: 7,
+            menu: table,
+            title: Tag::String("Crafting".into()),
+        }))
+        .unwrap();
+        let content = |container, state| {
+            C::ContainerSetContent(play::ContainerSetContent {
+                container,
+                state,
+                items: vec![None; 46],
+                carried: None,
+            })
+        };
+        game.handle_packet(content(7, 12)).unwrap();
+        let menu = game
+            .player_container_menu(game.local_player().unwrap())
+            .unwrap();
+        assert_eq!(menu.state_id(game), Some(12));
+        game.handle_packet(C::ContainerSetSlot(play::ContainerSetSlot {
+            container: 7,
+            state: 13,
+            slot: 1,
+            item: None,
+        }))
+        .unwrap();
+        assert_eq!(menu.state_id(game), Some(13));
+        // The inventory menu's sync while the table is open is not the table's.
+        game.handle_packet(content(0, 45)).unwrap();
+        assert_eq!(menu.state_id(game), Some(13));
+        game.handle_packet(C::ContainerClose(play::ContainerClose { container: 7 }))
+            .unwrap();
+        assert_eq!(menu.state_id(game), None);
+        let inventory = game
+            .player_container_menu(game.local_player().unwrap())
+            .unwrap();
+        assert_eq!(inventory.state_id(game), Some(45));
+    });
 }

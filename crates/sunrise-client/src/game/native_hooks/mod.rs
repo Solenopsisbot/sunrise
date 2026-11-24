@@ -8,12 +8,13 @@
 
 /// Generated dispatch entry points, not hand-written hook implementations.
 mod fire;
+pub(in crate::game) use block_entity_client_tick::ResidentReadBlockEntity;
 pub(in crate::game) use block_entity_tick::ResidentBlockEntityAccess;
 pub(in crate::game) use build_creative_mode_tab_contents::CreativeCache;
 pub(in crate::game) use client_pick::ClientPick;
 pub(in crate::game) use fire::{
     ConnectsToCall, EntityChangeBlockPreCall, HotbarAttackIndicatorProgressCall,
-    ItemAfterVerticalCollisionCall, PlayerPongCall, PreRemoveSideEffectsCall, UpdateShapeCall,
+    ItemAfterVerticalCollisionCall, PlayerPongCall, UpdateShapeCall,
 };
 use mod_api::{BlockEntityDataSource, BlockEntityRef, ClockAdjustment};
 
@@ -23,7 +24,6 @@ use super::{
     execution_role::{self, ExecutionRole},
     mod_api_host,
     native_block_entity_draw::BlockEntityDraw,
-    native_configs::ConfigFile,
     native_mob_draw::{MobRender, PlayerRender},
     native_panel_recipes::RecipePage,
 };
@@ -35,18 +35,18 @@ use mod_api::__private::game::{
 };
 use mod_api::GameMode;
 use mod_api::GameTests;
-pub use mod_api::game::{PhantomSpawnResult, Shake, SleepProblem};
+pub use mod_api::game::{PhantomSpawnResult, SleepProblem};
 use mod_api::{
     self, Answered, BlockPlacement, BlockTintSources, CauldronFluidContents, CauldronInteractions,
     ClientAudioOptions, ClientChatOptions, ClientGraphicsOptions, ClientGuiOptions,
     ClientInputOptions, ClientMiningPrediction, ClientModifiers, ClientReloadListeners,
-    ColorResolvers, EnchantmentDamageEffects, EnchantmentInfo, EntityLayers, EntityRef,
-    EntityRenderers, GameRuleActor, GuiLayerRegistrar, HandDrawContext, HandRender, InsideEffects,
+    ColorResolvers, EnchantmentEffects, EnchantmentInfo, EntityLayers, EntityRef, EntityRenderers,
+    ExperienceOrbRef, GuiLayerRegistrar, HandDrawContext, HandRender, InsideEffects,
     InteractionAttempt, InteractionKey, ItemEntityRef, LifecycleContext, LivingRef, LoadConditions,
     NoteBlockChange, ParticleProviders, PathComputationType, Placement, PlayerRef,
     PoiTypeExtensions, RecipeBookCategory, ScreenId, ScreenOpening, ScreenTarget, ScreenWidgets,
-    ScreenshotImage, ServerReloadListeners, ServerTickPhase, SpecialModelRenderers,
-    TicketController, ToolUse, VillagerProfessions, WorldPhase,
+    ScreenshotImage, ServerReloadListeners, ServerTickPhase, SpecialModelRenderers, ToolUse,
+    VillagerProfessions,
 };
 use mod_api::{
     ActiveEffect, AttachmentStore, BlockClick, BlockUpdateFlags, BonemealSource, ChunkRef,
@@ -61,9 +61,7 @@ pub(crate) use mod_api::{
     BlockRim, ClientPacket, ClientPayload, ColoredLight, ContainerLootFilled, ExplosionStart,
     ItemFished, LootDrops, PanelEvent, PortalShape, ScreenView,
 };
-use mod_api::{
-    CameraType, Despawn, Identifier, MobRef, PermissionLevel, RailShape, SoundPlay, SoundRef,
-};
+use mod_api::{CameraType, Despawn, Identifier, MobRef, PermissionLevel, RailShape};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -77,13 +75,11 @@ use sunrise_client::{
     atlas_sources::qualified,
     biome::{BiomeColors, SpawnEntry},
     block_entities::Pos,
-    chat::ChatSource,
     containers::{
         BlockEntity, MOD_MENUS, ModBlockEntityFields, ModContainer, ModEnergyBuffer, ModFluidTanks,
     },
     crafting::{Ingredient, recipe_result},
     extras::Corner,
-    extras_hud::Corners,
     fast_hash::FxHashMap,
     first_person::Hand,
     health::{
@@ -174,9 +170,7 @@ mod bounce_restitution;
 mod break_progress_positions;
 mod build_creative_mode_tab_contents;
 mod calculate_player_turn;
-mod camera_pose;
-#[cfg(test)]
-mod camera_pose_tests;
+mod camera_position;
 mod camera_read;
 mod camera_submersion;
 mod camera_type;
@@ -185,6 +179,7 @@ mod can_be_connected_to;
 mod can_be_connected_to_tests;
 mod can_be_hydrated;
 mod can_continue_sleeping;
+mod can_continue_using;
 mod can_drop_from_explosion;
 mod can_entity_destroy;
 mod can_equip;
@@ -235,6 +230,7 @@ mod client_tick_pre;
 mod client_visual_text;
 mod clone_item_stack;
 mod component_hover;
+mod compute_camera_angles;
 mod compute_fov_modifier;
 mod connects_to;
 mod console_line;
@@ -259,6 +255,7 @@ mod data_maps_updated;
 #[cfg(test)]
 mod death_source_tests;
 mod default_components_bound;
+mod destroy_progress;
 mod dispense_method;
 mod draw_measures;
 mod effect_particle_modification;
@@ -317,7 +314,7 @@ mod grindstone_place;
 mod grindstone_take;
 #[cfg(test)]
 mod guest_death_lifecycle_tests;
-mod gui_render_post;
+mod gui_status_heights;
 mod gui_ticks;
 mod held_item_tint;
 mod highlight_tip;
@@ -336,6 +333,7 @@ mod is_pathfindable;
 mod is_piglin_currency;
 mod is_possible_to_respawn_in;
 mod is_primary_item_for;
+mod is_shearable;
 mod item_after_vertical_collision;
 mod item_attack;
 mod item_container;
@@ -379,6 +377,7 @@ mod map_decoration_types;
 mod math;
 mod menu_extra_data;
 mod menu_links;
+mod menu_removed;
 mod menu_slot_changed;
 mod menu_slot_rules;
 mod menu_slot_take;
@@ -389,9 +388,8 @@ mod mob_spawn_checks;
 mod mob_split;
 #[cfg(test)]
 mod mod_block_entity_payload_tests;
-mod mod_configs;
 mod mod_mismatch;
-mod mod_settings;
+pub(in crate::game) mod mod_settings;
 mod model_baking_completed;
 mod movement_input;
 mod muffle_sounds;
@@ -419,6 +417,8 @@ mod on_destroyed_by_push_reaction_tests;
 mod on_dropped_by_player;
 mod on_entity_item_update;
 mod on_item_use_first;
+mod on_sheared;
+mod on_stop_using;
 mod panel_recipes;
 #[cfg(test)]
 mod panel_recipes_tests;
@@ -434,6 +434,7 @@ mod placement_context_tests;
 mod play_hit_sound;
 #[cfg(test)]
 mod play_hit_sound_tests;
+pub(in crate::game) mod play_sound;
 mod player_bed_leave;
 mod player_break_speed;
 mod player_brewed_potion;
@@ -454,12 +455,14 @@ mod player_set_spawn;
 mod player_spawn_phantoms;
 mod player_start_spectating_entity;
 mod player_swap_hands;
+mod player_turn;
 mod player_xp_change;
 mod player_xp_level_change;
 mod portal_spawn;
 mod potion_brew_post;
 mod potion_brew_pre;
 mod pre_remove_side_effects;
+mod prepare_render_buffers;
 mod preset_title;
 mod rails;
 mod recipe_book_categories;
@@ -477,7 +480,7 @@ mod register_configuration_tasks;
 mod register_debug_entries;
 mod register_debug_renderers;
 mod register_dimension_transition_screen;
-mod register_enchantment_damage_effects;
+mod register_enchantment_effects;
 mod register_entity_layers;
 mod register_entity_renderers;
 mod register_entity_spectator_shaders;
@@ -489,6 +492,7 @@ mod register_item_tint_sources;
 mod register_json_animation_types;
 mod register_layer_definitions;
 mod register_load_conditions;
+mod register_mob_parts;
 mod register_model_loaders;
 mod register_particle_groups;
 mod register_particle_providers;
@@ -521,7 +525,8 @@ mod render_player_post;
 mod render_player_pre;
 mod render_tooltip_gather_components;
 mod render_tooltip_pre;
-mod render_tooltip_texture;
+pub(in crate::game) mod render_tooltip_texture;
+mod render_view_transform;
 mod resolve_player_skin;
 mod respawn_position;
 mod right_click_empty;
@@ -554,6 +559,8 @@ mod should_display_fluid_overlay;
 mod should_hide_adjacent_fluid_face;
 mod should_redstone_wire_connect_to;
 mod sound_and_shader_helpers;
+mod sound_type;
+mod spawn_cluster_size;
 mod spread_players_teleport;
 mod state_at_viewpoint;
 mod stateful_block_entity;
@@ -572,7 +579,6 @@ mod translate;
 mod trident_family_tests;
 mod use_item_hand;
 mod use_item_on_block;
-mod validate_tickets;
 mod vanilla_game_event;
 mod viewed_level_sound;
 mod wind_burst;
@@ -584,6 +590,6 @@ pub(in crate::game) use base::LevelView;
 pub(in crate::game) use bounce_restitution::install_block_contact_hooks;
 pub(in crate::game) use living_change_target::NativeHookHost;
 use mod_api::ModBlockEntity;
-use sound_and_shader_helpers::{finite, finite_params, local_sound_ok};
-pub(super) use sound_and_shader_helpers::{level_sound_playable, mod_sound_ok, sound_id};
+use sound_and_shader_helpers::finite_params;
+pub(super) use sound_and_shader_helpers::sound_id;
 include!("shared.rs");

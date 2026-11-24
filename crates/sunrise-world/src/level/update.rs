@@ -578,11 +578,8 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     }
     /// `Block.spawnDestroyParticles`: fire spawns none, straw beds their own.
     pub(crate) fn destroy_particles(&mut self, pos: BlockPos, state: BlockStateId) {
-        let data = self.b.data(state);
-        if data.is(Class::StrawBed) {
-            self.level_event(2014, pos, state.0 as i32);
-        } else if !(data.is(Class::BaseFire) || data.is(Class::Fire) || data.is(Class::SoulFire)) {
-            self.level_event(2001, pos, state.0 as i32);
+        if let Some(id) = self.b.destroy_particle_event(state) {
+            self.level_event(id, pos, state.0 as i32);
         }
     }
     pub fn drop_resources(&mut self, state: BlockStateId, pos: BlockPos) {

@@ -91,3 +91,38 @@ Read `event.data` as an API `Compound`, using typed `Tag` variants such as `Int`
 A `Compound`'s keys and `Tag::String` values are `JavaString`s: UTF-16 text that can keep Java's unpaired surrogates, so they are not Rust `String`s. Build one from a Rust string with `JavaString::from("key")` (a `&str` converts), for example to look up `data.get(&JavaString::from("count"))`.
 
 The loader converts recipe metadata once using vanilla JsonOps-to-NbtOps rules. JSON `true` and `false` become `Byte` 1 and 0, so the hook cannot tell a bool from the number 1 or 0. A number that is an exact signed 64-bit integer, including a decimal such as `1.0` or `1e3` and `-0.0`, becomes the smallest of `Byte`, `Short`, `Int` and `Long` that holds it (`1` is a `Byte`, `300` a `Short`, `100000` an `Int`). Any other number becomes a `Float` if it survives a round trip through `f32` (`0.5`), otherwise a `Double` (`0.1`). Because the width depends on the value, read numeric tags by value, accepting any numeric variant, rather than matching one tag type. Numeric JSON arrays remain lists. Nested null values refuse the ingredient and fail the recipe. Capture only the configuration you need in the predicate; the game does not reconvert or dispatch the metadata during matching.
+
+## Fluid ingredients
+
+Use `FluidIngredient::from_json(json, context)` to parse fluid inputs for your recipe type. Pass the
+`DataLoadContext` supplied to your data-load hook. For direct tag reads,
+[`DataLoadContext::fluid_tags()`](../../concepts/load-phases.md#load-contexts) borrows the recipe
+pass's frozen table without reading files. `None` means the load has no recipe overlay;
+`Some(&[])` means the overlay is available but has no fluid tags. In a populated table, each
+tag's members are in source order. Use the borrowed table inside the callback; copy it only if
+it must outlive the callback.
+
+| JSON input | Matches |
+| --- | --- |
+| `"minecraft:water"` | The named fluid. |
+| `"#my_mod:coolants"` | Fluids in the load context's tag. |
+| A list of ingredients | Any listed ingredient. |
+| `neoforge:compound` | Any child. |
+| `neoforge:intersection` | Every child. |
+| `neoforge:difference` | The base, excluding the subtracted ingredient. |
+
+Call `test(&FluidStack)` to match a tank's contents. Components are not checked. Use `fluids()` to list accepted fluid keys in source order, including tag order, for a recipe book.
+
+Parsing returns `Result<FluidIngredient, FluidIngredientError>`. Invalid shapes, custom kinds and a list holding an entry that isn't a fluid name or `#tag` return `FluidIngredientError::Invalid`; unknown fluid names return `FluidIngredientError::UnknownFluid`. `Hooks::ingredient` binds predicates only for custom **item** ingredients. A custom kind in fluid JSON is refused, not passed to that hook.
+
+### Required fluid amounts
+
+`SizedFluidIngredient::from_json` parses an ingredient and a positive amount in millibuckets:
+
+```json
+{"ingredient": "minecraft:water", "amount": 500}
+```
+
+- Omit `amount` to require one bucket (1000 millibuckets).
+- Invalid input, including zero or a negative amount, returns `None`.
+- `test(&FluidStack)` requires both a matching fluid and at least the requested amount.

@@ -321,6 +321,12 @@ pub(in crate::game) struct SummonedEye {
     pub(super) motion: Vec3,
     /// `EyeOfEnder.life`: not saved, so a loaded eye starts again at 0.
     life: u32,
+    /// `Entity.remainingFireTicks`, counted down by `baseTick`.
+    pub(super) fire_ticks: i32,
+    /// `Entity.DATA_SHARED_FLAGS_ID` on-fire bit, set after `baseTick` fire processing.
+    pub(super) synced_fire: bool,
+    /// `Entity.hasVisualFire` (`HasVisualFire` in NBT).
+    pub(super) has_visual_fire: bool,
 }
 impl SummonedEye {
     /// `Entity.load`'s motion and `EyeOfEnder.readAdditionalSaveData`'s
@@ -328,6 +334,8 @@ impl SummonedEye {
     pub(super) fn load(tag: &mut sunrise_core::nbt::Tag) -> Self {
         use sunrise_core::nbt::Tag;
         let motion = sunrise_client::entity_nbt::loaded_motion(tag);
+        let fire_ticks = sunrise_client::entity_nbt::fire_ticks_from_nbt(tag);
+        let has_visual_fire = sunrise_client::entity_nbt::flag(tag, "HasVisualFire");
         if let Tag::Compound(c) = tag {
             let mut item = match c.remove(&"Item".into()) {
                 Some(Tag::Compound(item)) => item,
@@ -348,7 +356,13 @@ impl SummonedEye {
             item.insert("count".into(), Tag::Int(1));
             c.insert("Item".into(), Tag::Compound(item));
         }
-        Self { motion, life: 0 }
+        Self {
+            motion,
+            life: 0,
+            fire_ticks,
+            synced_fire: false,
+            has_visual_fire,
+        }
     }
 }
 
@@ -366,6 +380,11 @@ impl Game<'_> {
             if !ticking(o.position.x.floor() as i32, o.position.z.floor() as i32) {
                 return true;
             }
+            // Entity.baseTick: the eye burns down; its hurt does nothing.
+            if eye.fire_ticks > 0 {
+                eye.fire_ticks -= 1;
+            }
+            eye.synced_fire = eye.fire_ticks > 0 || eye.has_visual_fire;
             let m = eye.motion;
             o.position = Vec3::new(o.position.x + m.x, o.position.y + m.y, o.position.z + m.z);
             eye.life += 1;
@@ -376,8 +395,7 @@ impl Game<'_> {
             false
         });
         for at in shattered {
-            self.audio
-                .play("minecraft:entity.ender_eye.death", Some(at), 1.0, 1.0);
+            self.play_audio("minecraft:entity.ender_eye.death", Some(at), 1.0, 1.0);
             self.level_event_at(2003, at.map(|v| v.floor() as i32), 0);
         }
     }
@@ -656,7 +674,7 @@ impl Game<'_> {
                 flash.x_angle,
                 flash.y_angle,
             );
-            self.audio.play_instance_after(instance, 30);
+            self.play_audio_instance_after(instance, 30);
         }
     }
 
@@ -1399,8 +1417,7 @@ impl Game<'_> {
         });
         let r = self.world.random.next_float();
         let pitch = 0.33 + r * (0.5 - 0.33);
-        self.audio
-            .play("minecraft:entity.ender_eye.launch", Some(at), 1.0, pitch);
+        self.play_audio("minecraft:entity.ender_eye.launch", Some(at), 1.0, pitch);
         // CriteriaTriggers.USED_ENDER_EYE, against the feature's block.
         let (dx, dz) = (
             at[0] - f64::from(nearest.x * 16),
@@ -1429,8 +1446,7 @@ impl Game<'_> {
                 return true;
             }
             let at = eye.position.to_array();
-            self.audio
-                .play("minecraft:entity.ender_eye.death", Some(at), 1.0, 1.0);
+            self.play_audio("minecraft:entity.ender_eye.death", Some(at), 1.0, 1.0);
             if eye.survive {
                 // new ItemEntity(level, x, y, z, item): random spread, 0.2 up.
                 let vx = self.world.random.next_double() * 0.2 - 0.1;

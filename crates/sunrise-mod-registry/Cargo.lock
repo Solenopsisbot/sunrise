@@ -1455,6 +1455,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sunrise-mod-pipeline"
+version = "0.1.0"
+dependencies = [
+ "naga",
+]
+
+[[package]]
 name = "sunrise-mod-registry"
 version = "0.1.0"
 dependencies = [
@@ -1539,6 +1546,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sunrise-mod-pipeline",
  "toml",
  "zip",
 ]

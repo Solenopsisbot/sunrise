@@ -102,3 +102,69 @@ ones; a mod menu's `menu_transfer` part names both, with any answer (see
 Looking recipes up stays the viewer's job: it reads them (`recipes_of_type`) and builds the pages.
 A machine mod with its own recipe types supplies its pages through the viewer's published
 integration; the engine has no hook between the two.
+
+## Setting the item panel's search text
+
+On the client, the mod that owns a `panel_items` panel can put text in its search box with
+`panel_search(mod_id, text)`, passing its own id. It is a `WorldOnly` operation, like
+`panel_style`.
+
+- Only the owner can set its text: the call counts only when it comes from the owner's own hook
+  or part and names the owner's id while its panel is showing. A call from any other mod changes
+  nothing, even one that names the owner's id. A mod that wants another mod's viewer searched asks
+  that viewer through its published integration, and the viewer makes the call.
+- The text is cut to the box's 50 characters, counted in UTF-16 code units as vanilla's box counts
+  them: a character outside the Basic Multilingual Plane, such as an emoji, takes two.
+- Nothing changes during the call. The text goes into the box the next time the owner's panel
+  draws its box: the value is replaced, the cursor goes to its end, and the panel goes back to its
+  first page. A later call before then replaces an earlier one. Set while no container screen is
+  open, or while the screen is too narrow for the panel, the text waits.
+- The owner then hears `panel_event` `Search(text)`, the event the player's typing sends, so its
+  filter changes in one place. No keystrokes are simulated: only the box's text and that one event.
+  As the event comes after the call, calling `panel_search` from inside one of your own hooks is
+  safe.
+- A queued text is dropped if the player edits the box first (their edit is newer) or if another
+  mod takes the panel. One mod's text never reaches another mod's box or hook.
+- Setting the text the box already holds, once cut to 50, sends no event and leaves the cursor and
+  selection where they are.
+
+```rust
+{{#include ../../../examples/src/item_behaviors.rs:clear_panel_search}}
+```
+
+This is JEI's `IIngredientFilter.setFilterText`; the recipe book's own box does the same with
+`searchBox.setValue`.
+
+## Choosing an item panel style
+
+On the client, `panel_style(mod_id, style)` chooses how the mod's `panel_items` panel looks.
+It is a `WorldOnly` operation: call it through the client host while a world is open, not from
+server code or a title-screen callback. The choice is kept for the session even while the panel
+is hidden; it is not a saved player preference.
+
+In every style the mouse wheel pages the panel while the pointer is over it: one page per notch,
+down to the next page and up to the previous one, stopping at the first and last page (it does not
+wrap, even in Classic). Recipe pages shown in the panel's place turn the same way, and the mod hears
+the turn as it does from the arrows. A notch over the panel does not reach the screen underneath;
+scrolling anywhere else is unchanged. No hook is needed for this.
+
+`PanelStyle` has three variants:
+
+- `RecipeBook` (the default) uses recipe-book page arrows and a plain search field.
+- `Viewer` uses square page buttons on a bar and the Recipes panel's search field. It changes
+  drawing, not layout.
+- `Classic { centred_search, window_width }` also changes layout: an 18 px ingredient grid sits
+  2 px from the screen's right edge below an always-visible page row with wrapping navigation.
+  The gap from the container window can exceed 2 px when the free width is not divisible by 18.
+  The search field ends 4 px above the screen bottom by default. With `centred_search` and room
+  under the window, it moves under the window and ends 2 px above the screen bottom instead.
+  Nonempty searches with no matches are red; other Classic search text is white.
+
+For Classic, `window_width: 0` uses the container's own bounds. A positive value reserves at least
+that much width for a centred recipe window. This width option is Sunrise's own, not a JEI 1.12
+setting. The Classic wrench opens the owning mod's page in **Options > Mods**, not a shared
+viewer configuration screen. Only the page arrows are tinted; the wrench retains its own colours.
+
+Switching back to RecipeBook or Viewer restores the normal search text colour, including after
+a failed Classic search. Changing the style does not replace the panel's item list or its event
+handling.

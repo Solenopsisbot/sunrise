@@ -2,7 +2,7 @@
 //! bookshelves and the blocks whose parts answer `enchant_power_bonus`.
 use super::{Game, native_world_read::BlockProviderQuery};
 use mod_api::LevelRef;
-use sunrise_client::stations::bookshelf_offsets;
+use sunrise_client::stations::BOOKSHELF_OFFSETS;
 use sunrise_core::position::BlockPos;
 use sunrise_world::registry::BlockStateId;
 
@@ -14,7 +14,7 @@ impl Game<'_> {
     pub(super) fn count_bookshelves(&self, pos: [i32; 3]) -> i32 {
         let table = BlockPos::new(pos[0], pos[1], pos[2]);
         let level = self.native_current_level();
-        let power: f32 = bookshelf_offsets()
+        let power: f32 = BOOKSHELF_OFFSETS
             .into_iter()
             .filter(|o| {
                 self.enchant_transmits(self.world.block(

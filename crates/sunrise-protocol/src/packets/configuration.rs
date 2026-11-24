@@ -397,6 +397,37 @@ mod tests {
     }
 
     #[test]
+    fn registry_data_validates_and_normalizes_ids_on_decode() {
+        let decode = |entries: &[&str]| {
+            let mut body = Writer::new();
+            body.string("worldgen/biome");
+            body.varint(entries.len() as i32);
+            for id in entries {
+                body.string(id);
+                body.bool(false);
+            }
+            Clientbound::decode(
+                crate::ids::configuration::clientbound::REGISTRY_DATA,
+                &body.data,
+            )
+        };
+        assert_eq!(
+            decode(&["plains", "example:..", ":desert"]).unwrap(),
+            Clientbound::RegistryData(RegistryData {
+                registry: "minecraft:worldgen/biome".into(),
+                entries: ["minecraft:plains", "example:..", "minecraft:desert"]
+                    .into_iter()
+                    .map(|id| RegistryEntry {
+                        id: id.into(),
+                        data: None,
+                    })
+                    .collect(),
+            }),
+        );
+        assert!(decode(&["plains", "..:example", ":desert"]).is_err());
+    }
+
+    #[test]
     fn client_information_carries_the_main_hand() {
         // Skin Customization's Main Hand: HumanoidArm LEFT is 0, RIGHT is 1.
         for main_hand in [0, 1] {

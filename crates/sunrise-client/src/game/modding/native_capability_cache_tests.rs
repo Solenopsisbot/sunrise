@@ -314,7 +314,7 @@ fn a_cache_finds_nothing_once_its_level_closes() {
             let mut cache = cache(level);
             assert!(ask(game, &mut cache).0);
             game.native_lifecycle
-                .begin_open(mod_api::Authority::IntegratedServer);
+                .begin_open(Some(mod_api::Authority::IntegratedServer));
             assert!(
                 !ask(game, &mut cache).0,
                 "a closed level's handles are stale"

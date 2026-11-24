@@ -668,6 +668,39 @@ fn special_material_batches_preserve_quad_order_and_offsets() {
     );
 }
 #[test]
+fn classic_additive_draws_only_the_uploaded_prefix() {
+    use super::{DRAGON_RAYS_OVERLAY, draw_frame::classic_additive_runs};
+
+    let quad = |layer, light| {
+        [super::Vertex {
+            pos: [0.0; 3],
+            uv: [0.0; 2],
+            layer,
+            color: u32::MAX,
+            light,
+            normal: [0; 4],
+            glint_uv: [0.0; 2],
+        }; 4]
+    };
+    let additive = [
+        quad(0, 1),
+        quad(DRAGON_RAYS_OVERLAY, 2),
+        quad(DRAGON_RAYS_OVERLAY, 3),
+    ];
+    let additive = additive.as_flattened();
+    let mut batch = super::EntityBatch::default();
+    let counts = batch.update_within(&quad(0, 0), additive, &[], &[], &[], false, 3);
+    assert_eq!(
+        batch.combined.iter().map(|v| v.light).collect::<Vec<_>>(),
+        [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
+    );
+    assert_eq!(
+        classic_additive_runs(additive, counts.additive).collect::<Vec<_>>(),
+        [(false, 0..6), (true, 6..12)]
+    );
+}
+
+#[test]
 fn software_adapters_are_last_resort() {
     use super::is_software;
     assert!(is_software(wgpu::DeviceType::Cpu));

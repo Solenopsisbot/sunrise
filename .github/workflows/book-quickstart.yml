@@ -186,6 +186,16 @@ jobs:
         run: >-
           cargo test --locked -p cargo-sunrise-mod --test addon --
           --ignored --exact builds_and_checks_a_native_addon_with_local_libraries
+      - name: A library built against another build of its dependency is refused
+        if: inputs.own_sdk
+        run: >-
+          cargo test --locked -p cargo-sunrise-mod --test dependency_identity --
+          --ignored --exact a_library_built_against_another_build_of_a_native_dependency_is_refused
+      - name: A library whose crates another mod changed is refused
+        if: inputs.own_sdk
+        run: >-
+          cargo test --locked -p cargo-sunrise-mod --test dependency_identity --
+          --ignored --exact a_library_whose_crates_another_mod_changed_is_refused_beside_its_dependent
       - name: Installed native rows bend and route a client model
         if: inputs.own_sdk
         run: >-

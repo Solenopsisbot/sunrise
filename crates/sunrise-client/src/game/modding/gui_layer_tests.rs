@@ -3,13 +3,13 @@ use super::{
     Game, Screen,
     execution_role::ExecutionRole,
     mods,
-    native_entity_refs::tests::{run_fresh_cases, with_client_game},
+    native_entity_refs::tests::{fixture_root, run_fresh_cases, with_client_game, with_game_role},
 };
 use mod_api::{
     ClientHost, Flow, GuiLayerPlacement, GuiLayerPostEvent, GuiLayerPreEvent, Hooks, ModEntry,
     PlayerHeartTypeEvent, RegisterGuiLayersEvent, RegistrationContext, RenderGuiPostEvent,
     RenderGuiPreEvent, ScreenRenderBackgroundEvent, ScreenRenderPostEvent, ScreenRenderPreEvent,
-    client::hud_layout::GuiDraw, content::crash::current_native_mod,
+    content::crash::current_native_mod,
 };
 use std::sync::{Arc, Mutex};
 use sunrise_client::{
@@ -22,6 +22,8 @@ use sunrise_core::geometry::Vec3;
 
 #[path = "gui_layer_tests/hidden_panic.rs"]
 mod hidden_panic;
+#[path = "gui_layer_tests/status_heights.rs"]
+mod status_heights;
 
 static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -193,13 +195,9 @@ impl Hooks for HealthLayer {
                 PLAYER_HEALTH,
                 Box::new(move |_, draw| {
                     trace.lock().unwrap().calls.push("replacement");
-                    draw.gui_paint(&[GuiDraw::Fill {
-                        x0: 80,
-                        y0: 100,
-                        x1: 150,
-                        y1: 104,
-                        color: HEALTH_MARKER,
-                    }])
+                    draw.draw_gui(&mut |canvas| {
+                        canvas.fill([80.0, 100.0, 70.0, 4.0], HEALTH_MARKER)
+                    })
                     .unwrap();
                 }),
             ));
@@ -526,7 +524,7 @@ fn mod_layers_draw_in_their_place_and_hide_like_vanilla_layers() {
             [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]]
         );
 
-        // With the HUD hidden (F1), vanilla's sleep overlay and ungated layers still draw.
+        // A vanilla layer still paints when the inserted-layer cursor is inactive.
         game.gui_layer(VanillaGuiLayer::SleepOverlay, &mut batch, &mut |_, _| {
             log("sleep paint")
         });
@@ -544,7 +542,211 @@ fn mod_layers_draw_in_their_place_and_hide_like_vanilla_layers() {
 
 #[test]
 #[ignore = "daily"]
+fn failed_gui_layer_keeps_completed_paint_and_isolates_following_layers() {
+    use mod_api::{
+        __private::{HookPanicReport, take_hook_panics},
+        GuiClipRefusal, GuiDrawError,
+        client::hud_layout::PoseOp,
+    };
+    use sunrise_client::hud::rgba;
+
+    fn color_bounds(batch: &HudBatch, color: u32) -> Option<[f32; 4]> {
+        batch
+            .vertices
+            .iter()
+            .filter(|v| v.color == color)
+            .fold(None, |acc, v| {
+                let [x0, y0, x1, y1] = acc.unwrap_or([v.pos[0], v.pos[1], v.pos[0], v.pos[1]]);
+                Some([
+                    x0.min(v.pos[0]),
+                    y0.min(v.pos[1]),
+                    x1.max(v.pos[0]),
+                    y1.max(v.pos[1]),
+                ])
+            })
+    }
+
+    crate::game::in_own_process(
+        "game::gui_layer_tests::failed_gui_layer_keeps_completed_paint_and_isolates_following_layers",
+        || {
+            struct CheckedLayer;
+            #[mod_api::__subscriptions]
+            impl Hooks for CheckedLayer {
+                fn register_gui_layers(
+                    &self,
+                    _: &RegistrationContext,
+                    event: &mut RegisterGuiLayersEvent<'_>,
+                ) {
+                    assert!(event.layers.register(
+                        "hud_test:checked".into(),
+                        GuiLayerPlacement::AboveAll,
+                        Box::new(|_, draw| {
+                            // Pose stays lexical to draw_gui/scope; malformed draw/clip checks
+                            // stay independent of layer containment.
+                            assert_eq!(
+                                draw.draw_gui(&mut |canvas| {
+                                    canvas.scope(
+                                        &[PoseOp::Translate(50.0, 50.0)],
+                                        None,
+                                        &mut |_| Ok(()),
+                                    )
+                                }),
+                                Ok(())
+                            );
+                            assert_eq!(
+                                draw.with_scissor([f32::NAN, 0.0, 1.0, 1.0], &mut |_| {
+                                    unreachable!()
+                                }),
+                                Err(GuiClipRefusal::NotFinite)
+                            );
+                            draw.with_scissor([10.0, 10.0, 5.0, 5.0], &mut |draw| {
+                                draw.fill([0.0, 0.0, 100.0, 100.0], 0xFFFF_0000);
+                                assert_eq!(
+                                    draw.draw_gui(&mut |canvas| {
+                                        canvas.fill([10.0, 10.0, 5.0, 5.0], 0xFFFF_FF00)?;
+                                        Err(GuiDrawError::Abort)
+                                    }),
+                                    Err(GuiDrawError::Abort)
+                                );
+                            })
+                            .unwrap();
+                            log("checked");
+                        }),
+                    ));
+                }
+            }
+
+            struct PanickingLayer;
+            #[mod_api::__subscriptions]
+            impl Hooks for PanickingLayer {
+                fn register_gui_layers(
+                    &self,
+                    _: &RegistrationContext,
+                    event: &mut RegisterGuiLayersEvent<'_>,
+                ) {
+                    assert!(event.layers.register(
+                        "hud_test:panicking".into(),
+                        GuiLayerPlacement::AboveAll,
+                        Box::new(|_, draw| {
+                            let _ = draw.with_scissor([20.0, 20.0, 4.0, 4.0], &mut |draw| {
+                                draw.fill([0.0, 0.0, 100.0, 100.0], 0xFF00_00FF);
+                                log("panicking");
+                                panic!("broken layer");
+                            });
+                        }),
+                    ));
+                }
+            }
+
+            struct NextLayer;
+            #[mod_api::__subscriptions]
+            impl Hooks for NextLayer {
+                fn register_gui_layers(
+                    &self,
+                    _: &RegistrationContext,
+                    event: &mut RegisterGuiLayersEvent<'_>,
+                ) {
+                    assert!(event.layers.register(
+                        "hud_test:next".into(),
+                        GuiLayerPlacement::AboveAll,
+                        Box::new(|_, draw| {
+                            draw.fill([0.0, 0.0, 100.0, 100.0], 0xFF00_FF00);
+                            log("next");
+                        }),
+                    ));
+                }
+                fn gui_layer_post(&self, _: &dyn ClientHost, event: &mut GuiLayerPostEvent<'_>) {
+                    log(format!("post {}", event.layer));
+                }
+            }
+
+            with_client_game(|game| {
+                mod_platform::__private::install(
+                    vec![
+                        ModEntry::new("checked_layer", Box::new(CheckedLayer)),
+                        ModEntry::new("panicking_layer", Box::new(PanickingLayer)),
+                        ModEntry::new("next_layer", Box::new(NextLayer)),
+                    ]
+                    .into(),
+                );
+                mods::register_gui_layers(ExecutionRole::Client);
+                let red = rgba(255, 0, 0, 255);
+                let blue = rgba(0, 0, 255, 255);
+                let green = rgba(0, 255, 0, 255);
+
+                let mut batch = HudBatch::scratch([320, 240]);
+                game.hud_layer_next = Some(0);
+                game.draw_mod_gui_layers(None, &mut batch);
+                assert_eq!(
+                    take(),
+                    [
+                        "checked",
+                        "post hud_test:checked",
+                        "panicking",
+                        "post hud_test:panicking",
+                        "next",
+                        "post hud_test:next",
+                    ]
+                );
+                assert_eq!(
+                    batch.vertices.iter().map(|v| v.color).collect::<Vec<_>>(),
+                    [[red; 6], [blue; 6], [green; 6]].concat()
+                );
+                assert_eq!(color_bounds(&batch, red), Some([0.0, 0.0, 100.0, 100.0]));
+                assert_eq!(color_bounds(&batch, blue), Some([0.0, 0.0, 100.0, 100.0]));
+                assert_eq!(color_bounds(&batch, green), Some([0.0, 0.0, 100.0, 100.0]));
+                assert_eq!(color_bounds(&batch, rgba(255, 255, 0, 255)), None);
+                assert_eq!(
+                    batch.scissors_in(0..18).collect::<Vec<_>>(),
+                    [
+                        (0..6, Some([10.0, 10.0, 15.0, 15.0])),
+                        (6..12, Some([20.0, 20.0, 24.0, 24.0])),
+                        (12..18, None),
+                    ]
+                );
+                assert_eq!(
+                    take_hook_panics(),
+                    [HookPanicReport {
+                        mod_id: "panicking_layer",
+                        hook: "gui_layer_draw",
+                    }]
+                );
+
+                // The layer with a draw error still runs; the panicking layer stays disabled.
+                let mut batch = HudBatch::scratch([320, 240]);
+                game.hud_layer_next = Some(0);
+                game.draw_mod_gui_layers(None, &mut batch);
+                assert_eq!(
+                    take(),
+                    [
+                        "checked",
+                        "post hud_test:checked",
+                        "post hud_test:panicking",
+                        "next",
+                        "post hud_test:next",
+                    ]
+                );
+                assert_eq!(
+                    batch.vertices.iter().map(|v| v.color).collect::<Vec<_>>(),
+                    [[red; 6], [green; 6]].concat()
+                );
+                assert_eq!(color_bounds(&batch, red), Some([0.0, 0.0, 100.0, 100.0]));
+                assert_eq!(color_bounds(&batch, blue), None);
+                assert_eq!(color_bounds(&batch, green), Some([0.0, 0.0, 100.0, 100.0]));
+                assert_eq!(
+                    batch.scissors_in(0..12).collect::<Vec<_>>(),
+                    [(0..6, Some([10.0, 10.0, 15.0, 15.0])), (6..12, None)]
+                );
+                assert!(take_hook_panics().is_empty());
+            });
+        },
+    );
+}
+
+#[test]
+#[ignore = "daily"]
 fn a_gui_wrapper_panic_is_contained_but_delegated_engine_paint_is_fatal() {
+    use mod_api::__private::{HookPanicReport, take_hook_panics};
     use sunrise_client::hud::{Blend, rgba};
 
     let test = "game::gui_layer_tests::a_gui_wrapper_panic_is_contained_but_delegated_engine_paint_is_fatal";
@@ -568,8 +770,13 @@ fn a_gui_wrapper_panic_is_contained_but_delegated_engine_paint_is_fatal() {
                             ctx.draw_previous();
                             ctx.with_draw(&mut |draw| draw.fill([0.0, 0.0, 4.0, 4.0], 0xFF00_00FF));
                             ctx.draw_previous();
-                            ctx.with_draw(&mut |draw| draw.fill([0.0, 0.0, 4.0, 4.0], 0xFFFF_0000));
-                            panic!("broken wrapper");
+                            ctx.with_draw(&mut |draw| {
+                                let _ = draw.with_scissor([0.0, 0.0, 4.0, 4.0], &mut |draw| {
+                                    draw.fill([0.0, 0.0, 20.0, 20.0], 0xFFFF_0000);
+                                    panic!("broken wrapper");
+                                });
+                            });
+                            return;
                         }
                         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             ctx.draw_previous();
@@ -595,6 +802,8 @@ fn a_gui_wrapper_panic_is_contained_but_delegated_engine_paint_is_fatal() {
             mods::register_gui_layers(ExecutionRole::Client);
             let mut batch = HudBatch::scratch([320, 240]);
             let white = rgba(255, 255, 255, 255);
+            let red = rgba(255, 0, 0, 255);
+            let blue = rgba(0, 0, 255, 255);
             let green = rgba(0, 255, 0, 255);
             let yellow = rgba(255, 255, 0, 255);
             let mut paint_calls = 0;
@@ -620,11 +829,30 @@ fn a_gui_wrapper_panic_is_contained_but_delegated_engine_paint_is_fatal() {
             );
             assert_eq!(
                 batch.vertices.iter().map(|v| v.color).collect::<Vec<_>>(),
-                [[white; 6], [green; 6], [yellow; 6]].concat()
+                [
+                    [white; 6],
+                    [red; 6],
+                    [green; 6],
+                    [blue; 6],
+                    [yellow; 6],
+                    [red; 6],
+                ]
+                .concat()
+            );
+            assert_eq!(
+                batch.scissors_in(0..36).collect::<Vec<_>>(),
+                [(0..30, None), (30..36, Some([0.0, 0.0, 4.0, 4.0]))]
             );
             assert_eq!(
                 batch.blends,
-                [(6..12, Blend::Invert), (12..18, Blend::Invert)]
+                [(12..18, Blend::Invert), (24..30, Blend::Invert)]
+            );
+            assert_eq!(
+                take_hook_panics(),
+                [HookPanicReport {
+                    mod_id: "broken",
+                    hook: "gui_layer_wrapper",
+                }]
             );
 
             let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -641,6 +869,7 @@ fn a_gui_wrapper_panic_is_contained_but_delegated_engine_paint_is_fatal() {
                 ["outer", "inner", "caught by inner", "caught by outer"]
             );
             assert_eq!(current_native_mod(), None);
+            assert!(take_hook_panics().is_empty());
 
             game.gui_layer(VanillaGuiLayer::Hotbar, &mut batch, &mut |_, _| {
                 log("vanilla paint");
@@ -1688,4 +1917,201 @@ fn a_panicking_hud_painter_shows_its_error_toast_under_f1() {
             );
         });
     });
+}
+
+#[test]
+#[ignore = "daily"]
+fn render_gui_post_runs_after_hud_layers_respects_hiding_and_exposes_layer_bounds() {
+    use mod_api::LevelReadError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let test = "game::gui_layer_tests::render_gui_post_runs_after_hud_layers_respects_hiding_and_exposes_layer_bounds";
+    crate::game::in_own_process(test, || {
+        static CANCEL_PRE: AtomicBool = AtomicBool::new(false);
+        type Bounds = Result<Option<[f32; 4]>, LevelReadError>;
+        static HUD_BOUNDS: Mutex<Option<[Bounds; 4]>> = Mutex::new(None);
+        static SCREEN_BOUNDS: Mutex<Option<Bounds>> = Mutex::new(None);
+
+        struct PostHudObserver;
+        #[mod_api::__subscriptions]
+        impl Hooks for PostHudObserver {
+            fn register_gui_layers(
+                &self,
+                _: &RegistrationContext,
+                event: &mut RegisterGuiLayersEvent<'_>,
+            ) {
+                assert!(event.layers.register(
+                    "post_test:top".into(),
+                    GuiLayerPlacement::AboveAll,
+                    Box::new(|_, draw| {
+                        log("layer post_test:top");
+                        draw.fill([12.0, 18.0, 20.0, 10.0], 0xFF00_FF00);
+                    }),
+                ));
+            }
+            fn render_gui_pre(&self, _: &dyn ClientHost, _: &mut RenderGuiPreEvent) -> Flow {
+                log("render_gui_pre");
+                if CANCEL_PRE.load(Ordering::Relaxed) {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+            fn gui_layer_post(&self, _: &dyn ClientHost, event: &mut GuiLayerPostEvent<'_>) {
+                if matches!(
+                    event.layer,
+                    "minecraft:boss_overlay"
+                        | "minecraft:sleep_overlay"
+                        | "minecraft:subtitle_overlay"
+                        | "minecraft:tab_list"
+                        | "post_test:top"
+                ) {
+                    log(format!("layer_post {}", event.layer));
+                }
+            }
+            fn render_gui_post(&self, host: &dyn ClientHost, event: &mut RenderGuiPostEvent<'_>) {
+                log("render_gui_post");
+                *HUD_BOUNDS.lock().unwrap() = Some([
+                    host.hud_layer_bounds("minecraft:effects"),
+                    host.hud_layer_bounds("minecraft:sleep_overlay"),
+                    host.hud_layer_bounds("post_test:top"),
+                    host.hud_layer_bounds("post_test:missing"),
+                ]);
+                event.draw.fill([4.0, 4.0, 8.0, 8.0], 0xFFFF_00FF);
+            }
+            fn screen_render_pre(
+                &self,
+                _: &dyn ClientHost,
+                event: &mut ScreenRenderPreEvent<'_>,
+            ) -> Flow {
+                log(format!("screen_pre {}", event.screen.id));
+                Flow::Continue
+            }
+            fn screen_render_post(
+                &self,
+                host: &dyn ClientHost,
+                event: &mut ScreenRenderPostEvent<'_>,
+            ) {
+                *SCREEN_BOUNDS.lock().unwrap() = Some(host.hud_layer_bounds("post_test:top"));
+                log(format!("screen_post {}", event.screen.id));
+            }
+        }
+
+        with_client_game(|game| {
+            mod_platform::__private::install(
+                vec![ModEntry::new("post_hud", Box::new(PostHudObserver))].into(),
+            );
+            mods::register_gui_layers(ExecutionRole::Client);
+            enter_test_world(game);
+            game.set_screen(Screen::Paused);
+            let speed = sunrise_client::brewing::effect("speed")
+                .expect("vanilla speed effect")
+                .id;
+            game.potions
+                .effects
+                .add(sunrise_client::effects::EffectInstance::new(speed, 200, 0));
+
+            // Post comes after every HUD layer, but before even ScreenEvent.Render.Pre.
+            game.hud([320, 240]);
+            assert_eq!(
+                take(),
+                [
+                    "render_gui_pre",
+                    "layer_post minecraft:boss_overlay",
+                    "layer_post minecraft:sleep_overlay",
+                    "layer_post minecraft:subtitle_overlay",
+                    "layer_post minecraft:tab_list",
+                    "layer post_test:top",
+                    "layer_post post_test:top",
+                    "render_gui_post",
+                    "screen_pre paused",
+                    "screen_post paused",
+                ]
+            );
+            let [effects, sleep, custom, missing] = HUD_BOUNDS.lock().unwrap().take().unwrap();
+            assert_eq!(effects, Ok(Some([295.0, 1.0, 24.0, 24.0])));
+            assert_eq!(sleep, Ok(None));
+            assert_eq!(custom, Ok(Some([12.0, 18.0, 20.0, 10.0])));
+            assert_eq!(missing, Ok(None));
+            assert_eq!(SCREEN_BOUNDS.lock().unwrap().take(), Some(Ok(None)));
+
+            // F1 stops ordinary vanilla HUD paint, not the slot walk. Sleep still paints
+            // and the subtitle body can schedule deferred paint on this screen.
+            game.ui.hide_gui = true;
+            game.sleep_timer = 50;
+            game.screen = super::Screen::BlockEditor;
+            game.hud([320, 240]);
+            assert_eq!(
+                take(),
+                [
+                    "render_gui_pre",
+                    "layer_post minecraft:boss_overlay",
+                    "layer_post minecraft:sleep_overlay",
+                    "layer_post minecraft:subtitle_overlay",
+                    "layer_post minecraft:tab_list",
+                    "layer post_test:top",
+                    "layer_post post_test:top",
+                    "render_gui_post",
+                    "screen_pre block_editor",
+                    "screen_post block_editor",
+                ]
+            );
+            let [effects, sleep, _, _] = HUD_BOUNDS.lock().unwrap().take().unwrap();
+            assert_eq!(effects, Ok(None));
+            assert_eq!(sleep, Ok(Some([0.0, 0.0, 320.0, 240.0])));
+
+            // A canceled Pre skips even those two slots, but still draws the screen.
+            CANCEL_PRE.store(true, Ordering::Relaxed);
+            let canceled = game.hud([320, 240]);
+            assert_eq!(canceled.blur_at, 0, "HUD paint leaked into a canceled pass");
+            assert_eq!(
+                take(),
+                [
+                    "render_gui_pre",
+                    "screen_pre block_editor",
+                    "screen_post block_editor"
+                ]
+            );
+            assert!(HUD_BOUNDS.lock().unwrap().take().is_none());
+            CANCEL_PRE.store(false, Ordering::Relaxed);
+            game.ui.hide_gui = false;
+
+            // The same Options screen also exists without a world. Only the in-world route
+            // runs the HUD pass, before the screen; a screen hook never sees its bounds.
+            game.open_options(false);
+            game.hud([320, 240]);
+            let events = take();
+            assert!(
+                events.iter().map(String::as_str).rev().take(3).eq([
+                    "screen_post options",
+                    "screen_pre options",
+                    "render_gui_post",
+                ]),
+                "unexpected Options order: {events:?}"
+            );
+            assert_eq!(SCREEN_BOUNDS.lock().unwrap().take(), Some(Ok(None)));
+
+            let saves = tempfile::tempdir().unwrap();
+            game.title = Some(game.new_title(saves.path().to_path_buf()));
+            game.open_options(true);
+            game.hud([320, 240]);
+            assert_eq!(take(), ["screen_pre options", "screen_post options"]);
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn hud_layer_bounds_rejects_dedicated_server_role() {
+    crate::game::in_own_process(
+        "game::gui_layer_tests::hud_layer_bounds_rejects_dedicated_server_role",
+        || {
+            with_game_role(fixture_root(), ExecutionRole::DedicatedServer, |game| {
+                assert_eq!(
+                    game.hud_layer_bounds("minecraft:effects"),
+                    Err(mod_api::LevelReadError::Unavailable)
+                );
+            });
+        },
+    );
 }

@@ -45,8 +45,12 @@ pub struct HudAtlas {
     /// sprites and the walked files a GUI entry stands on.
     pub non_gui: HashSet<String>,
     /// A registered atlas's sprites by their GUI names (`mymod:gui/atlases/icons/mymod/heart`),
-    /// each packed under a key of its own so that no model or GUI sprite can take its place.
+    /// with UVs local to their atlas texture, distinct from model or vanilla GUI sprites.
     pub registered: HashMap<String, Rect>,
+    pub(super) registered_owners: HashMap<String, usize>,
+    pub(crate) registered_pages: Vec<RegisteredAtlasPage>,
+    /// The dimension this generation was stitched against; absent on font-only or boot atlases.
+    pub stitch_limit: Option<u32>,
     /// The live (dynamic) textures by GUI id, a lane of their own: the GUI lookup reads it first,
     /// and no reload of another lane writes it ([`dynamic_textures::Names`]).
     pub live: HashMap<String, Rect>,
@@ -75,17 +79,17 @@ pub struct HudAtlas {
     pub text_shaders: crate::gfx::core_text::TextShaders,
     /// A resource pack's own `core/rendertype_lines` shader for the block outline, translated;
     /// none draws the outline natively.
-    pub lines_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    pub lines_shader: Option<std::sync::Arc<sunrise_glsl::Translated>>,
     /// Its Polytone expression uniforms (`shader_modifiers`), resolved when it loaded.
     pub lines_expressions: Vec<crate::polytone_post::ExpressionUniform>,
     /// The packs' `core/sky` and `core/stars`, when a pack replaces them.
-    pub sky_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
-    pub stars_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    pub sky_shader: Option<std::sync::Arc<sunrise_glsl::Translated>>,
+    pub stars_shader: Option<std::sync::Arc<sunrise_glsl::Translated>>,
     /// Their Polytone expression uniforms, resolved when they loaded.
     pub sky_expressions: Vec<crate::polytone_post::ExpressionUniform>,
     pub stars_expressions: Vec<crate::polytone_post::ExpressionUniform>,
     /// The packs' `core/lightmap` (with `core/screenquad`), when a pack replaces either stage.
-    pub lightmap_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    pub lightmap_shader: Option<std::sync::Arc<sunrise_glsl::Translated>>,
     /// Its Polytone expression uniforms (`shader_modifiers`), resolved when it loaded: the
     /// blocks its stages read, with their programs.
     pub lightmap_expressions: Vec<crate::polytone_post::ExpressionUniform>,
@@ -109,6 +113,16 @@ pub struct HudAtlas {
     /// ([`HudAtlas::build_over_with_dynamic_textures`]); their names are not among `sprites`.
     pub dynamic_texture_pool: Option<dynamic_textures::Pool>,
 }
+/// The CPU image and animations of one registered atlas, kept across renderer rebuilds.
+pub(crate) struct RegisteredAtlasPage {
+    pub(crate) atlas: String,
+    pub(crate) mod_id: Option<&'static str>,
+    pub(crate) size: [u32; 2],
+    pub(crate) pixels: Vec<u8>,
+    pub(crate) animations: Vec<(Rect, crate::sprites::SpriteAnimation)>,
+    pub(crate) animation_placements: Vec<AnimatedPlacement>,
+}
+
 /// Atlas rows reserved for glyphs rasterized at run time.
 pub const GLYPH_ROWS: u32 = 512;
 /// The largest atlas side: the 2D texture limit of the GPUs Sunrise runs on
@@ -295,7 +309,11 @@ impl HudAtlas {
     /// API). They are compressed on a thread of their own; `pixels()` waits
     /// for it.
     pub fn pack_pixels(&mut self) {
-        if self.pixels.is_empty() || self.packed.is_some() {
+        // lz4_flex's packed representation prefixes the uncompressed length as u32.
+        if self.pixels.is_empty()
+            || self.packed.is_some()
+            || u32::try_from(self.pixels.len()).is_err()
+        {
             return;
         }
         let raw = Arc::new(std::mem::take(&mut self.pixels));
@@ -315,7 +333,7 @@ impl HudAtlas {
     /// texture's; else the GUI list's own (a removed or failed entry ends the search); else, where
     /// the list says nothing of the id, a registered atlas's sprite of the name, and last a packed
     /// sprite no model or GUI entry owns.
-    pub(super) fn gui_present(&self, id: &str) -> Option<(&Rect, Option<crate::ui::NineSlice>)> {
+    pub(super) fn gui_present(&self, id: &str) -> Option<(&Rect, Option<crate::ui::Scaling>)> {
         if let Some(rect) = self.live.get(id) {
             return Some((rect, None));
         }
@@ -357,6 +375,33 @@ impl HudAtlas {
                 .flatten(),
         }
     }
+    pub(crate) fn gui_atlas_page(&self, name: &str) -> Option<usize> {
+        let name = name.strip_prefix("minecraft:").unwrap_or(name);
+        if self.live.contains_key(name) || self.gui.contains_key(name) {
+            return None;
+        }
+        self.registered_owners.get(name).copied()
+    }
+    /// A raw texture uses its own page only if the base atlas has no sprite of that name.
+    pub fn texture_atlas_page(&self, name: &str) -> Option<usize> {
+        if self.sprites.contains_key(name) {
+            return None;
+        }
+        // Registered names drop the `minecraft:` namespace, as GUI lookups do.
+        self.registered_owners
+            .get(name.strip_prefix("minecraft:").unwrap_or(name))
+            .copied()
+    }
+    pub fn blit_atlas_page(&self, name: &str) -> Option<usize> {
+        if self
+            .live
+            .contains_key(name.strip_prefix("minecraft:").unwrap_or(name))
+        {
+            return None;
+        }
+        self.texture_atlas_page(name)
+    }
+
     /// [`HudAtlas::gui_rect`] for a draw: an id the atlas lacks draws the missing texture, as vanilla's atlas does.
     pub fn gui_draw_rect(&self, id: &str) -> Option<&Rect> {
         if let Some(rect) = self.gui_rect(id) {
@@ -370,9 +415,12 @@ impl HudAtlas {
         self.sprites.get(MISSING_SPRITE)
     }
     /// The rect of a texture by its exact name: the packed sprite, else a registered atlas's
-    /// sprite. The raw lookup of the camera draw; a GUI id goes through [`HudAtlas::gui_lookup`].
+    /// sprite, whose name may carry the `minecraft:` namespace. The raw lookup of the camera draw; a GUI id goes through [`HudAtlas::gui_lookup`].
     pub fn texture_rect(&self, name: &str) -> Option<&Rect> {
-        self.sprites.get(name).or_else(|| self.registered.get(name))
+        self.sprites.get(name).or_else(|| {
+            self.registered
+                .get(name.strip_prefix("minecraft:").unwrap_or(name))
+        })
     }
     /// The rect of a `Blit` texture by its name: a live texture's first, else
     /// [`HudAtlas::texture_rect`]. One lookup for the refusal and the draw.
@@ -449,6 +497,10 @@ impl HudAtlas {
     pub fn build(root: &ResourceSource) -> Result<Self> {
         Self::build_over(root, root)
     }
+    /// [`Self::build`] bounded by the GPU's `max_texture_dimension_2d` limit.
+    pub fn build_with_limit(root: &ResourceSource, max_atlas_size: u32) -> Result<Self> {
+        Self::build_over_with_dynamic_textures_and_limit(root, root, root, false, max_atlas_size)
+    }
     /// The atlas of a resource root that layers packs over `defaults` (the
     /// game's own resources), whose textures give the sprites' GUI sizes.
     pub fn build_over(root: &ResourceSource, defaults: &ResourceSource) -> Result<Self> {
@@ -466,7 +518,25 @@ impl HudAtlas {
         game: &ResourceSource,
         pool: bool,
     ) -> Result<Self> {
-        let mut atlas = Self::pack(root, defaults, WALKED_TEXTURE_FOLDERS, true, pool)?;
+        Self::build_over_with_dynamic_textures_and_limit(root, defaults, game, pool, MAX_ATLAS_SIZE)
+    }
+    /// [`Self::build_over_with_dynamic_textures`] bounded by the renderer device's actual
+    /// `max_texture_dimension_2d` limit (`TextureAtlas.maxSupportedTextureSize` in vanilla 26.3).
+    pub fn build_over_with_dynamic_textures_and_limit(
+        root: &ResourceSource,
+        defaults: &ResourceSource,
+        game: &ResourceSource,
+        pool: bool,
+        max_atlas_size: u32,
+    ) -> Result<Self> {
+        let mut atlas = Self::pack(
+            root,
+            defaults,
+            WALKED_TEXTURE_FOLDERS,
+            true,
+            pool,
+            max_atlas_size,
+        )?;
         atlas.dynamic_texture_pool =
             dynamic_textures::Pool::take(&mut atlas.sprites, atlas.width, atlas.height);
         pack_text::load_shaders(&mut atlas, root, game)?;
@@ -548,6 +618,9 @@ impl HudAtlas {
             gui: HashMap::new(),
             non_gui: HashSet::new(),
             registered: HashMap::new(),
+            registered_owners: HashMap::new(),
+            registered_pages: Vec::new(),
+            stitch_limit: None,
             live: HashMap::new(),
             object_skins: HashMap::new(),
             object_skins_revision: Self::next_revision(),
@@ -643,6 +716,9 @@ impl HudAtlas {
             gui: HashMap::new(),
             non_gui: HashSet::new(),
             registered: HashMap::new(),
+            registered_owners: HashMap::new(),
+            registered_pages: Vec::new(),
+            stitch_limit: None,
             live: HashMap::new(),
             object_skins: HashMap::new(),
             object_skins_revision: Self::next_revision(),

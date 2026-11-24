@@ -24,6 +24,19 @@ impl OfflineSdk {
     /// A signed `sdk-<commit>` release, with `build_data`'s files as its `build-data.tar.xz` when
     /// given.
     pub fn release(&self, commit: &str, mixins: &str, build_data: Option<&[(&str, Vec<u8>)]>) {
+        let surface = format!(r#"{{"schema":{},"hash":"ab"}}"#, mod_surface::SCHEMA);
+        self.release_with_surface(commit, mixins, build_data, &surface);
+    }
+
+    /// A signed `sdk-<commit>` release whose `surface.json` is `surface` (one this tool may refuse
+    /// to read), with `build_data`'s files as its `build-data.tar.xz` when given.
+    pub fn release_with_surface(
+        &self,
+        commit: &str,
+        mixins: &str,
+        build_data: Option<&[(&str, Vec<u8>)]>,
+        surface: &str,
+    ) {
         let tag = format!("sdk-{commit}");
         let folder = self.base.join(&tag);
         fs::create_dir_all(&folder).unwrap();
@@ -40,10 +53,9 @@ impl OfflineSdk {
         }
         // A test may put its own surface in the folder first, such as one of a schema this tool
         // no longer reads.
-        let surface = folder.join("surface.json");
-        if !surface.exists() {
-            let text = format!(r#"{{"schema":{},"hash":"ab"}}"#, mod_surface::SCHEMA);
-            fs::write(&surface, text).unwrap();
+        let path = folder.join("surface.json");
+        if !path.exists() {
+            fs::write(&path, surface).unwrap();
         }
         // Repinning also fetches the project's API archive. These tests have no Rust sources to scan.
         fs::write(

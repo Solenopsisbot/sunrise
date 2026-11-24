@@ -141,7 +141,7 @@ fn inventory_slots_are_read_and_written_by_vanillas_numbers() {
 }
 
 /// Each refusal has its own name and writes nothing: a slot past 42 (never a panic), a stack
-/// the item does not allow, a dead player, and a handle whose player has left.
+/// the item does not allow, and a handle whose player has left.
 #[test]
 #[ignore = "daily"]
 fn each_inventory_refusal_has_its_own_name_and_writes_nothing() {
@@ -176,22 +176,15 @@ fn each_inventory_refusal_has_its_own_name_and_writes_nothing() {
             .unwrap()
             .hub
             .guests
-            .update_connection(13, |g| g.dead = true);
+            .update_connection(13, |g| {
+                g.dead = true;
+                g.health = 0.0;
+            });
+        assert_eq!(b.set_inventory_slot(game, 40, Some(rock.clone())), Ok(()));
         assert_eq!(
-            b.set_inventory_slot(game, 0, Some(rock.clone())),
-            Err(PlayerDataRefusal::Dead)
+            guest(game, 13).offhand.as_ref().unwrap().item.as_ref(),
+            "minecraft:stone"
         );
-        assert_eq!(
-            b.with_inventory(game, |view| view.iter().next().is_none()),
-            Some(true),
-            "a dead player is read, not written"
-        );
-        game.lan
-            .as_mut()
-            .unwrap()
-            .hub
-            .guests
-            .update_connection(13, |g| g.dead = false);
         let index = game
             .lan
             .as_ref()

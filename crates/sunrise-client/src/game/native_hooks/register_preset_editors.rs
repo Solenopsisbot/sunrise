@@ -337,9 +337,11 @@ mod tests {
                 _rect: [f32; 4],
                 _draft: &mut PresetEditorDraft<'_>,
             ) {
-                draw.push_clip([8.0, 20.0, 32.0, 24.0]).unwrap();
-                draw.fill([12.0, 24.0, 10.0, 10.0], 0xFFFF00FF);
-                panic!("preset editor failed after painting");
+                draw.with_scissor([8.0, 20.0, 32.0, 24.0], &mut |draw| {
+                    draw.fill([12.0, 24.0, 10.0, 10.0], 0xFFFF00FF);
+                    panic!("preset editor failed after painting");
+                })
+                .unwrap();
             }
         }
 

@@ -22,15 +22,19 @@ known state reads as `Ok(None)`; unavailable metadata, invalid states and refuse
 | `replaceable(state) -> Option<bool>` | `BlockState.canBeReplaced()` |
 | `destroy_speed(state) -> Option<f32>` | `BlockBehaviour.Properties.destroyTime` (`getDestroySpeed`): stone 1.5, -1 unbreakable |
 | `requires_correct_tool(state) -> Option<bool>` | `BlockState.requiresCorrectToolForDrops()`: stone and ores true, dirt and logs false; which tool is correct for a state is `BlockStates::is_correct_tool_for_drops` |
-| `sound(state) -> Option<BlockSoundType>` | `BlockState.getSoundType()`: volume, pitch and the break, step, place, hit and fall events |
+| `sound(state) -> Option<BlockSoundType>` | `BlockState.getSoundType()`: sound type identity, base volume and pitch, and the validated break, step, place, hit and fall event keys |
 | `has_block_entity(state) -> Option<bool>` | `BlockState.hasBlockEntity()` |
 | `light_emission(state) -> Option<u8>` | `BlockState.getLightEmission()`: 0 to 15; a block with `dynamic_light` answers per cell through its parts, which this does not ask |
 | `friction(state) -> Option<f32>` | `BlockBehaviour.getFriction()` of the block: 0.6 usually, 0.98 ice, 0.8 slime |
+| `speed_factor(state) -> Option<f32>` | `Block.getSpeedFactor()`: 1.0 usually, 0.4 soul sand and honey; the declared value, which a block's `block_speed_factor` part can change where an entity stands |
+| `jump_factor(state) -> Option<f32>` | `Block.getJumpFactor()`: 1.0 usually, 0.5 honey; the declared value, which a block's `block_jump_factor` part can change |
 | `is_solid_render(state) -> Option<bool>` | `BlockState.isSolidRender()`: a full, occluding cube (stone yes; glass, leaves, slabs no) |
+| `propagates_skylight_down(state) -> Option<bool>` | `BlockState.propagatesSkylightDown()`: sky light passes down unchanged, the block's own answer included (glass and air yes, stone no) |
+| `is_air(state) -> Option<bool>` | `BlockState.isAir()`: air, cave air and void air, by the block's flag rather than the `#minecraft:air` tag |
 | `is_redstone_conductor(state) -> Option<bool>` | `BlockState.isRedstoneConductor` when it depends only on the block state; `None` when a position is needed |
 | `map_color(state) -> Option<u8>` | `BlockState.getMapColor`: the `MapColor.id` a map item colours a column by, 0 for none |
 | `map_color_rgba(packed) -> Option<[u8; 4]>` | `MapColor.getColorFromPackedId`: decode a map pixel to `[red, green, blue, alpha]`; ID 0 and undefined IDs decode to transparent RGBA; `None` means no game backend |
-| `block_class(state, class: BlockClass) -> Result<Option<bool>, LevelReadError>` | Java `instanceof` on the block's vanilla class, subclasses included: `Stair`, `Entity` (`EntityBlock`), `IronBars`, `StainedGlassPane`, `TrapDoor`. See below |
+| `block_class(state, class: BlockClass) -> Result<Option<bool>, LevelReadError>` | Java `instanceof` on the block's vanilla class, subclasses included: `Stair`, `Entity` (`EntityBlock`), `IronBars`, `StainedGlassPane`, `TrapDoor`, `Bonemealable` (`BonemealableBlock`). See below |
 | `piston_push_reaction(state) -> Result<Option<PushReaction>, LevelReadError>` | `BlockState.getPistonPushReaction()`: the resolved reaction used by pistons, including Part answers. See [piston push reactions](piston-push-reactions.md) |
 | `states_of(block) -> Option<BlockStateRange>` | `StateDefinition.getPossibleStates`, as owned values in canonical local-ordinal order |
 | `definition(block) -> Option<StateProperties<'_>>` | Borrowed property names and legal serialized values |
@@ -64,16 +68,36 @@ position).
 
 Option-only queries return `None` for an unknown state or block, including an invalid local ordinal, and on a host with no game behind it (a mod's test double). Queries returning `Result<Option<_>, LevelReadError>` distinguish unknown states (`Ok(None)`) from unavailable metadata (`Err(LevelReadError::Unavailable)`). The ordinal order is defined by the complete canonical property constraints, not by the engine's numeric enumeration.
 
+## Block sounds
+
+The facts query does not run the block's parts or check loaded sound resources. Read an event by
+name with `sound.step.as_str()`, or borrow the key for a known action with `sound.event(cause)`.
+
+To change a contextual sound through `BlockPart::sound_type`, parse its event key once during
+registration with `SoundEventKey::parse("my_mod:block.machine.step")`, handle `None` as invalid
+syntax, and keep the key on the part. For example, on `BlockSoundCause::Step`, assign
+`event.sound.step = self.step.clone()`. Both `block.stone.step` and `:block.stone.step` resolve to
+`minecraft:block.stone.step`. The game reads the event for that action and applies its usual
+volume and pitch factors. A solid bucket uses the item's placement event with those same levels.
+Block break and placement play in the Blocks category even if their event is from another namespace.
+An event missing from the active sound resources plays nothing; it never causes the block to play
+its old sound instead.
+
+Changing an event key does not change `sound.identity`: a horse chooses its hoof sound from the
+sound type's identity, not from the step or placement events. When constructing a custom
+`BlockSoundType` literal, set `identity: BlockSoundTypeIdentity::Other`.
+
 ## Contextual friction
 
 `host.block_states().friction(state)` is the static coefficient. To ask the state's friction parts,
 use `level.friction(host, pos, state, entity)` on either side. Pass `None` if no entity is asking,
-or `Some((id, kind))` to forward the caller's entity. The queried state need not be the block at
+or `Some(entity)` with the caller's live `EntityRef`. The queried state need not be the block at
 `pos`. The read never loads chunks or writes blocks. It returns `Ok(None)` for a repeated active
 query or a query beyond the nesting bound, and a read error for a stale or unavailable level
-or an unknown state.
+or entity, or an unknown state.
 
-Inside `BlockPart::friction`, match `LevelSide` to borrow the read-only level. Use
+Inside `BlockPart::friction`, match `LevelSide` to borrow the read-only level. `view.entity_kind(entity)` reads the type
+key for the entity lent in `event.entity`, without looking up other entities. Use
 `view.block_entity(pos)` to get a resident block entity's handle, then
 `view.block_entity_data(handle)` to read its saved data without identity or position metadata.
 On the client this reads the local copy, not unsynced server data; synchronize any data that
@@ -116,7 +140,7 @@ is also refused, even at another level or position; it can still ask a different
 ## Block classes
 
 `block_class(state, class)` answers what a mod would ask with `instanceof StairBlock`, `EntityBlock`,
-`IronBarsBlock`, `StainedGlassPaneBlock` or `TrapDoorBlock`. It reads the engine's own class of the
+`IronBarsBlock`, `StainedGlassPaneBlock`, `TrapDoorBlock` or `BonemealableBlock`. It reads the engine's own class of the
 block, so a subclass counts (a waxed copper stair is a `Stair`) and a mod block declared on a vanilla
 behaviour template belongs to that template's classes. It never reads tags: a pack that adds a block
 to `minecraft:stairs` does not make it a `Stair`. An unknown state answers `Ok(None)`; a host with no game
@@ -162,8 +186,9 @@ any particular state. It returns `Result<(), FluidStateError>`: `UnknownProperty
 `type_properties(key)` returns a `FluidTypeProperties` record, or `None` without a loaded registry or for
 a key it doesn't hold; `host.fluid_key(name)` is `None` for an unknown name. The record is the same in every
 level: `description_id`, `light_level`, `fall_distance_modifier`, and whether the fluid can push entities, be
-swum in, drown, extinguish, hydrate and carry boats. Flowing forms answer as their source. The empty fluid and
-tank-only fluids emit no light, do nothing to an entity and have a fall modifier of 1. Anything that depends on
+swum in, drown, extinguish, hydrate and carry boats. Flowing forms answer as their source. `light_level` is 15 for
+lava, 0 for water and the empty fluid, and what a mod fluid's file states. The empty fluid and
+tank-only fluids do nothing to an entity and have a fall modifier of 1. Anything that depends on
 a level, such as lava's current or source conversion, isn't in the record.
 The record also carries three `Fluid` facts: `explosion_resistance` (100 for water, lava and a mod's
 world fluid, 0 for the empty or a tank-only fluid), `randomly_ticks` (lava only) and `drip_particle`
@@ -189,3 +214,28 @@ or noncanonical serialized values return false. A falling source remains a sourc
 of level 8 remains flowing. Empty constraints match any state. Validate separately for indexed errors.
 Neither matching nor validation allocates, and reading the definition lends its properties without copying.
 Unresolved saved tank identities remain `FluidIdentity::Unresolved(handle)`, not world states or tank-only keys.
+
+## Slowing or boosting entities on a block
+
+Attach a `BlockPart` to change how fast, or how high, entities move on your blocks, as a block that overrides NeoForge's `Block.getSpeedFactor()` and `Block.getJumpFactor()` does. Both Part methods get the loop `context` of the side that ticks the entity (no `Host`) and an event with the block `state` and the `factor` to edit, which starts at the block's own value (honey is 0.4 speed and 0.5 jump, soul sand 0.4 speed, every other block 1.0).
+
+```rust,ignore
+struct Mud;
+
+impl mod_api::BlockPart for Mud {
+    fn block_speed_factor(&self, _: &dyn mod_api::LoopContext, event: &mut mod_api::BlockSpeedFactorEvent) {
+        event.factor = 0.25;
+    }
+    fn block_jump_factor(&self, _: &dyn mod_api::LoopContext, event: &mut mod_api::BlockJumpFactorEvent) {
+        event.factor = 0.5;
+    }
+}
+
+// In `register`: let mud = r.block_key("mymod:mud"); r.block_part(mud, Mud);
+```
+
+The entity reads the block at its feet and, when that gives 1.0 (and, for speed, the block is not water or a bubble column), the block below it. A part's factor is the block's factor in that rule, so 1.0 from your part lets the block below decide, exactly as for a vanilla block.
+
+The player, every mob's ground and jump path, boats and minecarts read the factors where vanilla does. Both hooks fire on both sides and on the client's replayed ticks: register the mod on both and keep each method a pure function of its inputs, or prediction and the server disagree. To affect entities on every block, use `living_speed` and `living_jump_power` instead.
+
+See [the hook notes](https://github.com/sunrise-org/sunrise/blob/main/crates/sunrise-mod-vocab/src/hooks/block_factors.rs) for the cost and the details.

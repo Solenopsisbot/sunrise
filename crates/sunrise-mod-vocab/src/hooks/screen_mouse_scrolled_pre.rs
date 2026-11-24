@@ -1,5 +1,4 @@
 //! The `screen_mouse_scrolled_pre` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0106
 
 pub trait Hooks {
     /// The wheel turned over the open screen (`ScreenEvent.MouseScrolled.Pre`,

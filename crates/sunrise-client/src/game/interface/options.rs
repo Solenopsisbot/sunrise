@@ -149,7 +149,7 @@ impl Game<'_> {
     pub(super) fn open_options(&mut self, from_title: bool) {
         self.open_options_at(from_title, Page::Main);
     }
-    pub(super) fn open_options_at(&mut self, from_title: bool, page: Page) {
+    pub(in crate::game) fn open_options_at(&mut self, from_title: bool, page: Page) {
         // Gameplay keys must not stay held behind the options screen, where
         // bindings can also change before the physical key is released.
         self.clear_device_keys();
@@ -164,6 +164,9 @@ impl Game<'_> {
         ui.minecart_improvements = minecart_improvements;
         ui.languages = lang::available(&[&self.pack.source]);
         self.refresh_pack_lists();
+        if let Page::NativeMod(index) = page {
+            self.native_settings_refresh(index);
+        }
     }
     /// While the resource pack screen is open, `resourcepacks/` is looked at once a second
     /// and the list found again when its packs changed (`PackSelectionScreen.tick`'s
@@ -397,10 +400,10 @@ impl Game<'_> {
         let events = self.ui.options.bind_mouse(&mut self.settings, button);
         self.handle_option_events(events)
     }
-    pub(super) fn handle_option_events(&mut self, events: Vec<Event>) -> Result<()> {
+    pub(in crate::game) fn handle_option_events(&mut self, events: Vec<Event>) -> Result<()> {
         for e in events {
             match e {
-                Event::ButtonClick => self.audio.play_button_click(),
+                Event::ButtonClick => self.play_audio_button_click(),
                 Event::DebugEntriesChanged => self.debug_entries.invalidate(),
                 Event::Changed => {
                     self.settings.save(&Self::options_path());
@@ -540,6 +543,18 @@ impl Game<'_> {
                     super::packs::open_folder(&dir);
                 }
                 Event::NativeSettings(i) => self.native_settings_refresh(i),
+                Event::ModConfigScreen(i) => {
+                    let Some(id) = self.settings.mods.installed.get(i).map(|m| m.id.clone()) else {
+                        continue;
+                    };
+                    match mod_api::__private::create_config_screen(self, &id) {
+                        Some(Ok(true)) => {
+                            self.native_mod_screen_parent = self.mod_screen_open(&id);
+                        }
+                        Some(Err(reason)) => log::error!("mod {id}: {reason}"),
+                        Some(Ok(false)) | None => {}
+                    }
+                }
                 Event::NativeSetting(i, j) => self.native_setting_event(i, j),
                 Event::Credits => self.open_win_screen(false, super::win::Finish::Options),
                 Event::HudEditor => self.open_hud_editor(true),

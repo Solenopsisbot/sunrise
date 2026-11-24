@@ -19,18 +19,12 @@ mod tests {
     struct Observer(Arc<Observed>);
     #[mod_api::__subscriptions]
     impl mod_api::Hooks for Observer {
-        fn entity_tick_listened(
-            &self,
-            _: mod_api::HostSide<'_>,
-            event: &mut mod_api::EntityTickListenedEvent,
-        ) {
-            event.listened = true;
-        }
         fn entity_tick_pre(
             &self,
             _: mod_api::HostSide<'_>,
             _: &mut mod_api::EntityTickPreEvent<'_>,
-        ) {
+        ) -> mod_api::Flow {
+            mod_api::Flow::Continue
         }
         fn entity_tick_post(
             &self,
@@ -84,20 +78,24 @@ mod tests {
                                 .registry
                                 .default_state("minecraft:sand")
                                 .unwrap();
+                            let level = game.level(game.dim.id()).unwrap();
                             for x in 0..6 {
-                                assert!(game.spawn_falling_block(
-                                    game.dim.id(),
-                                    sand,
-                                    [2.0 * f64::from(x) + 0.5, 70.0, 0.5],
-                                    [0.0; 3],
-                                    mod_api::Falling::default()
-                                ));
+                                assert!(
+                                    game.level_spawn_falling_block(
+                                        level,
+                                        sand,
+                                        [2.0 * f64::from(x) + 0.5, 70.0, 0.5],
+                                        [0.0; 3],
+                                        mod_api::Falling::default(),
+                                    )
+                                    .unwrap()
+                                    .is_some()
+                                );
                             }
                             game.reset_entity_residency();
                             // An observer activates the same dispatch without writing entity state.
                             let round = game.native_tick_round();
                             assert_eq!(round.listening(), listening);
-                            game.native_tick_post_batch(round);
                             let joins: Vec<_> =
                                 game.falling.iter().map(|block| block.join).collect();
                             // Continuing falls keep every resident's identity and order;

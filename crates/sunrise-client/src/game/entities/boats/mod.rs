@@ -860,15 +860,7 @@ impl Game<'_> {
                 return Some(());
             }
             // The water's shape, through the shared fluid shape cache.
-            sunrise_client::entities::water_clip(
-                &self.loop_context,
-                &self.world,
-                fluids,
-                from,
-                to,
-                p,
-            )
-            .then_some(())
+            sunrise_client::entities::water_clip(&self.world, fluids, from, to, p).then_some(())
         });
         if matches!(hit, Ok(Some(()))) {
             0.0
@@ -1301,7 +1293,7 @@ impl Game<'_> {
                     self.boat_server_passes(id, &driven, &ticking, &round);
                     break 'boat;
                 }
-                let kind = if round.listening() {
+                let kind = if round.told_listening() {
                     self.boats[i].entity_type()
                 } else {
                     String::new()
@@ -1473,7 +1465,7 @@ impl Game<'_> {
         use sunrise_client::particles::{ParticleOptions, ParticleType};
         let p = self.boats[i].position;
         let pitch = 0.8 + 0.4 * self.world.random.next_float();
-        self.audio.play(
+        self.play_audio(
             "minecraft:entity.generic.splash",
             Some([p.x, p.y, p.z]),
             1.0,
@@ -1840,8 +1832,7 @@ impl Game<'_> {
     /// `Entity.lavaHurt`'s sound once the hurt went through.
     pub(super) fn lava_hurt_sound(&mut self, at: [f64; 3]) {
         let pitch = 2.0 + self.world.random.next_float() * 0.4;
-        self.audio
-            .play("minecraft:entity.generic.burn", Some(at), 0.4, pitch);
+        self.play_audio("minecraft:entity.generic.burn", Some(at), 0.4, pitch);
     }
     /// Whether a vehicle's box, deflated by 1e-5, reaches into lava below its
     /// surface (`Entity.collidedWithFluid`).
@@ -2180,7 +2171,8 @@ impl Game<'_> {
         if damage > 0.0
             && let Some(destroyed) = hurt
         {
-            let (knockback, _) = self.extra_knockback(&kind, scale);
+            let (knockback, _) =
+                self.extra_knockback(&kind, id as u32, scale, Some("minecraft:player_attack"));
             if knockback > 0.0 {
                 // Player.causeExtraKnockback uses Entity.push for a boat,
                 // not LivingEntity.knockback (no resistance or velocity halving).

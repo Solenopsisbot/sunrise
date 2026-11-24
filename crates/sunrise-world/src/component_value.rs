@@ -380,6 +380,11 @@ impl Template {
     pub fn to_tag(&self) -> Result<Tag, String> {
         self.tag(Projection::Tree)
     }
+    /// Project the own persistent patch to its canonical `components` compound without
+    /// re-validating against the built-in-only registry.
+    pub fn patch_to_tag(&self) -> Result<Option<Tag>, String> {
+        template_patch_tag(&self.patch, Projection::Codec)
+    }
     fn tag(&self, projection: Projection) -> Result<Tag, String> {
         let mut fields = vec![("id".into(), Tag::String(self.item.as_str().into()))];
         if self.count != 1 {

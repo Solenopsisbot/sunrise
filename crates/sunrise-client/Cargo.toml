@@ -13,6 +13,8 @@ autotests = false
 sunrise-mod-api-gen = { path = "../sunrise-mod-api-gen" }
 
 [dependencies]
+cap-fs-ext = "3.4.6"
+cap-std = "3.4.6"
 sunrise-hooks = { path = "../sunrise-hooks" }
 sunrise-mod-runtime = { path = "../sunrise-mod-runtime" }
 mod_api = { package = "sunrise-mod-vocab", path = "../sunrise-mod-vocab" }
@@ -92,9 +94,6 @@ sunrise-dualsense = { path = "../sunrise-dualsense", optional = true }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 # `LevelStorageAccess.estimateDiskSpace`: usable disk space, without unsafe code on Windows.
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
-# Mod file roots are descriptor-bound: no symlink race can leave a mod's area.
-cap-std = "3"
-cap-fs-ext = "3"
 
 [target.'cfg(unix)'.dependencies]
 # The server thread's CPU time per tick (`SUNRISE_SPIKES`, spans.rs).

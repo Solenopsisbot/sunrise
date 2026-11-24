@@ -234,3 +234,72 @@ pub(super) fn read_region_record(
         None => None,
     })
 }
+
+fn region_write_stamp(cache: &RegionCache, region: (i32, i32)) -> Result<u64> {
+    let files = cache.lock().map_err(|_| "region cache poisoned")?;
+    Ok(files.written.get(&region).copied().unwrap_or(0))
+}
+
+/// Read a single chunk's NBT record by opening its `.mca` file read-only for this call,
+/// bypassing the gameplay `RegionCache` so scans across many regions do not evict active ones.
+/// Falls back to locked `read_region_record` whenever the region's write stamp is odd (write in
+/// progress) or changes during the read.
+pub(super) fn read_region_record_readonly(
+    storage: RegionStorage<'_>,
+    x: i32,
+    z: i32,
+) -> Result<Option<NamedTag>> {
+    let key = (x >> 5, z >> 5);
+    let before = region_write_stamp(storage.cache, key)?;
+    if before & 1 == 0 {
+        let path = region_path(storage.root, storage.folder.name(), key.0, key.1);
+        let direct: Result<Option<NamedTag>> = (|| {
+            let mut region = match RegionFile::open(&path) {
+                Ok(region) => region,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            match region.read(ChunkPos::new(x, z))? {
+                Some(record) => Ok(Some(record.nbt(Limits::saved())?)),
+                None => Ok(None),
+            }
+        })();
+        if region_write_stamp(storage.cache, key)? == before {
+            return direct;
+        }
+    }
+    read_region_record(storage, x, z)
+}
+
+/// List chunk coordinates present in region `(rx, rz)`'s 8 KiB sector header without decompressing
+/// payloads or entering the gameplay `RegionCache`. Falls back to the locked cached region handle
+/// when a concurrent write is in flight.
+pub(super) fn list_region_chunks_readonly(
+    storage: RegionStorage<'_>,
+    rx: i32,
+    rz: i32,
+) -> Result<Vec<[i32; 2]>> {
+    let key = (rx, rz);
+    let before = region_write_stamp(storage.cache, key)?;
+    if before & 1 == 0 {
+        let path = region_path(storage.root, storage.folder.name(), rx, rz);
+        let direct: Result<Vec<[i32; 2]>> = match RegionFile::open(&path) {
+            Ok(region) => Ok(region.chunks().map(|(pos, _)| [pos.x, pos.z]).collect()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error.into()),
+        };
+        if region_write_stamp(storage.cache, key)? == before {
+            return direct;
+        }
+    }
+    let Some(region) = storage.open_cached(key, false)? else {
+        return Ok(Vec::new());
+    };
+    let chunks = region
+        .lock()
+        .map_err(|_| "region file poisoned")?
+        .chunks()
+        .map(|(pos, _)| [pos.x, pos.z])
+        .collect();
+    Ok(chunks)
+}

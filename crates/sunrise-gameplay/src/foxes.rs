@@ -291,6 +291,8 @@ mod tests {
             },
             vertical_collision: false,
             age: 0,
+            stack_revision: 0,
+            lifespan: ItemEntity::LIFETIME,
             pickup_delay: 0,
             bob_offset: 0.0,
             ticks: 0,
@@ -332,7 +334,7 @@ mod tests {
             &mut self,
             _stack: ItemStack,
             _at: [f64; 3],
-            pickup_delay: u32,
+            pickup_delay: i32,
         ) -> [f64; 3] {
             if pickup_delay == 40 {
                 self.mobs[0] = Mob::new(9, kind("minecraft:cow", Species::Cow), Vec3::ZERO, 0.0);

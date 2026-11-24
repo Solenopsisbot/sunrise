@@ -391,7 +391,7 @@ impl Game<'_> {
     /// `BookEditScreen.saveChanges` and `BookSignScreen`'s Sign and Close:
     /// trailing empty pages dropped, the book in hand updated here and, on a
     /// server's client, sent (ServerboundEditBookPacket).
-    fn save_book(&mut self, sign: bool) {
+    pub(super) fn save_book(&mut self, sign: bool) {
         let Some(BookScreen::Edit {
             slot, pages, title, ..
         }) = self.book.take()
@@ -434,6 +434,7 @@ impl Game<'_> {
             let mut written = stack.transmute("minecraft:written_book", stack.count);
             let data = written.data_mut();
             data.writable_pages = Vec::new();
+            data.writable_filtered = Vec::new();
             data.written = Some(WrittenBook {
                 title,
                 author,
@@ -446,7 +447,10 @@ impl Game<'_> {
             });
             *stack = written;
         } else {
-            stack.data_mut().writable_pages = if pages.iter().all(String::is_empty) {
+            let data = stack.data_mut();
+            // `updateBookContents`: new `Filterable` pages, unfiltered while no text filter runs.
+            data.writable_filtered = Vec::new();
+            data.writable_pages = if pages.iter().all(String::is_empty) {
                 Vec::new()
             } else {
                 pages
@@ -923,8 +927,7 @@ impl Game<'_> {
             self.lectern_button(key, if forward { 2 } else { 1 });
             return;
         }
-        self.audio
-            .play("minecraft:item.book.page_turn", None, 1.0, 1.0);
+        self.play_audio("minecraft:item.book.page_turn", None, 1.0, 1.0);
     }
     fn set_lectern_powered(&mut self, key: (i32, i32, i32), powered: bool) {
         self.set_lectern_property(key, "powered", powered);
@@ -1024,8 +1027,7 @@ impl Game<'_> {
             f64::from(pos[1]) + 0.5,
             f64::from(pos[2]) + 0.5,
         ];
-        self.audio
-            .play("minecraft:item.book.put", Some(at), 1.0, 1.0);
+        self.play_audio("minecraft:item.book.put", Some(at), 1.0, 1.0);
         self.container_changed(key);
         if let (Some(player), Some(name)) = (self.lan_acting_uuid, self.lan_acting_name.clone()) {
             self.native_player_insert_lectern_book(player, &name, pos, &book.item);
@@ -1289,10 +1291,7 @@ impl Game<'_> {
         self.book_last_click = Some(now);
         let inside =
             |x: f32, y: f32, bw: f32, bh: f32| mx >= x && my >= y && mx < x + bw && my < y + bh;
-        let click = |game: &mut Self| {
-            game.audio
-                .play("minecraft:ui.button.click", None, 0.25, 1.0)
-        };
+        let click = |game: &mut Self| game.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
         match &self.book {
             Some(BookScreen::Edit {
                 signing: true,

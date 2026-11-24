@@ -23,9 +23,32 @@ use sunrise_world::worldgen::structure::start::STEPS;
 /// The folders a biome modifier sits in, under `data/<ns>`.
 const FOLDERS: [&str; 2] = ["/neoforge/biome_modifier/", "/forge/biome_modifier/"];
 
-/// Whether a mod file is a biome modifier.
-pub(super) fn is_modifier(file: &str) -> bool {
-    file.starts_with("data/") && file.ends_with(".json") && FOLDERS.iter().any(|f| file.contains(f))
+/// Registry key of an effective modifier file, independent of its package and directory alias.
+pub(super) fn modifier_key(file: &str) -> Option<(&str, &str)> {
+    let (namespace, relative) = file.strip_prefix("data/")?.split_once('/')?;
+    let path = relative.strip_suffix(".json")?;
+    let path = FOLDERS
+        .iter()
+        .find_map(|folder| path.strip_prefix(folder.trim_start_matches('/')))?;
+    Some((namespace, path))
+}
+
+/// File precedence is already resolved; unlike packs, code declarations cannot replace entries.
+pub(super) fn check_registry<'a>(
+    sources: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<()> {
+    let mut keys = BTreeMap::new();
+    for (owner, file) in sources {
+        let Some((namespace, path)) = modifier_key(file) else {
+            return Err(format!("mod {owner}: invalid biome modifier path {file}").into());
+        };
+        if let Some((other, other_file)) = keys.insert((namespace, path), (owner, file)) {
+            return Err(format!(
+                "duplicate biome modifier {namespace}:{path}: mod {other} ({other_file}) and mod {owner} ({file})"
+            ).into());
+        }
+    }
+    Ok(())
 }
 
 /// One mob spawner entry in an `add_spawns` modifier.
@@ -331,9 +354,6 @@ pub(super) struct Modifier {
     name: String,
     biomes: Selector,
     action: Action,
-    /// The mod, the file and its text, kept in the content root so the
-    /// modifier is applied again over a world's data packs (`over_packs`).
-    pub source: [String; 3],
 }
 
 /// A generation step's index from its name.
@@ -477,7 +497,6 @@ impl Modifier {
             biomes: Selector::read(field("biomes")?, true).map_err(at)?,
             action,
             name,
-            source: [mod_id.to_owned(), file.to_owned(), text.to_owned()],
         }))
     }
 }

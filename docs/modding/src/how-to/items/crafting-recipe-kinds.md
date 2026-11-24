@@ -2,11 +2,10 @@
 
 A recipe file's `type` is a **serializer ID**, not its recipe type. These are two
 independent registries. All crafting serializers produce `minecraft:crafting`,
-which the engine registers. Each mod registers its own serializer IDs and any new
-recipe type IDs in namespaces it owns (including namespaces of content packages
-delegated to it through `served_by` with `[native] serves_content = true`).
-Duplicate serializer IDs and duplicate
-recipe type IDs refuse startup, naming the ID.
+which the engine registers. A bare serializer or recipe type name uses the
+declaring mod's namespace, while an explicit valid `namespace:path` keeps its
+namespace. Duplicate or built-in serializer IDs and recipe type IDs refuse
+startup, naming the ID.
 
 In a recipe file, a `type` serializer ID written without a namespace (`crafting_shaped`,
 or `:crafting_shaped`) means `minecraft`; it is never the recipe file's own namespace

@@ -87,28 +87,46 @@ of one. Invalid values produce typed errors, not clamped values. A transfer requ
 different: `ItemResource` plus a separate amount can request or return more than one
 resident stack's capacity. The resident writes it produces must pass validation.
 
-Game inventory, menus, trades and models keep their engine-owned representations. Where a
-native hook or host method takes an owned API snapshot, the game converts only after a listener
-guard and stages every mutable result before committing any captured output. Invalid hook
-edits retain those captured engine values. The same durability rules govern writable hook
-outputs: a valid damage value above that stack's maximum reaches later listeners and the game.
+Game inventory, menus, trades and models keep their engine-owned representations. Native hooks
+project owned API stacks only when a listener is present. The game admits ordinary changed
+outputs independently when that listener returns, leaving the last accepted value in place for
+any refusal. A `HookList` validates each edit that supplies a stack; a refused edit leaves other
+edits intact. The same durability rules govern writable hook outputs: a valid damage value above
+that stack's maximum reaches later listeners and the game.
 Consuming mutable events such as `bonemeal` and
 `item_after_vertical_collision` lend `Option<ItemStack>` so a listener can consume the value by
 setting `None`.
 
-The global `Hooks::item_stacked_on_other` hook runs on the authoritative server side only (`StackedOnOtherDirection::Event`), while `ItemPart::item_stacked_on_other` runs on both sides (server clicks, client prediction with authoritative server reconciliation, and creative inventory-tab/hotbar pickups), dispatching first to the carried stack (`CarriedOnOther`) and then — unless a carried vanilla `BundleItem` takes the click — to the clicked stack (`OtherStackedOnMe`). It does not lend the slot: it hands the listener the cursor and
-the clicked slot's stack, frozen, and takes a typed answer (`StackedOnOtherResult`: `handled`,
-`StackResult::Keep` or `Set` for `carried`, and `ClickedStackResult::Keep`, `Set`, or `Take(count)` for `clicked`) that the game validates once and applies
-once. For global listeners, a stack can be set only by a cancelled click that is also `handled` (`ClickedStackResult::Take` is refused), and a replacement cannot change a result slot or take an item from a brewing potion slot, because the replacement does not run the slot's take effects. For `ItemPart` overrides, `ClickedStackResult::Set` performs a direct write without `Slot.onTake` side effects while `ClickedStackResult::Take(count)` takes through `Slot.safeTake` / `Slot.onTake`. If both Parts take from the slot, each take runs its own effects in carried-then-clicked order. A refused replacement keeps
-the slot and cursor as they were and undoes the listener's writes. A write through the `Host` to
-what the click read likewise makes the click stale and refuses it.
+The global `Hooks::item_stacked_on_other` hook runs on the authoritative server side only
+(`StackedOnOtherDirection::Event`). `ItemPart::item_stacked_on_other` runs on both sides: server
+clicks, client prediction that the server corrects, and creative inventory-tab and hotbar
+pickups. It asks the carried stack's Part first (`CarriedOnOther`), then, unless a carried
+vanilla `BundleItem` takes the click, the clicked stack's Part (`OtherStackedOnMe`).
+
+Each call lends the click's cursor and clicked slot, as NeoForge's `getCarriedSlotAccess` and
+`getSlot` do. `carried()` and `clicked()` read them as earlier phases and the call itself left
+them. `set_carried` writes the cursor, `set_clicked` writes the slot directly (`Slot.set`,
+without the slot's take side effects), and `take_clicked(count)` takes through `Slot.safeTake`,
+running furnace experience, `recipes_used`, crafting remainders and take hooks. The edits are
+applied to the menu in the order they were made, once every phase has answered.
+
+A global listener cancels the click with `canceled`. The click is then done with its edits
+while `click.handled` stays `true` (its start value, as in NeoForge); set it to `false` to let
+plain pickup run as well. A global listener's edits refuse the click unless the click is
+cancelled and handled, and so do its takes and its writes to a result slot or a filled brewing
+potion slot. An `ItemPart` answers
+with its `Flow`, as vanilla's `boolean` does: `Flow::Cancel` takes the click, and
+`Flow::Continue` goes on to the later phases and plain pickup, which see its edits. An invalid
+stack, an edit a slot rule refuses, a write through the `Host` to what the click read, or a
+panic refuses the click: the slot and cursor stay as they were and the listener's writes are
+undone.
 
 The block-entity
 tick, menu-button and menu-quick-move bridges validate their captured snapshot outputs together
 before applying them. These are output guarantees, not whole-world transactions: independent
 `ServerHost` storage writes, commands, messages and other effects are not rolled back on a
 refused output. Carrier-form callbacks such as `bonemeal` and `item_after_vertical_collision`
-also retain their captured stack outputs on refusal but do not journal independent host writes.
+also keep the last accepted stack on refusal without rolling back independent host writes.
 
 A client without this mod predicts vanilla here; the server corrects it.
 

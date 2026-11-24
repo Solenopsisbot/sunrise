@@ -325,7 +325,14 @@ impl Game<'_> {
         // `DamageSource(type, cause, at)`: the source position the knockback
         // pushes away from is the direct entity's.
         let from = direct.and_then(|t| self.target_position(t));
-        Some(self.hurt_target(target, amount, damage_type, direct, causing, from))
+        Some(self.hurt_target(
+            target,
+            amount,
+            damage_type,
+            direct,
+            causing.or(direct),
+            from,
+        ))
     }
 
     /// `Entity.isInvulnerableTo` for a source of `damage_type`: #842's own

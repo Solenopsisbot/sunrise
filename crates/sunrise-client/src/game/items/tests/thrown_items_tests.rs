@@ -257,6 +257,45 @@ fn a_client_pickup_sound_takes_the_listeners_random() {
     });
 }
 
+/// `ClientPacketListener.handleTakeItemEntity` shrinks an item's stack by the amount taken and
+/// removes the entity only once it is empty, so a survivor or a replacement stays in view.
+#[test]
+#[ignore = "daily"]
+fn a_client_take_shrinks_an_item_and_removes_it_only_when_empty() {
+    with_remote_game(|game| {
+        let at = Vec3::new(2.5, 64.0, 2.5);
+        game.dropped.push(ItemEntity::new(
+            9,
+            ItemStack::new("minecraft:emerald", 8),
+            at,
+            Vec3::ZERO,
+            0.0,
+        ));
+        let take = |amount: i32| {
+            C::TakeItemEntity(play::TakeItemEntity {
+                item: 9,
+                player: 1,
+                amount,
+            })
+        };
+        game.handle_packet(take(0)).unwrap();
+        assert_eq!(
+            game.dropped[0].stack.count, 8,
+            "an animation of nothing taken"
+        );
+        game.handle_packet(take(3)).unwrap();
+        assert_eq!(
+            game.dropped[0].stack.count, 5,
+            "a partial pickup leaves the rest"
+        );
+        game.handle_packet(take(5)).unwrap();
+        assert!(
+            game.dropped.iter().all(|d| d.id != 9),
+            "an emptied stack goes"
+        );
+    });
+}
+
 /// `Entity.lavaHurt` pitches the burn sound from the item's own random, the
 /// one its constructor drew from.
 #[test]

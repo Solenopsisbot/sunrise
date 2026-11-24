@@ -45,7 +45,7 @@ impl Game<'_> {
             self.stabbed.retain(|(who, _), _| *who != actor);
             if let Some(p) = &self.player {
                 let at = [p.position.x, p.position.y, p.position.z];
-                self.audio.play(kinetic.sound, Some(at), 1.0, 1.0);
+                self.play_audio(kinetic.sound, Some(at), 1.0, 1.0);
             }
         }
         true
@@ -271,18 +271,11 @@ impl Game<'_> {
             0.0
         };
         let (old_health, join) = (self.mobs[index].health, self.mobs[index].join);
-        let (hurt, killed) = if deals_damage {
+        let (hurt, _) = if deals_damage {
             self.hurt_by_player(index, total, Damage::spear(from))
         } else {
             (false, false)
         };
-        if killed
-            && let Some(i) = self.mob_index.find(&self.mobs, id)
-            && self.mobs[i].join == join
-            && !self.mobs[i].removed
-        {
-            self.native_kill_event(i);
-        }
         let Some(index) = self
             .mob_index
             .find(&self.mobs, id)
@@ -297,14 +290,18 @@ impl Game<'_> {
         if deals_knockback {
             let (xd, zd) = self.extra_knockback_direction();
             let source = Damage::spear(from);
+            let aim = self.attacker_aim(source.attacker);
             let plan = self.prepare_knockback_credit(id as i32, None, &attack);
             let mut credit = plan.lend(&mut self.last_hurt_by_player);
+            self.mobs[index].attacker_aim = aim;
             let level = crate::game::entity::damage_level_of!(self, &attack, &mut credit, None);
             self.mobs[index].knockback_full(level, 0.4, xd, zd, &source, total, false);
-            let (strength, _) = self.extra_knockback(&kind, 0.0);
+            self.mobs[index].attacker_aim = None;
+            let (strength, _) = self.extra_knockback(&kind, id, 0.0, Some("minecraft:spear"));
             if strength > 0.0 {
                 let plan = self.prepare_knockback_credit(id as i32, None, &attack);
                 let mut credit = plan.lend(&mut self.last_hurt_by_player);
+                self.mobs[index].attacker_aim = aim;
                 let level = crate::game::entity::damage_level_of!(self, &attack, &mut credit, None);
                 self.mobs[index].knockback_full(
                     level,
@@ -315,6 +312,7 @@ impl Game<'_> {
                     total,
                     true,
                 );
+                self.mobs[index].attacker_aim = None;
             }
             // ...and the attacker stops sprinting.
             self.stop_sprint_after_extra_knockback();
@@ -349,7 +347,7 @@ impl Game<'_> {
         if let Some(stack) = self.held().cloned() {
             self.award_stat("used", &stack.item, 1);
             if hurt {
-                self.post_attack(index);
+                self.post_player_melee(id, &kind, "minecraft:spear", Some(&stack));
             }
             self.weapon_wear(&stack);
         }
@@ -378,6 +376,7 @@ impl Game<'_> {
                 [0.1, 0.0, 0.1],
                 0.2,
                 (actual * 0.5) as u32,
+                None,
             );
             // The players a server serves are sent them too (the window of the server thread).
             self.lan_send_particles(super::lan_particles::QueuedParticle {
@@ -454,7 +453,7 @@ impl Game<'_> {
     pub(super) fn play_at_feet(&mut self, sound: &str) {
         if let Some(p) = &self.player {
             let at = [p.position.x, p.position.y, p.position.z];
-            self.audio.play(sound, Some(at), 1.0, 1.0);
+            self.play_audio(sound, Some(at), 1.0, 1.0);
         }
     }
 
@@ -469,8 +468,7 @@ impl Game<'_> {
             .is_none_or(|&t| now - t > HIT_FEEDBACK_TICKS)
         {
             self.kinetic_feedback.insert(entity, now);
-            self.audio
-                .play_unshared(kinetic.hit_sound, Some(at), 1.0, 1.0);
+            self.play_audio_unshared(kinetic.hit_sound, Some(at), 1.0, 1.0);
         }
     }
 

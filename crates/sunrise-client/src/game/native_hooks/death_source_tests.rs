@@ -69,7 +69,10 @@ impl Hooks for Probe {
             event.entity as u32,
             event.kind,
             event.source,
-            event.weapon,
+            event
+                .weapon
+                .and_then(mod_api::ItemStackView::project)
+                .as_ref(),
         ));
         Flow::Continue
     }
@@ -944,6 +947,9 @@ fn mob_death_and_handle_preserve_namespaced_types() {
                 {
                     let mut kind = (*sheep).clone();
                     kind.id = id.to_owned();
+                    // A type row keeps the key of its own name, as accepting the type table
+                    // gives it (world_rest.rs); this fixture builds its rows after that.
+                    kind.type_key = mod_api::__private::resolved_entity_type_key(id);
                     let mut mob = Mob::new(
                         201 + index as u32,
                         Arc::new(kind),

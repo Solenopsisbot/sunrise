@@ -48,7 +48,9 @@ fn integrated_enchant_updates_the_clients_selected_slot() {
     let command = format!("enchant {target} {RIPTIDE} 3");
     with_client_game(|client| {
         let mut wire = logged_in(client);
-        client.set_registries(Arc::new(sync.dynamic.clone()));
+        client
+            .set_registries(Arc::new(sync.dynamic.clone()))
+            .unwrap();
         client
             .handle_packet(C::GameEvent(GameEvent {
                 event: 3, // CHANGE_GAME_MODE
@@ -88,7 +90,7 @@ fn integrated_enchant_updates_the_clients_selected_slot() {
         client.set_screen(Screen::Playing);
         client.remote_send_carried();
         if !console {
-            client.send_command(&command);
+            client.send_command(&command).unwrap();
         }
         let outgoing = sent(&mut wire);
         let hotbar_slot = 36 + selected as i16;

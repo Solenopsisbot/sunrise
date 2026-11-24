@@ -14,7 +14,7 @@ mixins = "MIXINS"
 
 [[native.mixin]]
 id = "commands"
-target = "sunrise_client_lib::lan::hub::Hub::set_mod_commands"
+target = "sunrise_client_lib::lan::hub::Hub::send_permission_level"
 kind = "HEAD"
 helper = "src/mixins/commands.rs"
 
@@ -217,4 +217,61 @@ helper = "src/mixins/tick_precipitation.rs"
 bindings = [
     { name = "value", ty = "()", value = "$value" },
     { name = "pos", ty = "BlockPos", value = "pos" },
+]
+
+# RETURNs on the player rules a Java mod's mixin answers (sunrise-org/sunrise#4854):
+# `ServerPlayer.canHarmPlayer`, `Player.getDesiredPose`, and `Inventory.getFreeSlot`,
+# `getSlotWithRemainingSpace` and `getSuitableHotbarSlot`. Each returns vanilla's answer: the build
+# is the check.
+[[native.mixin]]
+id = "harm"
+target = "sunrise_client_lib::health::can_harm_player"
+kind = "RETURN"
+helper = "src/mixins/harm.rs"
+bindings = [
+    { name = "value", ty = "bool", value = "$value" },
+    { name = "attacker", ty = "i32", value = "attacker" },
+    { name = "victim", ty = "i32", value = "victim" },
+]
+
+[[native.mixin]]
+id = "desired_pose"
+target = "sunrise_client_lib::pose::desired_pose"
+kind = "RETURN"
+helper = "src/mixins/desired_pose.rs"
+bindings = [
+    { name = "value", ty = "Pose", value = "$value" },
+    { name = "player", ty = "i32", value = "player" },
+    { name = "flags", ty = "PoseFlags", value = "flags" },
+]
+
+[[native.mixin]]
+id = "free_slot"
+target = "sunrise_client_lib::menu::free_slot"
+kind = "RETURN"
+helper = "src/mixins/free_slot.rs"
+bindings = [
+    { name = "value", ty = "Option<usize>", value = "$value" },
+    { name = "items", ty = "&[Option<ItemStack>]", value = "items" },
+]
+
+[[native.mixin]]
+id = "remaining_space"
+target = "sunrise_client_lib::menu::slot_with_remaining_space"
+kind = "RETURN"
+helper = "src/mixins/remaining_space.rs"
+bindings = [
+    { name = "value", ty = "Option<usize>", value = "$value" },
+    { name = "stack", ty = "&ItemStack", value = "stack" },
+    { name = "max", ty = "u32", value = "max" },
+]
+
+[[native.mixin]]
+id = "hotbar_slot"
+target = "sunrise_client_lib::pick_item::suitable_hotbar_slot"
+kind = "RETURN"
+helper = "src/mixins/hotbar_slot.rs"
+bindings = [
+    { name = "value", ty = "usize", value = "$value" },
+    { name = "selected", ty = "usize", value = "selected" },
 ]

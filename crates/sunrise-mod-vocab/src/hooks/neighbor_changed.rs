@@ -1,5 +1,4 @@
 //! The `neighbor_changed` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0013
 
 pub trait Hooks {
     /// An authoritative server is about to deliver `neighborChanged`.

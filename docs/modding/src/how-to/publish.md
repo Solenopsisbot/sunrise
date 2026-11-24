@@ -37,21 +37,23 @@ https://github.com/<owner>/<repository>
 
 ### Package folders
 
-_No response_
-
-### Branch
-
 _No response_"
 ```
 
 Leave `_No response_` under **Package folders** for a mod at the repository's root; otherwise list one folder per
-line, each holding a `sunrise-mod.toml`. Leave it under **Branch** unless the mod is not on the default branch.
-The registry then checks that you administer the repository, opens the registration pull request and answers on the issue. Registering
-lists nothing: your project appears on Discover once its first release is reviewed and merged.
+line, each holding a `sunrise-mod.toml`. Registration reads the default branch only. A maintainer then checks that
+you administer the repository, opens the registration pull request and links it on the issue, so this route waits
+for a person where the form answers at once. Registering lists nothing: your project appears on Discover once its
+first release is reviewed and merged.
 
 ## Releasing
 
-Commit your mod's source, its page, and `Cargo.lock` for a native mod. From the mod's folder on a clean branch
+`release` is in the [newest tool from main](../start/install-tool.md#newest-tool-from-main). A Nightly's tool that
+lacks it answers `"release" is not a cargo sunrise-mod command`.
+
+Commit your mod's source, its page, and `Cargo.lock` for a native mod. The lock must match the pinned SDK:
+`cargo sunrise-mod pin` keeps it so, and after moving `[native] sunrise` by hand, `cargo sunrise-mod pin <build>`
+with the build already pinned regenerates it. From the mod's folder on a clean branch
 that is up to date with its upstream:
 
 ```sh
@@ -61,7 +63,7 @@ cargo sunrise-mod release patch
 
 Use `minor`, `major`, or a higher SemVer instead of `patch` to choose another version. `--check` runs the
 release checks for the proposed version without changing the checkout. Without it, `release` refreshes the
-workflow, commits the version bump signed off (`Signed-off-by`, from your Git `user.name` and `user.email`), and pushes the branch and tag together to `origin`. The tag is `v<version>`
+workflow, commits the version bump signed off (`Signed-off-by`, from your Git `user.name` and `user.email`), and pushes the branch, then the tag, to `origin` in two pushes: GitHub starts no workflow for a tag pushed together with the commit that first adds its workflow file. The tag is `v<version>`
 at the repository root or `<id>/v<version>` for a subfolder package. GitHub Actions builds and attests both the
 `.smod` and its page bundle, with no signing key for you to manage.
 
@@ -71,7 +73,7 @@ If your default branch accepts changes only through pull requests, add `--pull-r
 cargo sunrise-mod release patch --pull-request
 ```
 
-The release commit then goes on a new branch, `release/<tag>`, which is pushed together with the tag, and your
+The release commit then goes on a new branch, `release/<tag>`, which is pushed before the tag, and your
 checkout is left on that branch. The tag starts the release as usual. Open the pull request it prints, from
 `release/<tag>` into the branch you released from, and merge it before your next release, so that branch carries
 the new version.

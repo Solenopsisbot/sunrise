@@ -612,8 +612,9 @@ struct Written {
     content_api: String,
     surface: Surface,
     mixins: Mixins,
-    /// Decoded one by one once each kind is known ([`Index::read`]).
-    assets: BTreeMap<String, serde_json::Value>,
+    /// Kept as written until each entry's kind is known ([`Index::read`]): a newer SDK's entry
+    /// may carry fields this reader cannot decode, and a known one is decoded from its own text.
+    assets: BTreeMap<String, Box<serde_json::value::RawValue>>,
     inputs: Inputs,
 }
 
@@ -796,9 +797,9 @@ impl Index {
         commit: &str,
         expected_format: Option<u64>,
     ) -> Result<Index, Refusal> {
-        let malformed = |error: serde_json::Error| Refusal::Malformed(error.to_string());
         Self::schema(bytes)?;
-        let written: Written = serde_json::from_slice(bytes).map_err(malformed)?;
+        let written: Written =
+            serde_json::from_slice(bytes).map_err(|error| Refusal::Malformed(error.to_string()))?;
         if written.build.commit != commit {
             return Err(Refusal::Build {
                 expected: commit.to_owned(),
@@ -811,17 +812,28 @@ impl Index {
         if !crate::manifest::revision(&written.mixins.rev) {
             return Err(Refusal::MixinsRev(written.mixins.rev));
         }
+        #[derive(Deserialize)]
+        struct Named {
+            kind: String,
+        }
         let mut assets = BTreeMap::new();
         for (name, asset) in written.assets {
+            let entry_error =
+                |error: serde_json::Error| Refusal::Malformed(format!("{name}: {error}"));
+            // A struct also decodes from a JSON array, which no entry is.
+            if !asset.get().starts_with('{') {
+                return Err(Refusal::Malformed(format!("{name} is not an object")));
+            }
             // A kind added after this reader is a newer SDK's: left out before the rest of its
             // entry is decoded (its fields may be new too), and refused only by a route that asks
-            // for it ([`Inputs::route`]), so older launchers keep reading the rest.
-            let named = asset.get("kind").and_then(serde_json::Value::as_str);
-            let named = named.ok_or_else(|| Refusal::Malformed(format!("{name} names no kind")))?;
-            let Some(kind) = Kind::named(named) else {
+            // for it ([`Inputs::route`]), so older launchers keep reading the rest. Its other
+            // fields are skipped unread; a missing, repeated or non-string `kind` is refused.
+            let Named { kind } = serde_json::from_str(asset.get()).map_err(entry_error)?;
+            let Some(kind) = Kind::named(&kind) else {
                 continue;
             };
-            let asset: WrittenAsset = serde_json::from_value(asset).map_err(malformed)?;
+            // Decoded from the entry's own text, so a repeated field is refused here too.
+            let asset: WrittenAsset = serde_json::from_str(asset.get()).map_err(entry_error)?;
             let codec = match asset.codec.as_str() {
                 "none" => Codec::None,
                 "xz" => Codec::Xz,

@@ -2,9 +2,9 @@
 //! and `secondaryBlockOutline` under a high contrast one): an outline its fragment shader colours
 //! or animates. Without one the outline draws natively (`vs_line` in terrain.wgsl).
 
-use crate::core_shader::{CoreProgram, Glue};
 use crate::polytone_post::ExpressionUniform;
 use glam::Mat4;
+use sunrise_glsl::{Glue, Translated};
 
 /// The outline's edges (`pack_lines::layout`: start, end, ARGB colour and width per instance) as
 /// vanilla's lines: four vertices an edge, the start twice and the end twice, the side
@@ -42,7 +42,7 @@ pub(crate) struct CoreLines {
 impl super::Renderer {
     /// The resource packs' `core/rendertype_lines` (`HudAtlas::lines_shader`, with the
     /// expression uniforms resolved for it) for the block outline, or the built-in one.
-    pub fn set_lines_shader(&mut self, program: Option<(&CoreProgram, &[ExpressionUniform])>) {
+    pub fn set_lines_shader(&mut self, program: Option<(&Translated, &[ExpressionUniform])>) {
         let format = self.output.frame.format;
         // A pack's GLSL writes vanilla's gamma: a frame of linear light keeps the built-in one.
         let program = program.filter(|_| !self.output.frame.linear_light);
@@ -58,7 +58,7 @@ impl CoreLines {
     pub(super) fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        program: &CoreProgram,
+        program: &Translated,
         expressions: &[ExpressionUniform],
     ) -> Option<Self> {
         // A pack's shader is untrusted: the backend failing to compile it is an internal error.
@@ -302,7 +302,7 @@ mod tests {
 
     /// One edge across the middle of a 64 by 64 target, 4 pixels wide, blue (ARGB `ff0000ff`),
     /// at `GameTime` 0.25, drawn with `program`: the RGBA rows read back.
-    fn draw_edge(device: &wgpu::Device, queue: &wgpu::Queue, program: &CoreProgram) -> Vec<u8> {
+    fn draw_edge(device: &wgpu::Device, queue: &wgpu::Queue, program: &Translated) -> Vec<u8> {
         draw_edge_with(device, queue, program, &[], None)
     }
 
@@ -311,7 +311,7 @@ mod tests {
     fn draw_edge_with(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        program: &CoreProgram,
+        program: &Translated,
         expressions: &[ExpressionUniform],
         poly_globals: Option<&super::super::expression_blocks::PolyGlobalsBytes>,
     ) -> Vec<u8> {

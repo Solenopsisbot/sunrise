@@ -27,18 +27,20 @@ fn watched_guest(game: &mut Game<'_>) -> mpsc::Receiver<Out> {
     rx
 }
 
-/// A one-row chest display for UUID 123 (`Host::open_menu`), replacing the open menu: its window.
+/// A one-row chest display for UUID 123 (`PlayerRef::open_chest_menu`), replacing the open menu: its window.
 fn open(game: &mut Game<'_>) -> i32 {
+    let player = game.player(123).unwrap();
     let host: &mut dyn ServerHost = game;
-    host.open_menu(
-        123,
-        1,
-        mod_api::Text::literal("chest"),
-        Vec::new(),
-        MenuReplace::CloseFirst,
-    )
-    .unwrap()
-    .unwrap()
+    let menu = player
+        .open_chest_menu(
+            host,
+            1,
+            mod_api::Text::literal("chest"),
+            Vec::new(),
+            MenuReplace::CloseFirst,
+        )
+        .unwrap();
+    menu.container_id(host).unwrap()
 }
 
 /// The counter is the window the last open took; an advance moves it as an open does
@@ -61,8 +63,11 @@ fn the_container_counter_is_the_last_window_and_advances_as_an_open_does() {
 
                 let host: &mut dyn ServerHost = game;
                 assert_eq!(player.next_container_counter(host), Some(2));
-                assert!(
-                    host.menu(123, first).is_some(),
+                assert_eq!(
+                    player
+                        .container_menu(host)
+                        .and_then(|menu| menu.container_id(host)),
+                    Some(first),
                     "the open menu keeps its window"
                 );
                 assert!(sent(&rx).is_empty(), "an advance sends nothing");

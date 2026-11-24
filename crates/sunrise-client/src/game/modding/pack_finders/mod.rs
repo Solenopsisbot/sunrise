@@ -176,7 +176,8 @@ pub(super) fn data_packs(mods: &ModsState) -> Vec<std::sync::Arc<DataPack>> {
         .into_iter()
         .map(|pack| {
             let mut data =
-                DataPack::from_source(pack.id, pack.source.open().expect("retained source"));
+                DataPack::from_source(pack.id, pack.source.open().expect("retained source"))
+                    .with_filter(pack.filter);
             data.selection = pack.selection;
             std::sync::Arc::new(data)
         })

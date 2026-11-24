@@ -92,7 +92,8 @@ impl ThrownTrident {
         self.previous = n.position;
         self.yaw = n.yaw;
         self.pitch = n.pitch;
-        self.loyalty = n.item.enchantment_level("minecraft:loyalty");
+        // The server resolves Loyalty against its current enchantment table after this read.
+        self.loyalty = 0;
         self.stack = n.item;
         self.velocity = n.motion;
         self.in_ground = n.in_ground;

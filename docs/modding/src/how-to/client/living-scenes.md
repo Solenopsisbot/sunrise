@@ -8,7 +8,8 @@ flickers, and dripstone and leaves drip, the way the client's animate tick makes
 particles for blocks near the player.
 
 When a scene block includes a mod block entity, `block_entity_submit` draws it using
-that supplied entity data and full-bright lighting. The hook's `pos` is relative to
+a read-only borrow of the supplied entity data (`event.entity.nbt()`, `item_slot`,
+`copy_item_slot`) and full-bright lighting. The hook's `pos` is relative to
 the scene; it does not identify a block in the client level.
 
 For a menu screen, use the draw context from `MenuScreen::with_draw(|host, frame, draw| ...)`.

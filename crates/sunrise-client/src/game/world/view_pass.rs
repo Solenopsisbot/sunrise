@@ -37,7 +37,10 @@ impl Game<'_> {
         let viewed: Vec<Dim> = Dim::all()
             .into_iter()
             .filter(|d| {
-                !ticked.contains(d) && (self.needs_view_pass(*d) || self.has_spawn_tickets(*d))
+                !ticked.contains(d)
+                    && (self.needs_view_pass(*d)
+                        || self.has_spawn_tickets(*d)
+                        || self.has_async_chunk_requests(*d))
             })
             .collect();
         for dim in viewed {
@@ -391,11 +394,21 @@ pub(in crate::game) mod tests {
         let (mut game, rx, mut all) = stream_the_nether(&mut resources, "view-pass");
         assert!(all.opened, "the Nether was opened on the client");
         assert_eq!(all.chunks, square(), "the area's chunks, wrapped");
+        // The synchronous load_world fixture skips the server startup that opens the handle epoch.
+        game.native_lifecycle
+            .begin_open(Some(mod_api::Authority::IntegratedServer));
+        let nether = game.level(Dim::Nether.id()).unwrap();
+        let chunk = game.chunk(nether, [40, 40]).unwrap();
+        assert_eq!(chunk.resend(&mut game), Ok(()));
         // Kept loaded for 40 more ticks, its clock the server's.
+        let mut resent = Vec::new();
         for _ in 0..40 {
             game.tick_server(false).unwrap();
-            all.times.extend(sent(&rx).times);
+            let updates = sent(&rx);
+            all.times.extend(updates.times);
+            resent.extend(updates.chunks);
         }
+        assert_eq!(resent, [(40, 40)], "resend goes to the viewed-level holder");
         let world = game.levels.parked_world(Dim::Nether).unwrap();
         assert!(
             square().iter().all(|c| world.chunks.contains_key(c)),
@@ -1061,7 +1074,7 @@ pub(in crate::game) mod tests {
         assert!(all.sounds.is_empty());
         // A mod's handle needs the world's epoch, which this test world never began.
         game.native_lifecycle
-            .begin_open(mod_api::Authority::IntegratedServer);
+            .begin_open(Some(mod_api::Authority::IntegratedServer));
         let nether = game.level(Dim::Nether.id()).unwrap();
         let blocks = mod_api::SoundSource::Blocks;
         let at = [648.5, 70.0, 650.25];
@@ -1101,7 +1114,7 @@ pub(in crate::game) mod tests {
         assert!(tracks(&game), "the view tracks the pig");
         game.enter_level(Dim::Nether).unwrap();
         game.native_lifecycle
-            .begin_open(mod_api::Authority::IntegratedServer);
+            .begin_open(Some(mod_api::Authority::IntegratedServer));
         let emitter = game.entity(pig as u32).unwrap();
         let neutral = mod_api::SoundSource::Neutral;
         let sound = "minecraft:entity.pig.ambient";

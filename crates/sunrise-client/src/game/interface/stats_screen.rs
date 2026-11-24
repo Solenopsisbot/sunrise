@@ -746,8 +746,7 @@ impl Game<'_> {
         let before = self.stats_ui.tab;
         if self.stats_ui.key(key, ctrl, shift, active) && self.stats_ui.tab != before {
             // TabManager.setCurrentTab(.., true): the click of a tab press.
-            self.audio
-                .play("minecraft:ui.button.click", None, 0.25, 1.0);
+            self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
         }
     }
     pub(super) fn stats_click(&mut self, size: [u32; 2]) -> bool {
@@ -765,8 +764,7 @@ impl Game<'_> {
             {
                 self.stats_ui.tab = i;
                 self.stats_ui.scroll.amount = 0.0;
-                self.audio
-                    .play("minecraft:ui.button.click", None, 0.25, 1.0);
+                self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
                 return true;
             }
         }
@@ -777,8 +775,7 @@ impl Game<'_> {
             200.0,
             20.0,
         ) {
-            self.audio
-                .play("minecraft:ui.button.click", None, 0.25, 1.0);
+            self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
             self.set_screen(Screen::Paused);
             return true;
         }
@@ -796,8 +793,7 @@ impl Game<'_> {
                         Some((sc, _)) if sc == c => None,
                         _ => Some((c, -1)),
                     };
-                    self.audio
-                        .play("minecraft:ui.button.click", None, 0.25, 1.0);
+                    self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
                 }
             }
         }

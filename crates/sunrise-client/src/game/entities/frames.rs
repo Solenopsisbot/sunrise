@@ -242,8 +242,7 @@ impl Game<'_> {
             return true;
         }
         self.next_entity += 1;
-        self.audio
-            .play(&sound(&frame, "place"), Some(center(&frame)), 1.0, 1.0);
+        self.play_audio(&sound(&frame, "place"), Some(center(&frame)), 1.0, 1.0);
         // HangingEntityItem.useOn: ENTITY_PLACE at the frame, by the player, before it is
         // added; ItemStack.useOn then counts the use.
         let ctx = self.player_context(None);
@@ -336,11 +335,10 @@ impl Game<'_> {
             }
             self.item_frames[i].set_item(Some(held));
             action = "put";
-            self.audio
-                .play(&sound(&self.item_frames[i], "add_item"), Some(at), 1.0, 1.0);
+            self.play_audio(&sound(&self.item_frames[i], "add_item"), Some(at), 1.0, 1.0);
         } else {
             let s = sound(&self.item_frames[i], "rotate_item");
-            self.audio.play(&s, Some(at), 1.0, 1.0);
+            self.play_audio(&s, Some(at), 1.0, 1.0);
             let f = &mut self.item_frames[i];
             f.rotation = (f.rotation + 1) % 8;
             action = "rotate";
@@ -480,7 +478,7 @@ impl Game<'_> {
         } else {
             // BlockAttachedEntity.kill precedes ItemFrame.dropItem's break sound.
             self.entity_killed_event_by(at, source);
-            self.audio.play(&sound(&f, "break"), Some(at), 1.0, 1.0);
+            self.play_audio(&sound(&f, "break"), Some(at), 1.0, 1.0);
         }
         // ItemFrame.dropItem clears the item (updating comparators) before drops.
         if f.item.is_some() {
@@ -521,8 +519,7 @@ impl Game<'_> {
         self.post_game_event("minecraft:block_change", at, ctx);
         if !with_frame {
             // ItemFrame.hurtServer plays this after the event.
-            self.audio
-                .play(&sound(&f, "remove_item"), Some(at), 1.0, 1.0);
+            self.play_audio(&sound(&f, "remove_item"), Some(at), 1.0, 1.0);
         }
         self.world.modified.insert((f.pos[0] >> 4, f.pos[2] >> 4));
         if by_player
@@ -549,7 +546,7 @@ impl Game<'_> {
                 sound(&self.item_frames[i], "add_item"),
                 center(&self.item_frames[i]),
             );
-            self.audio.play(&name, Some(at), 1.0, 1.0);
+            self.play_audio(&name, Some(at), 1.0, 1.0);
         }
         self.frame_output_changed(pos);
     }
@@ -673,8 +670,7 @@ impl Game<'_> {
         };
         let mut f = self.item_frames.remove(index);
         self.entity_killed_event_by(center(&f), source);
-        self.audio
-            .play(&sound(&f, "break"), Some(center(&f)), 1.0, 1.0);
+        self.play_audio(&sound(&f, "break"), Some(center(&f)), 1.0, 1.0);
         self.drop_frame_items(&mut f, true, false, false);
         // ItemFrame.dropItem(level, causedBy): BLOCK_CHANGE after the drops.
         let ctx = self.who_context(None, None);
@@ -716,8 +712,7 @@ impl Game<'_> {
                     i = now;
                     let mut f = self.item_frames.remove(i);
                     // BlockAttachedEntity.tick discards without a death event.
-                    self.audio
-                        .play(&sound(&f, "break"), Some(center(&f)), 1.0, 1.0);
+                    self.play_audio(&sound(&f, "break"), Some(center(&f)), 1.0, 1.0);
                     if f.item.is_some() {
                         self.frame_output_changed(f.pos);
                     }

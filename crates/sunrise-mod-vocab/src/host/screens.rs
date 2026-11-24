@@ -99,7 +99,9 @@ pub trait ScreensClientHost {
     /// focused mounted controls. That activation does not dispatch screen mouse hooks.
     fn mod_screen_open(&mut self, mod_id: &str) -> bool;
     /// Side: client.
-    /// Closes mod `mod_id`'s own screen, if it is open.
+    /// Closes mod `mod_id`'s own screen, if it is open: to the Mods screen when its
+    /// [`ConfigScreenFactory`](crate::ConfigScreenFactory) opened it, otherwise as Escape
+    /// closes a screen (back to the game, or to the title screen with no world).
     fn mod_screen_close(&mut self, mod_id: &str);
     /// Side: client.
     /// Closes the open screen as its Escape key does: a container screen
@@ -155,4 +157,12 @@ pub trait ScreensClientHost {
     /// `key.mouse.left`, `key.mouse.4`, for example).
     /// Unknown names are not down. Modifier combinations use `ClientHost::modifiers`.
     fn is_key_down(&self, key: &str) -> bool;
+    /// Side: client.
+    /// Bounding rectangle `[x, y, width, height]` in GUI pixels of a HUD layer's
+    /// geometry after viewport and scissor clipping, before other layers can cover it.
+    /// Use a vanilla id such as `"minecraft:effects"` or a registered mod layer id.
+    /// Returns `Ok(None)` if the layer has not painted visible geometry, including
+    /// before it draws, if it is canceled, or outside the HUD pass (including screen render hooks).
+    /// Returns `Err(LevelReadError::Unavailable)` outside a client window.
+    fn hud_layer_bounds(&self, layer: &str) -> Result<Option<[f32; 4]>, LevelReadError>;
 }

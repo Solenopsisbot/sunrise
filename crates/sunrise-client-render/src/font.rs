@@ -9,11 +9,15 @@
 use crate::{
     hud::Rect,
     resource_source::ResourceSource,
-    text::{Span, Style, Text, legacy_format},
+    text::{Style, Text},
     zip::Zip,
 };
 use ab_glyph::{Font as _, ScaleFont as _};
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use sunrise_core::random::LegacyRandom;
+
+mod formatted_lines;
+pub use formatted_lines::{FormattedLine, FormattedLines};
 
 /// `FontDescription.DEFAULT`.
 pub const DEFAULT: &str = "minecraft:default";
@@ -109,6 +113,15 @@ struct FontSet {
     /// `glyphsByWidth` for obfuscated text (built on first use), by `ceil(advance)`.
     by_width: Option<HashMap<i32, Vec<char>>>,
 }
+impl FontSet {
+    fn glyph_cache(&mut self, non_fishy: bool) -> &mut crate::fast_hash::FxHashMap<char, Glyph> {
+        if non_fishy {
+            &mut self.non_fishy
+        } else {
+            &mut self.glyphs
+        }
+    }
+}
 /// The atlas region glyphs are rasterized into, filled in rows.
 struct Region {
     cursor: (u32, u32),
@@ -122,8 +135,84 @@ struct Cache {
     sets: Vec<(String, FontSet)>,
     region: Region,
     /// `Font.random`: picks obfuscated glyphs.
-    random: sunrise_core::random::LegacyRandom,
+    random: LegacyRandom,
+    draw: DrawJournal,
 }
+
+#[derive(Default)]
+struct DrawJournal {
+    depth: usize,
+    flush: bool,
+    /// Only new entries; a successful child leaves its entries for the parent to undo.
+    inserted: Vec<GlyphInsertion>,
+}
+
+struct GlyphInsertion {
+    set: usize,
+    ch: char,
+    non_fishy: bool,
+}
+
+struct DrawMark {
+    cursor: (u32, u32),
+    row: u32,
+    full: bool,
+    pending: usize,
+    random: LegacyRandom,
+    flush: bool,
+    inserted: usize,
+}
+
+/// The font side of one lexical HUD draw scope. Uncommitted scopes restore the glyph atlas's
+/// pending uploads, allocator, cached glyphs and obfuscation RNG, even during unwinding.
+pub(crate) struct FontDraw<'a> {
+    font: &'a Font,
+    mark: Option<DrawMark>,
+}
+
+impl FontDraw<'_> {
+    /// Only the outermost successful scope releases the pending uploads to its batch.
+    pub(crate) fn commit(mut self) -> Vec<Patch> {
+        self.mark = None;
+        let mut cache = self.font.cache.borrow_mut();
+        cache.draw.depth -= 1;
+        if cache.draw.depth != 0 {
+            return Vec::new();
+        }
+        cache.draw.inserted.clear();
+        if std::mem::take(&mut cache.draw.flush) {
+            std::mem::take(&mut cache.region.pending)
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+impl Drop for FontDraw<'_> {
+    fn drop(&mut self) {
+        let Some(mark) = self.mark.take() else { return };
+        let Cache {
+            sets,
+            region,
+            random,
+            draw,
+        } = &mut *self.font.cache.borrow_mut();
+        region.cursor = mark.cursor;
+        region.row = mark.row;
+        region.full = mark.full;
+        region.pending.truncate(mark.pending);
+        *random = mark.random;
+        draw.depth -= 1;
+        draw.flush = mark.flush;
+        for entry in draw.inserted.drain(mark.inserted..) {
+            sets[entry.set]
+                .1
+                .glyph_cache(entry.non_fishy)
+                .remove(&entry.ch);
+        }
+    }
+}
+
 pub struct Font {
     /// The atlas rects of every texture, by resource name: a bitmap provider's
     /// `file` may name any texture, not only one under `textures/font`.
@@ -714,6 +803,7 @@ impl Font {
                 },
                 // `Font.random`: `RandomSource.create()`.
                 random: crate::random_source::create(),
+                draw: DrawJournal::default(),
             }),
             generation: std::cell::Cell::new(next_generation()),
             uniform: false,
@@ -773,6 +863,25 @@ impl Font {
             by_width: None,
         }
     }
+    /// Marks the font's draw state before entering a lexical HUD draw scope. Font reloads
+    /// and frame boundaries happen outside such scopes.
+    pub(crate) fn begin_draw(&self) -> FontDraw<'_> {
+        let mut cache = self.cache.borrow_mut();
+        cache.draw.depth += 1;
+        FontDraw {
+            font: self,
+            mark: Some(DrawMark {
+                cursor: cache.region.cursor,
+                row: cache.region.row,
+                full: cache.region.full,
+                pending: cache.region.pending.len(),
+                random: cache.random.clone(),
+                flush: cache.draw.flush,
+                inserted: cache.draw.inserted.len(),
+            }),
+        }
+    }
+
     /// Forget rasterized glyphs (after changing font options).
     pub fn reset_cache(&self) {
         let mut cache = self.cache.borrow_mut();
@@ -826,18 +935,35 @@ impl Font {
     }
     /// The first active provider's glyph, else the missing glyph.
     fn glyph_of(&self, id: &str, c: char) -> Glyph {
+        self.cached_glyph(id, c, false)
+    }
+    /// `FontSet.getRandomGlyph`'s `SelectedGlyphs.nonFishy`: the glyph of the first provider whose
+    /// advance is not fishy, else the missing glyph. A character whose first glyph is fine has
+    /// the same one for both.
+    fn glyph_non_fishy(&self, id: &str, c: char) -> Glyph {
+        let any = self.glyph_of(id, c);
+        if fishy_advance(any.advance) {
+            self.cached_glyph(id, c, true)
+        } else {
+            any
+        }
+    }
+    fn cached_glyph(&self, id: &str, c: char, non_fishy: bool) -> Glyph {
         let mut cache = self.cache.borrow_mut();
-        let Cache { sets, region, .. } = &mut *cache;
+        let Cache {
+            sets, region, draw, ..
+        } = &mut *cache;
         // FontManager.getFontSetRaw: a font that doesn't exist draws every
         // character as the missing glyph.
-        let Some((_, set)) = sets.iter_mut().find(|(k, _)| k == id) else {
+        let Some((index, (_, set))) = sets.iter_mut().enumerate().find(|(_, (k, _))| k == id)
+        else {
             return self.missing;
         };
-        if let Some(g) = set.glyphs.get(&c) {
+        if let Some(g) = set.glyph_cache(non_fishy).get(&c) {
             return *g;
         }
         let was_full = std::mem::replace(&mut region.full, false);
-        let found = self.resolve(set, region, c, false);
+        let found = self.resolve(set, region, c, non_fishy);
         // No room: the missing glyph for now, not remembered, so the
         // character is tried again once `begin_frame` cleared the region.
         let overflowed = std::mem::replace(&mut region.full, was_full);
@@ -846,34 +972,14 @@ impl Font {
             return self.missing;
         }
         let glyph = found.unwrap_or(self.missing);
-        set.glyphs.insert(c, glyph);
-        glyph
-    }
-    /// `FontSet.getRandomGlyph`'s `SelectedGlyphs.nonFishy`: the glyph of the first provider whose
-    /// advance is not fishy, else the missing glyph. A character whose first glyph is fine has
-    /// the same one for both.
-    fn glyph_non_fishy(&self, id: &str, c: char) -> Glyph {
-        let any = self.glyph_of(id, c);
-        if !fishy_advance(any.advance) {
-            return any;
+        set.glyph_cache(non_fishy).insert(c, glyph);
+        if draw.depth != 0 {
+            draw.inserted.push(GlyphInsertion {
+                set: index,
+                ch: c,
+                non_fishy,
+            });
         }
-        let mut cache = self.cache.borrow_mut();
-        let Cache { sets, region, .. } = &mut *cache;
-        let Some((_, set)) = sets.iter_mut().find(|(k, _)| k == id) else {
-            return self.missing;
-        };
-        if let Some(g) = set.non_fishy.get(&c) {
-            return *g;
-        }
-        let was_full = std::mem::replace(&mut region.full, false);
-        let found = self.resolve(set, region, c, true);
-        let overflowed = std::mem::replace(&mut region.full, was_full);
-        region.full |= overflowed;
-        if overflowed {
-            return self.missing;
-        }
-        let glyph = found.unwrap_or(self.missing);
-        set.non_fishy.insert(c, glyph);
         glyph
     }
     fn resolve(
@@ -996,7 +1102,7 @@ impl Font {
     }
     /// Starts the random `random_glyph` draws on over from `seed`.
     pub fn reseed(&self, seed: i64) {
-        self.cache.borrow_mut().random = sunrise_core::random::LegacyRandom::new(seed);
+        self.cache.borrow_mut().random = LegacyRandom::new(seed);
     }
     /// `FontSet.getRandomGlyph`: what an obfuscated character draws, a random
     /// glyph of the font as wide as `advance` (rounded up), else the missing
@@ -1108,10 +1214,17 @@ impl Font {
         }
         None
     }
-    /// Atlas pixels rasterized since the last call.
+    /// Atlas pixels rasterized since the last drain. Inside a draw scope, records a flush for
+    /// the outermost commit and leaves the pending pixels in place until then.
     #[sunrise_mod_api_macros::replaceable]
     pub fn take_patches(&self) -> Vec<Patch> {
-        std::mem::take(&mut self.cache.borrow_mut().region.pending)
+        let mut cache = self.cache.borrow_mut();
+        if cache.draw.depth != 0 {
+            cache.draw.flush = true;
+            Vec::new()
+        } else {
+            std::mem::take(&mut cache.region.pending)
+        }
     }
     pub fn advance(&self, c: char, style: &Style) -> f32 {
         self.advance_with_default(c, style, DEFAULT)
@@ -1143,8 +1256,12 @@ impl Font {
     /// explicit style font.
     pub fn width_text_with_font(&self, t: &Text, default_font: &str) -> f32 {
         let t = t.resolved();
-        crate::bidi::visual(&t)
-            .chars()
+        self.width_visual_with_font(&crate::bidi::visual(&t), default_font)
+    }
+    /// `Font.width` on already-reordered visual text, using `default_font` for
+    /// spans without an explicit style font.
+    pub fn width_visual_with_font(&self, text: &Text, default_font: &str) -> f32 {
+        text.chars()
             .map(|(c, s)| self.advance_with_default(c, s, default_font))
             .sum::<f32>()
             .ceil()
@@ -1162,8 +1279,11 @@ impl Font {
     /// with `FormattedCharSequence.forward`: every character is a glyph, a
     /// `§` included (`StringDecomposer.iterate`, not `iterateFormatted`).
     pub fn width_drawn(&self, t: &Text) -> f32 {
-        crate::bidi::visual(t)
-            .chars()
+        self.width_visual(&crate::bidi::visual(t))
+    }
+    /// Measure a sequence already resolved and put in visual order.
+    pub fn width_visual(&self, text: &Text) -> f32 {
+        text.chars()
             .map(|(c, s)| self.advance(c, s))
             .sum::<f32>()
             .ceil()
@@ -1228,81 +1348,21 @@ impl Font {
         max_width: f32,
         default_font: &str,
     ) -> Vec<Text> {
-        let max_width = max_width.max(1.0);
-        let mut parts: Vec<(Vec<char>, Span)> = t
-            .spans
-            .iter()
-            .filter(|s| !s.text.is_empty())
-            .map(|s| (s.text.chars().collect(), s.with_text(String::new())))
-            .collect();
-        let mut flat: Vec<char> = parts.iter().flat_map(|p| p.0.iter().copied()).collect();
-        let mut out = Vec::new();
-        let mut force_new_line = false;
-        // One LineBreakFinder per line, over the parts left.
-        while let Some((at, split_style)) =
-            self.line_break_with_font(&parts, max_width, default_font)
-        {
-            let tail = flat[at];
-            let new_line = tail == '\n';
-            let skip = usize::from(new_line || tail == ' ');
-            force_new_line = new_line;
-            out.push(split_at(&mut parts, at, skip, &split_style));
-            flat.drain(..at + skip);
-        }
-        if !parts.is_empty() {
-            out.push(Text::from_spans(
-                parts
-                    .into_iter()
-                    .map(|(text, span)| span.with_text(text.into_iter().collect::<String>()))
-                    .collect(),
-            ));
-        } else if force_new_line {
-            out.push(Text::empty());
-        }
-        out
-    }
-    /// `StringSplitter.LineBreakFinder` fed by `StringDecomposer.iterateFormatted`:
-    /// where the parts break (a character index) and the style there.
-    fn line_break_with_font(
-        &self,
-        parts: &[(Vec<char>, Span)],
-        max_width: f32,
-        default_font: &str,
-    ) -> Option<(usize, Style)> {
-        let (mut width, mut had_visible, mut last_space) = (0.0f32, false, None);
-        let mut offset = 0;
-        for (contents, part_style) in parts {
-            let mut style = part_style.style.clone();
-            let mut i = 0;
-            while i < contents.len() {
-                let c = contents[i];
-                if c == '§' {
-                    // A `§` that ends its part ends only that part.
-                    let Some(&code) = contents.get(i + 1) else {
-                        break;
-                    };
-                    style = legacy_format(&style, code, &Style::default());
-                    i += 2;
-                    continue;
-                }
-                let at = offset + i;
-                if c == '\n' {
-                    return Some((at, style));
-                }
-                if c == ' ' {
-                    last_space = Some((at, style.clone()));
-                }
-                let advance = self.advance_with_default(c, &style, default_font);
-                width += advance;
-                if had_visible && width > max_width {
-                    return Some(last_space.unwrap_or((at, style)));
-                }
-                had_visible |= advance != 0.0;
-                i += 1;
-            }
-            offset += contents.len();
-        }
-        None
+        self.formatted_lines_with_font(t, max_width, default_font)
+            .map(|line| {
+                Text::from_spans(
+                    line.ranges()
+                        .map(|(part, text, style)| {
+                            let mut span = part.with_text(text);
+                            if !std::ptr::eq(style, &part.style) {
+                                span.style.clone_from(style);
+                            }
+                            span
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
     }
     /// `ComponentRenderUtils.wrapComponents`: the split lines, wrapped ones
     /// indented by an unstyled space; one empty line for empty text.
@@ -1403,49 +1463,10 @@ impl Font {
     }
 }
 
-/// `StringSplitter.FlatComponents.splitAt`: the parts before `at` as a line,
-/// `skip` characters dropped, and the part it ends in restyled as `style`.
-fn split_at(parts: &mut Vec<(Vec<char>, Span)>, at: usize, skip: usize, style: &Style) -> Text {
-    let mut line = Vec::new();
-    let mut push = |text: &[char], span: &Span| {
-        line.push(span.with_text(text.iter().collect::<String>()));
-    };
-    // Each part done is removed, so the one at hand is always the first.
-    let (mut position, mut in_skip) = (at, false);
-    while let Some((text, part_style)) = parts.first() {
-        let size = text.len();
-        if !in_skip {
-            if position > size {
-                push(text, part_style);
-                parts.remove(0);
-                position -= size;
-                continue;
-            }
-            if position > 0 {
-                push(&text[..position], part_style);
-            }
-            position += skip;
-            in_skip = true;
-        }
-        if position <= size {
-            if position == size {
-                parts.remove(0);
-            } else {
-                let mut span = part_style.clone();
-                span.style = style.clone();
-                parts[0] = (text[position..].to_vec(), span);
-            }
-            break;
-        }
-        parts.remove(0);
-        position -= size;
-    }
-    Text::from_spans(line)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::Span;
     use std::path::{Path, PathBuf};
     #[test]
     fn unihex_rows_and_widths() {
@@ -1808,6 +1829,120 @@ mod tests {
         assert_eq!(font.random_glyph(&Style::default(), 65.0).advance, 3.0);
         // Nothing else is 3 wide in the table, and the missing glyph is 6.
         assert_eq!(font.random_glyph(&Style::default(), 3.0).advance, 6.0);
+    }
+
+    #[test]
+    fn aborted_draw_scopes_restore_font_uploads_and_obfuscation() {
+        use crate::hud::{HudAtlas, HudBatch};
+
+        // The wide 'a' is fishy; obfuscation rasterizes its narrow fallback as well.
+        let wide = png(64, 8, |_, _| true);
+        let narrow = png(32, 8, |x, _| x % 8 < 2 + x / 8);
+        let def = br#"{"providers":[{"type":"bitmap","file":"minecraft:font/wide.png","ascent":7,"chars":["a"]},{"type":"bitmap","file":"minecraft:font/narrow.png","ascent":7,"chars":["abcz"]}]}"#;
+        let root = root(
+            "draw-scope",
+            &[
+                ("assets/minecraft/font/default.json", def),
+                ("assets/minecraft/textures/font/wide.png", &wide),
+                ("assets/minecraft/textures/font/narrow.png", &narrow),
+            ],
+        );
+        let source = ResourceSource::directory(root.clone());
+        let atlas = || {
+            let mut atlas = HudAtlas::boot();
+            // Two eight-pixel rows with one texel of padding. On the first row, 'z' and the
+            // wide 'a' fit exactly; one intervening narrow glyph pushes 'a' to the second row.
+            atlas.font = Font::load(&source, &atlas.sprites, &[], (74, 40), (16, 17), white());
+            atlas.font.reseed(23);
+            atlas.font.glyph('z'); // baseline upload, not yet in a batch
+            atlas
+        };
+        let (atlas, control) = (atlas(), atlas());
+        let _ = std::fs::remove_dir_all(&root);
+        let styled = Text::literal("aa").with_style(&Style {
+            obfuscated: Some(true),
+            ..Style::default()
+        });
+        let paint = |batch: &mut HudBatch, atlas: &HudAtlas, text: &Text| {
+            batch.text_styled(atlas, text, 2.0, 4.0, u32::MAX, false);
+        };
+        let trial = |batch: &mut HudBatch| {
+            paint(batch, &atlas, &Text::literal("c"));
+            paint(batch, &atlas, &styled);
+            paint(batch, &atlas, &Text::literal("b")); // region is full
+        };
+        let mut batch = HudBatch::scratch([320, 240]);
+        let epoch = atlas.font.epoch();
+        batch
+            .draw_scope(&atlas.font, |outer| {
+                assert_eq!(
+                    outer.draw_scope(&atlas.font, |inner| {
+                        trial(inner);
+                        Err::<(), _>("inner")
+                    }),
+                    Err("inner")
+                );
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert!(batch.vertices.is_empty());
+        assert!(
+            batch.patches.is_empty(),
+            "aborted child cannot request a flush"
+        );
+
+        assert_eq!(
+            batch.draw_scope(&atlas.font, |outer| {
+                outer.draw_scope(&atlas.font, |inner| {
+                    trial(inner);
+                    Ok::<_, &str>(())
+                })?;
+                assert!(outer.patches.is_empty(), "child commit must defer uploads");
+                Err::<(), _>("outer")
+            }),
+            Err("outer")
+        );
+        assert!(batch.vertices.is_empty());
+        assert!(batch.patches.is_empty());
+        atlas.font.begin_frame();
+        assert_eq!(
+            atlas.font.epoch(),
+            epoch,
+            "the aborted overflow cannot reset the atlas"
+        );
+
+        let mut fresh = HudBatch::scratch([320, 240]);
+        paint(&mut fresh, &control, &styled);
+        batch
+            .draw_scope(&atlas.font, |outer| {
+                outer.draw_scope(&atlas.font, |inner| {
+                    paint(inner, &atlas, &styled);
+                    Ok::<_, ()>(())
+                })?;
+                assert!(outer.patches.is_empty());
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        let uploads: Vec<_> = batch
+            .patches
+            .iter()
+            .map(|p| (p.x, p.y, p.width, p.height))
+            .collect();
+        assert_eq!(uploads, [(0, 16, 8, 8), (9, 16, 64, 8), (0, 25, 8, 8)]);
+        assert_eq!(batch.patches.len(), fresh.patches.len());
+        for (patch, want) in batch.patches.iter().zip(&fresh.patches) {
+            assert_eq!((patch.x, patch.y), (want.x, want.y));
+            assert_eq!(patch.rgba, want.rgba);
+        }
+        assert_eq!(batch.vertices.len(), fresh.vertices.len());
+        for (vertex, want) in batch.vertices.iter().zip(&fresh.vertices) {
+            assert_eq!((vertex.pos, vertex.uv), (want.pos, want.uv));
+        }
+        assert_eq!(
+            atlas.font.cache.borrow().random.state(),
+            control.font.cache.borrow().random.state()
+        );
+        assert!(atlas.font.take_patches().is_empty());
     }
 
     /// A `space` provider's shift glyphs (kerning in server packs: -512 to 512) are drawn and

@@ -231,7 +231,7 @@ impl Game<'_> {
         if data == 1 {
             let at = [pos.x, pos.y, pos.z].map(|v| f64::from(v) + 0.5);
             let pitch = self.world.random.next_float() * 0.1 + 0.9;
-            self.audio.play(
+            self.play_audio(
                 "minecraft:entity.dragon_fireball.explode",
                 Some(at),
                 1.0,
@@ -378,7 +378,7 @@ impl Game<'_> {
             [0, 1, 2].map(|k| eye[k] + d[k] / length * 2.0)
         });
         // Each guest plays it from the global packet.
-        self.audio.play_unshared(sound, at, volume, 1.0);
+        self.play_audio_unshared(sound, at, volume, 1.0);
     }
     /// `ClientLevel.addBreakingBlockEffects`: the block's hit sound (only for
     /// `play_sound`) and one crumb on the face being mined; nothing for air.

@@ -250,10 +250,21 @@ impl Renderer {
                 color_attachments: &attachments,
                 ..Default::default()
             });
-            pass.set_bind_group(0, &self.entity_group, &[]);
             pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.set_vertex_buffer(0, self.screen_buffer.slice(..));
             for (i, quad) in frame.screen.iter().enumerate() {
+                let group = match quad.atlas_page {
+                    Some(page) => {
+                        let Some(group) =
+                            self.screen_page_groups.get(page).and_then(Option::as_ref)
+                        else {
+                            continue;
+                        };
+                        group
+                    }
+                    None => &self.entity_group,
+                };
+                pass.set_bind_group(0, group, &[]);
                 let blend = match quad.blend {
                     crate::screen_effects::Blend::Alpha => 0,
                     crate::screen_effects::Blend::Vignette => 4,

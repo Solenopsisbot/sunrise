@@ -39,10 +39,12 @@ pub trait EntityActionsBackendMut {
         suppress_output: bool,
     ) -> bool;
     /// Side: server.
-    /// Runs the command exactly as `EntityRef::run_command` does, returning
-    /// whether it ran and the success and failure lines its source received, in
-    /// order, as plain text. The player's chat still receives those lines and
-    /// operators are notified under the same rules. The feedback list is empty
+    /// Runs the command exactly as `EntityRef::run_command` does, at the supplied
+    /// `level`, returning whether it ran and the success and failure lines its
+    /// source received, in order, as plain text. The player's chat still receives
+    /// those lines and operators are notified under the same rules. Public `/say`
+    /// and `/me` announcements are not feedback; observe them with `chat_recipient`.
+    /// Use `CommandResult.success` to check execution. The feedback list is empty
     /// with `suppress_output` true or an already silent source. A stale, removed
     /// or unavailable entity returns unsuccessful with no lines. Cross-level teleports retain
     /// the same next-tick handling. Pass the player's permission level to run
@@ -74,8 +76,7 @@ pub trait EntityActionsBackendMut {
     /// the entity under its sound source, for the players within range. A
     /// silent mob plays nothing, as vanilla's check is `isSilent`; a player
     /// (`Player.playSound`) doesn't hear it themself, their own client plays
-    /// it. True means queued, not heard; false for an unknown `minecraft:`
-    /// event or a volume or pitch that isn't a finite non-negative number.
+    /// it. Registered events go by ID and other valid keys by name. True means queued, not heard.
     /// Inside an open transaction in the active level, `play_level_sound_at_position` runs
     /// synchronously at the call. The resolved sound waits for the owning level's outermost
     /// commit, in journal order, and is discarded on abort. Outside a transaction, a queued sound
@@ -110,7 +111,8 @@ pub trait EntityActionsBackendMut {
     /// sound event `sound` bound to the entity, so that it follows it, for
     /// the players within range (16 blocks, times the volume above 1) of
     /// where it is now, the entity's own player too. True means queued, not
-    /// heard; false for an entity outside the level in place.
+    /// heard; false for an unavailable entity or malformed sound key. Registered events go by ID
+    /// and other valid keys by name, with volume and pitch as supplied.
     /// Inside an open transaction in the active level, `play_level_sound_at_entity` runs
     /// synchronously at the call. The resolved sound waits for the owning level's outermost
     /// commit, in journal order, and is discarded on abort. Outside a transaction, a queued sound

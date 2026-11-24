@@ -6,11 +6,12 @@
 //! [`pickup_fluid`](LevelRef::pickup_fluid) and [`place_fluid`](LevelRef::place_fluid), and a
 //! dispenser's answer for a fluid container ([`dispense_container`]): nothing changes until a mod
 //! calls them.
-use crate::content::resource::{Ends, move_once};
+use crate::content::resource::{Ends, advance_transfer_index, move_once};
 use crate::{
     Capability, Direction, DispenseItemEvent, Dispensed, FLUIDS, FluidResource, FluidStack,
-    GameEventContext, Hand, HostTransaction, ITEM_FLUIDS, ItemPlace, LevelRef, PlayerRef,
-    ResourceHandler, ScratchError, ServerHost, SoundSource, TransactionError, backend_mut_of,
+    GameEventContext, Hand, HostBlockStates, HostTransaction, ITEM_FLUIDS, ItemPlace, LevelRef,
+    PlayerRef, ResourceHandler, ScratchError, ServerHost, SoundSource, TransactionError,
+    backend_mut_of,
 };
 
 /// `FluidType.BUCKET_VOLUME`: what a source block holds, and what a placement takes.
@@ -23,15 +24,16 @@ const BUCKET: u32 = 1000;
 /// A tank block calls it from its `use_item_on` part and answers a success when it is true:
 ///
 /// ```no_run
-/// use mod_api::{BlockPart, Direction, InteractionResult, ServerHost, UseItemOnEvent, fluid_util};
+/// use mod_api::{BlockPart, Direction, HostSide, InteractionResult, UseItemOnEvent, fluid_util};
 /// struct Tank;
 /// #[mod_api::sunrise_part]
 /// impl BlockPart for Tank {
 ///     fn use_item_on(
 ///         &self,
-///         host: &mut dyn ServerHost,
+///         host: HostSide<'_>,
 ///         event: &mut UseItemOnEvent<'_>,
 ///     ) -> Option<InteractionResult> {
+///         let HostSide::Server(host) = host else { return None };
 ///         let click = event.click;
 ///         let player = host.player(click.player)?;
 ///         let level = player.level(host)?;
@@ -114,12 +116,13 @@ pub fn interact_with_handler(
 /// `FluidUtil.triggerSoundAndGameEvent`: what a bucket plays as `fluid` goes in or out of a
 /// container at `at` in `level`. `pickup` is true when the fluid came out of the handler into the
 /// container (`minecraft:fluid_pickup` and the fluid's
-/// [`fluid_pickup_sound`](crate::prelude::TagsHost::fluid_pickup_sound)) and false when it went
+/// [`pickup_sound`](crate::FluidKey::pickup_sound)) and false when it went
 /// in (`minecraft:fluid_place` and its
-/// [`fluid_empty_sound`](crate::prelude::TagsHost::fluid_empty_sound)). The sound plays under
+/// [`empty_sound`](crate::FluidKey::empty_sound)). The sound plays under
 /// the block slider at full volume and pitch for every player near, the acting one included,
 /// since the server decides the move; the game event names `player` as its source when given.
-/// A fluid with no world form, a tank-only one, has no sound, and only its game event goes out.
+/// A fluid with no bucket sound, a tank-only one that names no bucket, has no sound, and only
+/// its game event goes out.
 pub fn trigger_sound_and_game_event(
     host: &mut dyn ServerHost,
     fluid: &FluidResource,
@@ -128,13 +131,12 @@ pub fn trigger_sound_and_game_event(
     player: Option<PlayerRef>,
     pickup: bool,
 ) {
-    let id = fluid
-        .fluid()
-        .key()
-        .and_then(crate::content::registry_keys::fluid_id);
-    let sound = id.and_then(|id| match pickup {
-        true => host.fluid_pickup_sound(id),
-        false => host.fluid_empty_sound(id),
+    let sound = fluid.fluid().key().and_then(|key| {
+        let states = host.block_states();
+        match pickup {
+            true => key.pickup_sound(&states),
+            false => key.empty_sound(&states),
+        }
     });
     if let Some(sound) = sound {
         level.play_sound(host, sound, at, SoundSource::Blocks, 1.0, 1.0, None);
@@ -228,7 +230,8 @@ pub fn try_place_fluid(
     pos: [i32; 3],
     validate: bool,
 ) -> Option<FluidStack> {
-    for index in 0..source.size(host) {
+    let mut indices = 0..source.size(host);
+    while let Some(index) = advance_transfer_index(source, host, &mut indices, None) {
         let Some(fluid) = source.resource(host, index) else {
             continue;
         };
@@ -251,6 +254,16 @@ pub fn try_place_fluid(
     None
 }
 
+/// Why [`dispense_container`]'s source-level transaction did not commit its transfer.
+enum Refused {
+    /// The container neither picked up nor placed any fluid.
+    NothingMoved,
+    /// The scratch loan could not open or its stack failed write validation.
+    NotRun,
+    /// The remainder could not be routed, or a commit was refused.
+    Remainder,
+}
+
 /// NeoForge's `DispenseFluidContainer`: a dispenser's answer for a fluid container, which a
 /// container's [`dispense_item`](crate::ItemPart::dispense_item) part returns (it is no default:
 /// vanilla's buckets keep their own behaviours). `event.stack` runs in a lent two-slot copy whose
@@ -264,18 +277,20 @@ pub fn try_place_fluid(
 /// sounds, and game events (including a pickup through `FLUIDS`), as well as the waterlogging
 /// tick and any ticks scheduled by a `place_liquid` Part through its
 /// [`LevelWriteHost`](crate::LevelWriteHost).
-/// Without a transaction in the dispenser's level, those effects publish before the helper
-/// inserts or prepares an overflow remainder, and before the dispenser's click and smoke.
+/// Those effects publish once, at the outermost commit, after the slot result and any
+/// overflow remainder are routed, and before the dispenser's click and smoke. A refused
+/// remainder or commit rolls the transfer back and leaves the dispenser's stack as it was,
+/// without a default dispense.
 /// A single container is replaced in place (the first slot, else
 /// the second when the first was emptied); when both slots remain populated, the first slot
 /// stays in the dispenser slot and the second slot's remainder goes into the original dispenser,
 /// never a replacement at that position. If it cannot go into that dispenser, it goes out of the
 /// front with a second click (`DefaultDispenseItemBehavior.addToInventoryOrDispense`).
 /// Where neither moves anything, nothing is changed and one container is dispensed as it is
-/// ([`dispense_default`](crate::prelude::ItemsServerHost::dispense_default)). The detached
+/// ([`LevelRef::dispense_default`]). The detached
 /// remainder retains its count until the active slot is written. Return None unchanged (no
 /// override) where the dispenser's level isn't open, transactions are unavailable, or stack
-/// validation fails; do not call `dispense_default` again.
+/// validation fails before anything runs; do not call `dispense_default` again.
 pub fn dispense_container(
     host: &mut dyn ServerHost,
     event: &DispenseItemEvent<'_>,
@@ -283,37 +298,51 @@ pub fn dispense_container(
     let level = host.level(event.dimension)?;
     let [x, y, z] = event.pos;
     let [dx, dy, dz] = event.facing.normal();
-    let front = [x + dx, y + dy, z + dz];
+    let front = [x.wrapping_add(dx), y.wrapping_add(dy), z.wrapping_add(dz)];
     let side = Some(event.facing.opposite());
-    // The loan owns the transfer scope. Closing it publishes the transfer before we
-    // route or prepare overflow, unless the caller's source-level scope still owns both.
-    let moved = host.scratch_slots(event.stack.clone(), |host, _tx, copy| {
-        // The container's handler sees one container at a time, whatever the stack.
-        let one = ItemPlace::OneByOne(Box::new(copy.clone()));
-        let item = one.capability(host, &ITEM_FLUIDS).ok_or(())?;
-        let transferred = try_pickup_fluid(host, &item, None, level, front, side).is_some()
-            || try_place_fluid(host, &item, None, level, front, false).is_some();
-        transferred.then_some(()).ok_or(())
-    });
-    let left = match moved {
-        Ok(((), (first, None))) => first,
-        Ok(((), (None, Some(changed)))) => Some(changed),
-        Ok(((), (Some(first), Some(changed)))) => {
-            backend_mut_of(host)?
-                .dispense_add_remainder(event.dimension, event.pos, event.facing, changed)
-                .ok()?;
-            Some(first)
+    // One source-level transaction owns the transfer, the slot result and the remainder's
+    // routing: a refusal anywhere rolls all three back, and nothing publishes before the last.
+    let routed = host.transaction(|host, _tx| {
+        let moved = host.scratch_slots(event.stack.clone(), |host, _tx, copy| {
+            // The container's handler sees one container at a time, whatever the stack.
+            let one = ItemPlace::OneByOne(Box::new(copy.clone()));
+            let item = one.capability(host, &ITEM_FLUIDS).ok_or(())?;
+            let transferred = try_pickup_fluid(host, &item, None, level, front, side).is_some()
+                || try_place_fluid(host, &item, None, level, front, false).is_some();
+            transferred.then_some(()).ok_or(())
+        });
+        match moved {
+            Ok(((), (first, None))) => Ok(first),
+            Ok(((), (None, Some(changed)))) => Ok(Some(changed)),
+            Ok(((), (Some(first), Some(changed)))) => {
+                backend_mut_of(host)
+                    .ok_or(Refused::Remainder)?
+                    .dispense_add_remainder(event.dimension, event.pos, event.facing, changed)
+                    .map_err(|_| Refused::Remainder)?;
+                Ok(Some(first))
+            }
+            Err(ScratchError::Aborted(())) => Err(Refused::NothingMoved),
+            Err(ScratchError::Unavailable | ScratchError::Stack(_)) => Err(Refused::NotRun),
+            Err(ScratchError::CommitRefused) => Err(Refused::Remainder),
         }
-        Err(ScratchError::Aborted(())) => host
-            .dispense_default(
-                event.dimension,
-                event.pos,
-                event.facing,
-                event.stack.clone(),
-            )
+    });
+    let left = match routed {
+        Ok(left) => left,
+        // Where neither moves anything, one container is dispensed as it is.
+        Err(TransactionError::Aborted(Refused::NothingMoved)) => level
+            .dispense_default(host, event.pos, event.facing, event.stack.clone())
             .ok()?,
-        Err(ScratchError::Unavailable | ScratchError::CommitRefused | ScratchError::Stack(_)) => {
-            return None;
+        // Nothing ran, so there is no override to report.
+        Err(
+            TransactionError::Aborted(Refused::NotRun)
+            | TransactionError::Unavailable
+            | TransactionError::InvalidContext,
+        ) => return None,
+        // A refused remainder or commit rolled the transfer back: the dispenser keeps its
+        // stack, and the default behaviour does not run (NeoForge `DispenseFluidContainer.execute`
+        // falls back to it only when no fluid transferred).
+        Err(TransactionError::Aborted(Refused::Remainder) | TransactionError::CommitRefused) => {
+            Some(event.stack.clone())
         }
     };
     Some((left, 1000))
@@ -324,11 +353,16 @@ pub fn dispense_container(
 /// come out, and the container may hold more. None where nothing there holds a fluid.
 pub fn first_stack_contained(host: &mut dyn ServerHost, place: &ItemPlace) -> Option<FluidStack> {
     let item = place.capability(host, &ITEM_FLUIDS)?;
-    (0..item.size(host)).find_map(|index| {
-        let fluid = item.resource(host, index)?;
-        let amount = item.amount(host, index);
-        (amount > 0).then(|| fluid.to_stack(amount))
-    })
+    let mut indices = 0..item.size(host);
+    while let Some(index) = advance_transfer_index(&item, host, &mut indices, None) {
+        if let Some(fluid) = item.resource(host, index) {
+            let amount = item.amount(host, index);
+            if amount > 0 {
+                return Some(fluid.to_stack(amount));
+            }
+        }
+    }
+    None
 }
 
 /// One move of the first fluid of `from`, index by index, that `to` takes any of, as much of it
@@ -341,7 +375,8 @@ fn move_first(
     from: &Capability<dyn ResourceHandler<FluidResource>>,
     to: &Capability<dyn ResourceHandler<FluidResource>>,
 ) -> Result<Option<FluidStack>, ()> {
-    for index in 0..from.size(host) {
+    let mut indices = 0..from.size(host);
+    while let Some(index) = advance_transfer_index(from, host, &mut indices, None) {
         let Some(fluid) = from.resource(host, index) else {
             continue;
         };

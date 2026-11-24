@@ -1028,8 +1028,7 @@ impl Game<'_> {
             200.0,
             20.0,
         ) {
-            self.audio
-                .play("minecraft:ui.button.click", None, 0.25, 1.0);
+            self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
             self.close_advancements();
             return true;
         }

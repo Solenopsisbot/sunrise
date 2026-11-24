@@ -511,7 +511,7 @@ pub fn qualified(sig: &syn::Signature, trait_path: &syn::Path) -> syn::Signature
 
 /// Whether `sig` still names something through `Self::` (an associated constant of the trait, in
 /// an array length): that has no form outside the trait's `impl`.
-fn names_associated(sig: &syn::Signature) -> bool {
+pub(crate) fn names_associated(sig: &syn::Signature) -> bool {
     struct Find(bool);
     impl<'ast> syn::visit::Visit<'ast> for Find {
         fn visit_path(&mut self, path: &'ast syn::Path) {

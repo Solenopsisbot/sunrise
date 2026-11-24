@@ -36,7 +36,9 @@ sunrise-border = { path = "../sunrise-border" }
 sunrise-protocol = { path = "../sunrise-protocol" }
 sunrise-render-core = { path = "../sunrise-render-core" }
 sunrise-render-shaderpack = { path = "../sunrise-render-shaderpack" }
+sunrise-mod-pipeline = { path = "../sunrise-mod-pipeline" }
 sunrise-shader-api = { path = "../sunrise-shader-api" }
+sunrise-glsl = { path = "../sunrise-glsl" }
 sunrise-shaders = { path = "../sunrise-shaders" }
 sunrise-system = { path = "../sunrise-system" }
 sunrise-threads = { path = "../sunrise-threads" }
@@ -59,8 +61,6 @@ png = "0.18"
 image-webp = { version = "0.2", default-features = false }
 zune-jpeg = { version = "0.4", default-features = false, features = ["std"] }
 pollster = "0.4"
-# Use the GLSL frontend's preprocessor to select active core-shader imports.
-pp-rs = "0.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 sha1 = "0.10"

@@ -201,7 +201,7 @@ impl Game<'_> {
         self.clear_remote_projectiles();
         self.creatures.projectiles.clear();
         self.dropped.clear();
-        self.clear_client_particles();
+        self.clear_client_level_particles();
         self.falling.clear();
         self.mining = None;
         self.container = None;
@@ -236,6 +236,8 @@ impl Game<'_> {
         self.boss_overlay.reset();
         // The chat's tree until the server sends its own, or forever when it
         // sends none: the game's own, plus the commands native mods own.
+        self.native_client_commands.pending_commands.clear();
+        self.native_client_commands.pending_chats.clear();
         let chat_tree = self.chat_tree_for(None);
         let services_keys = ServicesKeys::fetching();
         self.ui.registries.selector_tokens.clear();
@@ -307,6 +309,8 @@ impl Game<'_> {
             respawn_velocity: None,
             loaded_sent: false,
             heard_level: None,
+            datapacks: Default::default(),
+            constructing_level: None,
             level_load: sunrise_client::level_loading::LevelLoadTracker::new(0),
             sent_info: info,
             group_count,
@@ -357,7 +361,7 @@ impl Game<'_> {
             chat_validators: HashMap::new(),
             joining_narrated: None,
             chat_tree,
-            chat_tree_received: false,
+            server_chat_tree: None,
             secure_chat: Default::default(),
             custom_completions: Default::default(),
             players: HashMap::new(),
@@ -492,8 +496,7 @@ impl Game<'_> {
         self.clear_remote_projectiles();
         self.creatures.projectiles.clear();
         self.dropped.clear();
-        self.particles.clear();
-        self.pickups.clear();
+        self.clear_client_level_particles();
         self.orbs.clear();
         self.falling.clear();
         self.mining = None;
@@ -522,6 +525,8 @@ impl Game<'_> {
         self.clear_waypoints();
         self.boss_overlay.reset();
 
+        self.native_client_commands.pending_commands.clear();
+        self.native_client_commands.pending_chats.clear();
         let chat_tree = self.chat_tree_for(None);
 
         self.ui.registries.selector_tokens.clear();
@@ -590,6 +595,8 @@ impl Game<'_> {
             respawn_velocity: None,
             loaded_sent: false,
             heard_level: None,
+            datapacks: Default::default(),
+            constructing_level: None,
             level_load: sunrise_client::level_loading::LevelLoadTracker::new(0),
             sent_info: info,
             group_count,
@@ -640,7 +647,7 @@ impl Game<'_> {
             chat_validators: HashMap::new(),
             joining_narrated: None,
             chat_tree,
-            chat_tree_received: false,
+            server_chat_tree: None,
             secure_chat: Default::default(),
             custom_completions: Default::default(),
             players: HashMap::new(),
@@ -703,8 +710,8 @@ impl Game<'_> {
         self.stats = Default::default();
         Ok(())
     }
-    /// Refuse a bad Play payload with the normal connection-error screen.
-    pub(in crate::game) fn refuse_play_payload(
+    /// Refuse invalid server data with the normal connection-error screen.
+    pub(in crate::game) fn refuse_remote_input(
         &mut self,
         error: impl std::fmt::Display,
     ) -> Result<()> {
@@ -731,6 +738,23 @@ impl Game<'_> {
         before_pack_cleanup: impl FnOnce(&mut crate::game::server_packs::ServerPackState),
     ) -> Result<()> {
         self.client_logging_out();
+        self.finish_leave_server_with(reason, before_pack_cleanup)
+    }
+
+    /// Tear down the client's server session without firing `client_logging_out`:
+    /// used after `client_logging_out` has already run (`leave_server`, integrated
+    /// server close), and for aborted or failed `ConnectScreen` / login-handshake
+    /// attempts that never reached `ClientCommonPacketListenerImpl` or
+    /// `Minecraft.disconnect`.
+    pub(in crate::game) fn finish_leave_server(&mut self, reason: Option<Text>) -> Result<()> {
+        self.finish_leave_server_with(reason, |_| {})
+    }
+
+    fn finish_leave_server_with(
+        &mut self,
+        reason: Option<Text>,
+        before_pack_cleanup: impl FnOnce(&mut crate::game::server_packs::ServerPackState),
+    ) -> Result<()> {
         self.finish_perf();
         // The one boundary every network session passes when it closes here: the player leaving,
         // or this client ending it with a reason (a raw disconnect closed it already, with the
@@ -763,10 +787,9 @@ impl Game<'_> {
         if let Some(old) = self.remote.as_mut().and_then(|r| r.heard_level.take()) {
             self.native_client_level_unload(&old);
         }
-        if self.remote.is_some() {
-            self.native_client_disconnecting();
-        }
         self.native_net.holds.borrow_mut().clear();
+        self.native_client_commands.pending_commands.clear();
+        self.native_client_commands.pending_chats.clear();
         if let Some(mut r) = self.remote.take() {
             r.session.disconnect();
             self.clear_spectated_entity_post_effect();
@@ -862,7 +885,6 @@ impl Game<'_> {
         entry: RemoteDimensionEntry,
         reason: sunrise_client::level_loading::Reason,
     ) {
-        self.track_remote_levels(&spawn.dimension);
         // The replacement player starts with its inventory menu, even if the
         // server switched levels without closing the previous container.
         self.remote_close_local();
@@ -890,9 +912,6 @@ impl Game<'_> {
         } else {
             None
         };
-        if !same {
-            self.forget_all_remote_columns();
-        }
         let adjust_mode = if matches!(
             entry,
             RemoteDimensionEntry::Respawn | RemoteDimensionEntry::DeathRespawn
@@ -909,17 +928,50 @@ impl Game<'_> {
         let r = self.remote.as_mut().unwrap();
         let new_logical_player =
             !matches!(entry, RemoteDimensionEntry::Login) || !r.has_logical_player;
+        // A Sunrise server's bulk edit sends whole columns with the light
+        // from before its relight; any other server's packet light is final.
+        let relight_resent = r.quiet_commands;
+        let format = r.level_format(spawn);
+        let level_key = mod_api::__private::dimension_key(&spawn.dimension);
+        let replacement = if same {
+            None
+        } else {
+            // ClientLevel's constructor posts Load before Minecraft.setLevel unloads
+            // the old level. Give the new level its own handle without retiring the
+            // old one, which must still read its existing chunks during Unload.
+            let epoch = crate::game::native_lifecycle::fresh_epoch();
+            let handle = mod_api::LevelRef::new(epoch, level_key);
+            let mut world = Game::world_for_mods(self.res.facts().air, spawn.seed);
+            world.shape = format.shape;
+            world.game_time = self.world.game_time;
+            world.weather = self.world.weather;
+            r.constructing_level = Some(ConstructingClientLevel {
+                handle,
+                world,
+                facts: format.facts.clone(),
+            });
+            self.native_client_level_load(&spawn.dimension);
+            let level = self
+                .remote
+                .as_mut()
+                .unwrap()
+                .constructing_level
+                .take()
+                .unwrap();
+            self.unload_client_level();
+            self.forget_all_remote_columns();
+            Some(level)
+        };
+        // Keep the retiring level's metadata in place until its Unload has returned.
+        self.track_remote_levels(&spawn.dimension);
+        let r = self.remote.as_mut().unwrap();
         if !same {
             r.collider_shove_start = None;
             // A same-level respawn keeps the existing ClientLevel's seed and sea level.
             r.hashed_seed = spawn.seed;
             r.sea_level = spawn.sea_level;
         }
-        // A Sunrise server's bulk edit sends whole columns with the light
-        // from before its relight; any other server's packet light is final.
-        let relight_resent = r.quiet_commands;
-        let format = r.level_format(spawn);
-        let (dimension, shape) = (format.dimension, format.shape);
+        let dimension = format.dimension;
         r.chunk_format = format.chunk_format;
         r.level_facts = format.facts;
         r.synced_type = format.synced_type;
@@ -927,7 +979,7 @@ impl Game<'_> {
         r.resolve_clocks();
         self.world.day_time = r.clock_time(r.default_clock);
         r.level = spawn.dimension.clone();
-        r.level_key = mod_api::__private::dimension_key(&spawn.dimension);
+        r.level_key = level_key;
         if new_logical_player {
             self.drop_spam_throttler = Default::default();
             r.abilities = sunrise_client::lan::abilities::PlayerAbilities::default();
@@ -966,7 +1018,7 @@ impl Game<'_> {
             .last_death
             .as_ref()
             .map(|d| (d.dimension.clone(), d.pos));
-        if !same {
+        if let Some(mut level) = replacement {
             self.clock.reset_client_level_tick_state();
             let mut streaming = Streaming::new(
                 Arc::new(NoTerrain),
@@ -978,31 +1030,26 @@ impl Game<'_> {
             // SpawnInfo already carries the hashed seed the client's BiomeManager holds.
             streaming.biome_zoom = sunrise_core::biome::BiomeZoom::new(spawn.seed);
             self.streaming = streaming;
-            let (time, day, weather) = (
-                self.world.game_time,
-                self.world.day_time,
-                self.world.weather,
-            );
-            self.reset_client_world(spawn.seed);
+            level.world.day_time = self.world.day_time;
+            self.install_client_world(level.world);
             if let Some(remote) = self.remote.as_ref() {
                 self.world
                     .chunks
                     .track_connection_groups(remote.group_count.clone());
             }
-            // Entity IDs belong to this ClientLevel, not the connection. A
-            // same-level respawn keeps it; a replacement invalidates handles.
-            self.native_lifecycle_open_started();
+            // The border and weather belong to this ClientLevel, not the connection.
+            self.border = Default::default();
+            // A same-level respawn keeps the level; a replacement retires the
+            // old handles and adopts the epoch already given to Load listeners.
+            self.native_lifecycle_open_at(level.handle.epoch());
             self.native_lifecycle_world_ready();
-            self.world.shape = shape;
-            self.world.game_time = time;
-            self.world.day_time = day;
-            self.world.weather = weather;
             self.mobs.clear();
             self.clear_remote_objects();
             self.clear_remote_projectiles();
             self.dropped.clear();
-            self.clear_client_particles();
+            self.clear_client_level_particles();
             if let Some(r) = self.remote.as_mut() {
+                r.heard_level = Some(spawn.dimension.clone());
                 r.entities.clear();
                 r.synced_attributes.clear();
                 r.passenger_vehicles.clear();
@@ -1028,15 +1075,6 @@ impl Game<'_> {
             self.pending_uploads.clear();
             if let Some(renderer) = self.renderer.as_mut() {
                 renderer.clear_sections(self.world.layout());
-            }
-            // The new ClientLevel is told before setLevel drops the old one.
-            let old = self
-                .remote
-                .as_mut()
-                .and_then(|r| r.heard_level.replace(spawn.dimension.clone()));
-            self.native_client_level_load(&spawn.dimension);
-            if let Some(old) = old {
-                self.native_client_level_unload(&old);
             }
             // Minecraft.setLevel -> updateLevelInEngines, after the old-level unload.
             self.stop_sounds_for_new_level();

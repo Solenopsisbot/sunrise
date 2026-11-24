@@ -112,6 +112,14 @@ impl Names {
         }
     }
 
+    /// Take back every request `drop` names, as [`Self::withdraw`] does for one.
+    pub fn withdraw_where(&mut self, mut drop: impl FnMut(&'static str, &str) -> bool) {
+        for entry in &mut self.entries {
+            let id = entry.id.as_str();
+            entry.mods.retain(|&mod_id| !drop(mod_id, id));
+        }
+    }
+
     pub fn id(&self, slot: u32) -> Option<&str> {
         self.entries
             .get(slot as usize)

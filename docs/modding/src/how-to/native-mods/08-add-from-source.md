@@ -71,3 +71,30 @@ repository, release tag when applicable, commit, asset name and installed file's
 - `sunrise-launcher mods remove ID` removes a mod.
 
 A GitHub install does not overwrite a mod installed from the registry or by hand.
+
+## Trust and safety
+
+Native mods run unsandboxed with full access to your computer. Bundle validation checks packaging,
+not whether code is safe, and native mixins compile function-replacement code with the same access
+as any other native code.
+
+- **Registry releases** are signed with a GitHub artifact attestation tied to the mod's registered
+  repository and Sunrise's shared release workflow, then reviewed for malware, dangerous patterns
+  and hidden or obfuscated code before they are listed ([Signed, reviewed releases](../../players/installing-mods.md#signed-reviewed-releases)).
+  The launcher verifies the file's SHA-256 hash and attestation against the signed registry index
+  and remembers the mod's publisher; if a later release comes from a different publisher, it stops
+  and asks before installing. A takedown in the signed index removes a release or a whole project.
+  Registry review does not sandbox the code you run: native mods are compiled from source on your
+  computer and run with your permissions.
+- **Package checks:** a native `.smod` holds a flat Rust project (`sunrise-mod.toml`, `Cargo.toml`,
+  `Cargo.lock`, `src/`) and can include `assets/`, `data/` and `icon.png`. The launcher validates
+  the bundle without running its code, then builds it for your game build. Registry entries
+  distinguish native code with the `native-mod` kind; switching a project between `mod` and
+  `native-mod` changes the project's kind in the registry and removes its earlier releases
+  ([Publish a mod](../publish.md)).
+- **Instance data:** the launcher loads native mods for the instance where you install them, using
+  that instance's worlds, options and logs. Other instances select their own versions. This
+  separation is not a security boundary: native code can access files outside its instance.
+
+The checks in `horizon-mixins` catch mistakes, not malicious code. See its
+[security notes](https://github.com/horizon-rust/horizon-mixins/blob/main/docs/security.md).

@@ -39,6 +39,7 @@ pub enum Kind {
     Trident,
     Spawner,
     Cloud,
+    Bolt,
     Cushion,
     Knot,
     Player,

@@ -57,7 +57,7 @@ static LIFECYCLE_VALUE: AttachmentType<i32> = AttachmentType {
     default: || 0,
     codec: None,
     copy_on_death: false,
-    sync: false,
+    sync_codec: None,
 };
 
 /// Registration memory shared by slot-bearing adapters to the lifecycle walk.
@@ -295,7 +295,7 @@ fn lifecycle_fixture_walks_other_owners() {
                     position: sunrise_core::geometry::Vec3::new(at[0], at[1], at[2]),
                     yaw: 0.0,
                     pitch: 0.0,
-                    item_transformation: None,
+                    display: None,
                     interaction: None,
                 });
             }

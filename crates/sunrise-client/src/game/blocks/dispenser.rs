@@ -6,7 +6,7 @@
 use super::api_values::{TryIntoApi, TryIntoEnginePreservingCount};
 use super::level_sounds::LevelSound;
 use super::{Dim, Game, item_abilities::ability};
-use mod_api::SoundSource;
+use mod_api::{LevelRef, LevelWriteError, SoundSource};
 use std::ops::ControlFlow;
 use sunrise_client::{
     Result,
@@ -154,6 +154,10 @@ impl Game<'_> {
     /// The dispenser level events: 1000 click, 1001 fail, 1002 launch, 1004
     /// firework shoot, 1018 blaze shoot and 2000 smoke shot out of the front.
     pub(super) fn dispenser_event(&mut self, id: i32, pos: Pos, data: i32) {
+        if self.has_level_transaction() {
+            self.after_commit(super::transactions::After::DispenseEvent(id, pos, data));
+            return;
+        }
         super::dispense_fixture::record(|| format!("L {id} {},{},{} {data}", pos.0, pos.1, pos.2));
         let c = Self::center(pos);
         match id {
@@ -174,13 +178,11 @@ impl Game<'_> {
             1018 => {
                 let r = self.particles.random();
                 let pitch = (r.next_float() - r.next_float()) * 0.2 + 1.0;
-                self.audio
-                    .play("minecraft:entity.blaze.shoot", Some(c), 2.0, pitch);
+                self.play_audio("minecraft:entity.blaze.shoot", Some(c), 2.0, pitch);
             }
             1051 => {
                 let pitch = 0.4 / (self.particles.random().next_float() * 0.4 + 0.8);
-                self.audio
-                    .play("minecraft:entity.wind_charge.throw", Some(c), 0.5, pitch);
+                self.play_audio("minecraft:entity.wind_charge.throw", Some(c), 0.5, pitch);
             }
             1049 => self
                 .audio
@@ -345,47 +347,76 @@ impl Game<'_> {
         self.stage_dispensed(pos, facing, one, false);
         (stack.count > 0).then_some(stack)
     }
-    /// Drop one item as DefaultDispenseItemBehavior does. For a dispenser hook:
-    /// return this remainder in its answer with `CLICK`; the caller plays the
-    /// answer's event and smoke once. A client, another dimension or an unloaded
-    /// chunk keeps the input stack unchanged.
-    pub(super) fn dispense_default(
+    /// Sunrise represents a DispenserBlockEntity as the dispenser state and a slot holder.
+    pub(super) fn dispenser_source(&self, pos: Pos) -> Option<u64> {
+        if !self.world.loaded(pos.0, pos.2)
+            || self.dispenser_block_name(pos).as_ref() != "minecraft:dispenser"
+            || !matches!(self.world.block_entities.get(&pos), Some(holder @ BlockEntity::Chest(_)) if holder.fits("minecraft:dispenser"))
+        {
+            return None;
+        }
+        self.world.block_entities.generation(&pos)
+    }
+
+    pub(super) fn level_dispense_default(
         &mut self,
-        dimension: &str,
-        pos: [i32; 3],
+        level: LevelRef,
+        [x, y, z]: [i32; 3],
         facing: Direction,
         stack: mod_api::ItemStack,
-    ) -> std::result::Result<Option<mod_api::ItemStack>, mod_api::StackWriteError> {
-        let stack = stack.try_into_engine_preserving_count(self.items())?;
-        let left = if !(self.serving.is_some() || self.options.dedicated.is_some())
-            || dimension != self.dim.id()
-            || !self.world.chunks.contains_key(&(pos[0] >> 4, pos[2] >> 4))
-        {
-            Some(stack)
-        } else {
-            self.default_execute((pos[0], pos[1], pos[2]), facing, stack)
-        };
+    ) -> std::result::Result<Option<mod_api::ItemStack>, LevelWriteError> {
+        let stack = stack
+            .try_into_engine_preserving_count(self.items())
+            .map_err(LevelWriteError::InvalidStack)?;
+        let left = self.with_server_level_mut(
+            level,
+            LevelWriteError::Unavailable,
+            LevelWriteError::Stale,
+            Some(LevelWriteError::InTransaction),
+            |game| {
+                let pos = (x, y, z);
+                game.dispenser_source(pos)
+                    .ok_or(LevelWriteError::InvalidDispenser)?;
+                Ok((stack.count != 0)
+                    .then(|| game.default_execute(pos, facing, stack))
+                    .flatten())
+            },
+        )?;
         left.try_into_api()
-            .map_err(|error| error.into_write_error())
+            .map_err(|error| LevelWriteError::InvalidStack(error.into_write_error()))
     }
-    /// `dispense_with_remainder`: `consume_with_remainder` for a mod's dispense answer, in the
-    /// level in place; `stack` unchanged off it, as `dispense_default` keeps it.
-    pub(super) fn dispense_with_remainder(
+
+    pub(super) fn level_dispense_with_remainder(
         &mut self,
-        dimension: &str,
-        pos: [i32; 3],
+        level: LevelRef,
+        [x, y, z]: [i32; 3],
         facing: Direction,
-        stack: ItemStack,
-        remainder: ItemStack,
-    ) -> Option<ItemStack> {
-        if !(self.serving.is_some() || self.options.dedicated.is_some())
-            || dimension != self.dim.id()
-            || !self.world.chunks.contains_key(&(pos[0] >> 4, pos[2] >> 4))
-            || stack.count == 0
-        {
-            return Some(stack).filter(|stack| stack.count > 0);
-        }
-        self.consume_with_remainder((pos[0], pos[1], pos[2]), facing, stack, remainder)
+        stack: mod_api::ItemStack,
+        remainder: mod_api::ItemStack,
+    ) -> std::result::Result<Option<mod_api::ItemStack>, LevelWriteError> {
+        let stack = stack
+            .try_into_engine_preserving_count(self.items())
+            .map_err(LevelWriteError::InvalidStack)?;
+        let remainder = remainder
+            .try_into_engine_preserving_count(self.items())
+            .map_err(LevelWriteError::InvalidStack)?;
+        let left = self.with_server_level_mut(
+            level,
+            LevelWriteError::Unavailable,
+            LevelWriteError::Stale,
+            Some(LevelWriteError::InTransaction),
+            |game| {
+                let pos = (x, y, z);
+                game.dispenser_source(pos)
+                    .ok_or(LevelWriteError::InvalidDispenser)?;
+                if stack.count == 0 {
+                    return Ok(None);
+                }
+                Ok(game.consume_with_remainder(pos, facing, stack, remainder))
+            },
+        )?;
+        left.try_into_api()
+            .map_err(|error| LevelWriteError::InvalidStack(error.into_write_error()))
     }
     /// `DefaultDispenseItemBehavior.addToInventoryOrDispense` for a mod's dispense helper, in the
     /// level in place: refuses a client, another dimension or an unloaded chunk.
@@ -550,7 +581,7 @@ impl Game<'_> {
         stack: ItemStack,
     ) -> Result<ControlFlow<(), Option<ItemStack>>> {
         let mut answer = None;
-        if self.serving.is_some() || self.options.dedicated.is_some() {
+        let block_reply_state = if self.serving.is_some() || self.options.dedicated.is_some() {
             // The block the dispenser faces has the first say (`dispense_method`), then the
             // item's own part (`dispense_item`); the first answer wins.
             let front = self.block_at(offset(pos, facing));
@@ -576,7 +607,10 @@ impl Game<'_> {
                     &mut answer,
                 );
             }
-        }
+            Some(front)
+        } else {
+            None
+        };
         if let Some(answer) = answer {
             let (left, event) = match mod_dispensed(answer, self.items()) {
                 Ok(dispensed) => dispensed,
@@ -604,6 +638,16 @@ impl Game<'_> {
                 });
             }
             return Ok(ControlFlow::Continue(left));
+        }
+        // A rejected block reply may have short-circuited dispatch before the disabled owner.
+        // In that case keep the owner's inert fallback, not vanilla's dispenser behaviour.
+        if let Some(front) = block_reply_state
+            && mod_api::__private::any_mod_disabled()
+            && front.try_into_api().is_ok_and(|state| {
+                mod_api::__private::block_hook_inert(mod_api::HookId::DispenseMethod, state)
+            })
+        {
+            return Ok(ControlFlow::Break(()));
         }
         let item = stack.item.to_string();
         // A stack able to `shears_harvest` is dispensed as shears are, whatever its item.
@@ -999,7 +1043,7 @@ impl Game<'_> {
         };
         if let Some(at) = at {
             if let Some(sound) = sound {
-                self.audio.play(&sound, Some([at.x, at.y, at.z]), 1.0, 1.0);
+                self.play_audio(&sound, Some([at.x, at.y, at.z]), 1.0, 1.0);
             }
             let who = match target {
                 Target::Mob(i) => Some(sunrise_client::mobs::Who::Mob(self.mobs[i].id)),
@@ -1185,7 +1229,7 @@ impl Game<'_> {
             | "minecraft:lingering_potion" => {
                 let mut shot = super::potions::thrown_projectile(one, at, false);
                 shot.shoot_own(dir, power, uncertainty);
-                self.add_projectile(shot);
+                self.add_fresh_projectile(shot);
             }
             _ => {
                 let kind = match item.as_str() {
@@ -1250,10 +1294,12 @@ impl Game<'_> {
         // EntityType.create rolls a yaw from the level random before the stack config turns it.
         let _ = self.world.random.next_float();
         self.next_entity += 1;
-        let (_, uuid) = sunrise_client::mobs::living_random();
+        let (stand, uuid) = sunrise_client::entities::ArmorStand::new_with_uuid(
+            self.next_entity,
+            foot,
+            y_rot(facing),
+        );
         self.persist.uuids.insert(self.next_entity, uuid);
-        let stand =
-            sunrise_client::entities::ArmorStand::new(self.next_entity, foot, y_rot(facing));
         self.world.modified.insert((front.0 >> 4, front.2 >> 4));
         self.armor_stands.push(stand);
         // EntityType.appendDefaultStackConfig: the dispenser's yaw first, then
@@ -1430,7 +1476,6 @@ impl Game<'_> {
     ) -> Result<Dispensed> {
         let target = offset(pos, facing);
         let target_pos = Self::pos_of(target);
-        let state = self.block_at(target);
         let name = self.dispenser_block_name(target);
         let mut success = true;
         // tryIgniteExplosiveEntities: the first sulfur cube that can explode is primed.
@@ -1464,6 +1509,18 @@ impl Game<'_> {
             }
             return Ok((self.hurt_and_break(stack, 1), CLICK));
         }
+        // getToolModifiedState(FIRESTARTER_LIGHT) on a hit at the target's centre, from the
+        // dispenser's side, with no player, asked only where no fire can be placed.
+        let hit = super::Hit {
+            pos: [target.0, target.1, target.2],
+            face: facing.opposite().normal(),
+            point: [
+                f64::from(target.0) + 0.5,
+                f64::from(target.1) + 0.5,
+                f64::from(target.2) + 0.5,
+            ],
+            inside: false,
+        };
         if self
             .with_level(|b, level, ticks| b.fire_can_be_placed_at(level, ticks, target_pos, facing))
         {
@@ -1479,10 +1536,8 @@ impl Game<'_> {
                 None,
                 None,
             );
-        } else if self.can_light(state, &name) {
-            if let Some(lit) = self.with_props(state, &[("lit", "true")]) {
-                self.level_set([target.0, target.1, target.2], lit)?;
-            }
+        } else if let Some(lit) = self.fire_starter_lit(&hit, &stack, false)? {
+            self.level_set([target.0, target.1, target.2], lit)?;
             self.post_block_game_event(
                 "minecraft:block_change",
                 [target.0, target.1, target.2],
@@ -1574,7 +1629,7 @@ impl Game<'_> {
         // new PrimedTnt(level, x + 0.5, y, z + 0.5, null), its sound and ENTITY_PLACE.
         let rot = self.world.random.next_double() * f64::from(std::f32::consts::TAU);
         self.add_primed_tnt(target, rot, 80, None, None);
-        self.audio.play(
+        self.play_audio(
             "minecraft:entity.tnt.primed",
             Some([
                 f64::from(target.x) + 0.5,
@@ -1803,7 +1858,7 @@ impl Game<'_> {
                         Some(next),
                     );
                 }
-                self.audio.play(
+                self.play_audio(
                     "minecraft:block.respawn_anchor.charge",
                     Some(Self::center(target)),
                     1.0,
@@ -1822,7 +1877,7 @@ impl Game<'_> {
         stack: ItemStack,
     ) -> Result<Dispensed> {
         let target = offset(pos, facing);
-        let sheared = self.shear_beehive(target)? || self.shear_entity(target)?;
+        let sheared = self.shear_beehive(target, &stack)? || self.shear_entity(target, &stack)?;
         if sheared {
             return Ok((self.hurt_and_break(stack, 1), CLICK));
         }
@@ -1838,7 +1893,7 @@ impl Game<'_> {
             sunrise_client::beehive::Release::BeeReleased,
         );
     }
-    fn shear_beehive(&mut self, target: Pos) -> Result<bool> {
+    fn shear_beehive(&mut self, target: Pos, tool: &ItemStack) -> Result<bool> {
         let state = self.block_at(target);
         let name = self.dispenser_block_name(target);
         let level = self
@@ -1847,7 +1902,7 @@ impl Game<'_> {
         if !self.in_block_tag("minecraft:beehives", &name) || level.is_none_or(|l| l < 5) {
             return Ok(false);
         }
-        self.audio.play(
+        self.play_audio(
             "minecraft:block.beehive.shear",
             Some(Self::center(target)),
             1.0,
@@ -1856,11 +1911,8 @@ impl Game<'_> {
         // BeehiveBlock.dropHoneycomb (harvest/beehive), then
         // releaseBeesAndResetHoneyLevel and the shear event.
         let p = [target.0, target.1, target.2];
-        for stack in self.sequence_loot(
-            "minecraft:harvest/beehive",
-            "minecraft:harvest/beehive",
-            None,
-        ) {
+        for stack in self.interact_loot_at("minecraft:harvest/beehive", p, state, None, Some(tool))
+        {
             self.pop_resource(p, stack);
         }
         if let Some(reset) = self.with_props(state, &[("honey_level", "0")]) {
@@ -1960,15 +2012,14 @@ impl Game<'_> {
     }
     /// `ShearsDispenseItemBehavior.tryShearEntity`: the first live, ready
     /// `Shearable` in the block is sheared (an entity part's `IShearable` answer comes first).
-    pub(super) fn shear_entity(&mut self, target: Pos) -> Result<bool> {
-        let shears = ItemStack::new("minecraft:shears", 1);
+    pub(super) fn shear_entity(&mut self, target: Pos, shears: &ItemStack) -> Result<bool> {
         for t in self.targets_at(target) {
             // Entity.shearOffAllLeashConnections comes first, for any entity.
             if self.shear_off_leashes(t) {
                 return Ok(true);
             }
             let Target::Mob(i) = t else { continue };
-            let part = self.part_shearable(i, None, &shears);
+            let part = self.part_shearable(i, None, shears);
             let m = &self.mobs[i];
             if !m.alive() || part.is_some_and(|(_, shearable)| !shearable) {
                 continue;
@@ -1981,7 +2032,9 @@ impl Game<'_> {
             };
             match m.species() {
                 _ if let Some((part, _)) = part => {
-                    self.part_shear(i, part, None, &shears);
+                    if self.part_shear(i, part, None, shears).is_err() {
+                        continue;
+                    }
                 }
                 Species::SulfurCube if sulfur_cube::has_body(m) => {
                     // SulfurCube.shear: the swallowed block comes out at the
@@ -1995,8 +2048,7 @@ impl Game<'_> {
                     let ctx = self.who_context(Some(sunrise_client::mobs::Who::Mob(id)), None);
                     self.post_game_event("minecraft:unequip", [at.x, at.y, at.z], ctx);
                     self.mobs[i].extra.ints[3] = sulfur_cube::PICKUP_TIMER;
-                    self.audio
-                        .play("minecraft:entity.sulfur_cube.eject", sound_at, 1.0, 1.0);
+                    self.play_audio("minecraft:entity.sulfur_cube.eject", sound_at, 1.0, 1.0);
                 }
                 Species::Sheep if !m.extra.sheared && !m.is_baby() => {
                     let color =
@@ -2009,7 +2061,7 @@ impl Game<'_> {
                     let drops = self.sequence_loot(
                         "minecraft:shearing/sheep",
                         &format!("minecraft:shearing/sheep/{color}"),
-                        Some(&shears),
+                        Some(shears),
                     );
                     for stack in drops {
                         for _ in 0..stack.count {
@@ -2046,7 +2098,7 @@ impl Game<'_> {
                     let drops = self.sequence_loot(
                         "minecraft:shearing/bogged",
                         "minecraft:shearing/bogged",
-                        Some(&shears),
+                        Some(shears),
                     );
                     for stack in drops {
                         self.spawn_at_location(at, height, stack);
@@ -2064,7 +2116,7 @@ impl Game<'_> {
                     let drops = self.sequence_loot(
                         "minecraft:shearing/snow_golem",
                         "minecraft:shearing/snow_golem",
-                        Some(&shears),
+                        Some(shears),
                     );
                     for stack in drops {
                         self.spawn_at_location(at, eye, stack);
@@ -2088,7 +2140,7 @@ impl Game<'_> {
                     }
                 }
                 Species::Mooshroom if !m.is_baby() => {
-                    self.shear_mooshroom(i, None, &shears);
+                    self.shear_mooshroom(i, None, shears);
                 }
                 _ => continue,
             }
@@ -2168,8 +2220,7 @@ impl Game<'_> {
         let ctx = self.who_context(Some(who), None);
         self.post_game_event("minecraft:shear", [at.x, at.y, at.z], ctx);
         let block = [at.x.floor() + 0.5, at.y.floor() + 0.5, at.z.floor() + 0.5];
-        self.audio
-            .play("minecraft:item.shears.snip", Some(block), 1.0, 1.0);
+        self.play_audio("minecraft:item.shears.snip", Some(block), 1.0, 1.0);
         true
     }
     /// The brush behaviour: the first armadillo in front that `brushOffScute`s.
@@ -2196,7 +2247,7 @@ impl Game<'_> {
             for d in drops {
                 self.spawn_at_location(at, 0.0, d);
             }
-            self.audio.play(
+            self.play_audio(
                 "minecraft:entity.armadillo.brush",
                 Some([at.x, at.y, at.z]),
                 1.0,
@@ -2241,7 +2292,7 @@ impl Game<'_> {
             // setItemSlot: a body item without `equippable` posts UNEQUIP.
             let ctx = self.who_context(Some(sunrise_client::mobs::Who::Mob(id)), None);
             self.post_game_event("minecraft:unequip", [at.x, at.y, at.z], ctx);
-            self.audio.play(
+            self.play_audio(
                 "minecraft:entity.sulfur_cube.absorb",
                 Some([at.x, at.y, at.z]),
                 1.0,
@@ -2276,7 +2327,7 @@ impl Game<'_> {
                 source: None,
             });
         self.process_level_events()?;
-        self.audio.play(
+        self.play_audio(
             "minecraft:item.honeycomb.wax_on",
             Some(Self::center(target)),
             1.0,
@@ -2309,7 +2360,7 @@ impl Game<'_> {
             self.particles
                 .add(&ParticleOptions::simple(ParticleType::Splash), p, [0.0; 3]);
         }
-        self.audio.play(
+        self.play_audio(
             "minecraft:item.bottle.empty",
             Some(Self::center(pos)),
             1.0,
@@ -2782,7 +2833,7 @@ mod tests {
             let mut game = server_with_guest(&mut resources);
             // Open the world and admit the guest as a join does, so its handle resolves.
             game.native_lifecycle
-                .begin_open(mod_api::Authority::IntegratedServer);
+                .begin_open(Some(mod_api::Authority::IntegratedServer));
             game.reset_entity_residency();
             let guest = game.lan.as_ref().unwrap().hub.guest(2).unwrap().entity_id as u32;
             assert_eq!(
@@ -2817,7 +2868,7 @@ mod tests {
             default: || 0,
             codec: None,
             copy_on_death: false,
-            sync: false,
+            sync_codec: None,
         };
         super::super::native_entity_refs::tests::with_game(|game| {
             let kind = game.res.mob_types().get("minecraft:cod").unwrap().clone();

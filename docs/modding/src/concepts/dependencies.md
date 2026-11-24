@@ -59,9 +59,10 @@ linked native library or compiled package requirement. Selected content and load
 one logical resolver; warnings and overrides appear on both affected installed Mods rows, alongside
 any failed/off status.
 
-Native builds add a path dependency for each supplied library using the mod ID as the Cargo alias
-and the target's actual Cargo package name. Optional code libraries use a Cargo feature named
-exactly as their mod ID and enabled only when that library is supplied.
+For each supplied native dependency, the build adds a path dependency on the target's root Cargo
+package, using the mod ID as the Cargo alias. The dependency exposes items the target makes public
+from that crate; there is no separate API package to declare. Optional native dependencies use a
+Cargo feature named exactly as their mod ID and enabled only when that library is supplied.
 Guard calls with `if_installed!`, which builds the block only with that feature and runs it only
 when the mod is installed:
 

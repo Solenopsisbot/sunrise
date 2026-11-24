@@ -144,7 +144,7 @@ PortalShape.calculateHeight	inline	crates/sunrise-world/src/level/portal.rs::Sim
 PortalShape.hasTopFrame	inline	crates/sunrise-world/src/level/portal.rs::Sim::find_portal_shape	the top frame row check is inline
 PortalShape.getDistanceUntilTop	inline	crates/sunrise-world/src/level/portal.rs::Sim::find_portal_shape	rows loop counts portal blocks as it goes, inline
 TeleportTransition.playPortalSound	inline	crates/sunrise-client/src/lan/hub.rs::Hub::land	level event 1032 is sent on arrival
-TeleportTransition.withRotation	inline	crates/sunrise-client/src/lan/hub.rs::Hub::change_level	the turned yaw is applied with the level change
+TeleportTransition.withRotation	inline	crates/sunrise-client/src/lan/hub.rs::Hub::finish_level_change	the turned yaw is applied with the level change
 TeleportTransition.withPosition	inline	crates/sunrise-client/src/lan/hub.rs::Hub::land	the exit position is applied on arrival
 TeleportTransition.transitionAsPassenger	port	crates/sunrise-client/src/game/world/server_travel.rs::Game::carry_riders_through_portals	riders travel with the vehicle and ride it again on arrival
 DefaultRedstoneWireEvaluator.calculateTargetStrength	inline	crates/sunrise-world/src/level/redstone.rs::Sim::wire_update_power	the 15 shortcut and the max with the incoming signal are inline

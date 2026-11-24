@@ -347,15 +347,22 @@ mod tests {
             "expected MobEffectPart::apply_effect_tick to document `&dyn Host`, got: {effect_row}"
         );
         // Host summaries preserve their full first-paragraph Markdown without cutting inline code.
-        let edit_blocks_row = page
+        let host_section = page
+            .split("## Host methods (`Host`, `ServerHost`, `ClientHost`)")
+            .nth(1)
+            .expect("Host methods section present");
+        let host_rows: Vec<_> = host_section
             .lines()
-            .find(|line| line.starts_with("| `edit_blocks` |"))
-            .expect("edit_blocks host row present");
-        assert_eq!(
-            edit_blocks_row.matches('`').count() % 2,
-            0,
-            "inline code spans in edit_blocks summary must stay balanced: {edit_blocks_row}"
-        );
+            .filter(|line| line.starts_with("| `"))
+            .collect();
+        assert!(!host_rows.is_empty(), "expected host method rows");
+        for row in host_rows {
+            assert_eq!(
+                row.matches('`').count() % 2,
+                0,
+                "inline code spans in a host summary must stay balanced: {row}"
+            );
+        }
         assert!(!path.exists(), "rendering must not write into book sources");
     }
 

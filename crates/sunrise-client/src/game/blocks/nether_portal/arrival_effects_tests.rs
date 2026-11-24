@@ -222,7 +222,11 @@ impl Hooks for RemoveOnArrival {
     ) -> Flow {
         if event.kind == "minecraft:item" && self.armed.swap(false, Ordering::SeqCst) {
             let victim = self.victim.load(Ordering::SeqCst);
-            let victim = if victim == 0 { event.entity } else { victim };
+            let victim = if victim == 0 {
+                event.subject.id()
+            } else {
+                victim
+            };
             assert!(host.entity(victim).unwrap().discard(host));
             self.calls.fetch_add(1, Ordering::SeqCst);
         }
@@ -339,14 +343,12 @@ impl SpawnDuringArrival {
         let Tag::Compound(nbt) = nbt else {
             unreachable!()
         };
+        let level = host.level("minecraft:the_nether").unwrap();
         assert!(
-            host.summon(
-                "minecraft:the_nether",
-                "minecraft:item",
-                *self.at.lock().unwrap(),
-                nbt,
-            )
-            .is_some()
+            level
+                .summon(host, "minecraft:item", *self.at.lock().unwrap(), nbt)
+                .unwrap()
+                .is_some()
         );
         self.calls.fetch_add(1, Ordering::SeqCst);
     }

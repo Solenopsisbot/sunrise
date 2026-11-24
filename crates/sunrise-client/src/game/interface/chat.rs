@@ -1,6 +1,9 @@
 //! Chat, the command registries and the per-world state behind commands
 //! (game rules, the world clock, difficulty), bound to the game.
 #[cfg(test)]
+#[path = "chat/submit_order_tests.rs"]
+mod submit_order_tests;
+#[cfg(test)]
 #[path = "chat/suggestion_completion_tests.rs"]
 mod suggestion_completion_tests;
 
@@ -162,32 +165,60 @@ impl Game<'_> {
             Some(tree) => tree,
             None => sunrise_client::command::vanilla::game_dispatcher(),
         };
-        let mut commands = Vec::new();
-        self.native_register_client_commands(&mut commands);
-        commands.retain(|command| {
-            let keep = command.level == 0;
-            if !keep {
+        let mut registrations = Vec::new();
+        self.native_register_client_commands(&mut registrations);
+        let mut usages = Vec::with_capacity(registrations.len());
+        let mut executors = Vec::with_capacity(registrations.len());
+        for registration in registrations {
+            let owner = registration.mod_id;
+            let (command, call) =
+                mod_api::__private::split_client_command_registration(registration.answer);
+            let index = mod_api::__private::mod_index(owner)
+                .expect("client command registrations come from installed listeners");
+            let executor = super::native_server::RegisteredClientExecutor::new(
+                owner,
+                index,
+                &command.usage,
+                call,
+            );
+            if command.level != 0 {
                 log::warn!(
-                    "Sunrise: a client command was left out: `{}` has an operator level",
+                    "Sunrise: mod {owner} client command `{}` was left out: it has an operator level",
                     command.usage
                 );
+                continue;
             }
-            keep
-        });
+            usages.push(command);
+            executors.push(Some(executor));
+        }
         let arguments = super::native_server::command_arguments();
-        let (tree, _, problems) = super::native_server::client_command_tree(
-            &commands,
-            |name| base.find(name).is_some(),
-            &arguments,
-        );
+        let mut slots = super::native_server::CommandExecutorSlots::new();
+        let (tree, _, problems) =
+            super::native_server::client_command_tree(&usages, &arguments, Some(&mut slots));
         for problem in problems {
             log::warn!("Sunrise: a client command was left out: {problem}");
         }
-        let mut tree_with_mods = base.clone();
+        let mut client_dispatcher = Dispatcher::new();
+        super::native_server::register_command_nodes(
+            &mut client_dispatcher,
+            &tree,
+            MOD_COMMAND,
+            &arguments,
+            Some(&slots),
+        );
+        let retained: std::collections::HashSet<_> = slots.values().copied().collect();
+        for (slot, executor) in executors.iter_mut().enumerate() {
+            if !retained.contains(&slot) {
+                *executor = None;
+            }
+        }
+        self.native_client_commands
+            .install(client_dispatcher, executors);
+        let mut tree_with_mods = base.clone_with_unmerged_redirects();
         super::native_server::register_dispatcher(
             &mut tree_with_mods,
             &tree,
-            sunrise_client::command::MOD_COMMAND,
+            MOD_COMMAND,
             &arguments,
         );
         with_studio_commands(&with_native_commands(&tree_with_mods, &["studio"])).with_profiler()
@@ -206,12 +237,12 @@ pub struct ChatDraft {
 }
 /// `ChatScreen.ExitReason`: why the chat screen went away.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum ChatExit {
+pub(in crate::game) enum ChatExit {
     /// Another screen replaced it (death, a container, a disconnect).
     Interrupted,
     /// The player closed it (Escape).
     Intentional,
-    /// A message was sent.
+    /// The message was sent or transferred into the replacement chat screen.
     Done,
 }
 /// `ChatScreen.shouldDiscardDraft`.
@@ -235,8 +266,6 @@ pub struct UiState {
     pub chat_screen: Option<ChatScreen>,
     /// `ChatComponent.latestDraft`.
     pub chat_draft: Option<ChatDraft>,
-    /// `ChatScreen.isDraft`: the box opened with the draft and is unchanged since.
-    pub chat_draft_shown: bool,
     /// When the chat screen opened (its input took the focus: the cursor blink).
     pub chat_opened: Option<std::time::Instant>,
     /// The chat screen is `InBedChatScreen`: the sleeper's, with a Leave Bed button.
@@ -915,9 +944,6 @@ impl Game<'_> {
             .map(|(k, _)| k.clone())
             .collect();
         self.sync_enchantment_registries();
-        if self.remote.is_none() {
-            self.ui.registries.selector_tokens = super::native_entity_selectors::selector_tokens();
-        }
         // After the export, which keys the registry with vanilla's tags.
         self.sync_stat_registries();
         self.sync_pack_tag_ids();
@@ -976,126 +1002,141 @@ impl Game<'_> {
             .filter(|d| !command || d.command)
             .map(|d| d.text.clone());
         self.begin_chat_screen(draft.as_deref().unwrap_or(prefix), draft.is_some());
-        self.ui.chat_draft_shown = draft.is_some() && self.ui.chat_screen.is_some();
     }
     /// Open the chat box on `initial`; `is_draft` when that text is the saved
     /// draft (`ChatComponent.createScreen`), which draws grey italic until it
     /// is edited.
-    pub(super) fn begin_chat_screen(&mut self, initial: &str, is_draft: bool) {
-        if self.player.is_none() {
-            return;
-        }
-        self.ui.chat_draft_shown = false;
-        self.refresh_dynamic_registries();
-        let size = self
-            .renderer
-            .as_ref()
-            .map_or([1280, 720], |r| [r.config.width, r.config.height]);
-        let b = HudBatch::new(size, self.settings.gui_scale_inputs());
-        let m = Measure(&self.gui.atlas.font);
-        let c = Commands {
-            dispatcher: chat_tree(&self.remote),
-            registries: &self.ui.registries,
-        };
-        let mut screen = ChatScreen::new(
-            &m,
-            &c,
-            initial,
-            is_draft,
-            self.ui.chat.recent.len(),
-            b.width as i32,
-            b.height as i32,
-            self.chat_abilities(),
-        );
-        screen.auto_suggestions = self.settings.auto_suggestions;
-        self.ui.chat_screen = Some(screen);
-        self.ui.chat_opened = Some(std::time::Instant::now());
-        self.set_screen(Screen::Chat);
-        self.capture(false);
+    /// Returns false without a local player. Otherwise the ordinary screen lifecycle
+    /// can open, cancel, or replace the requested screen.
+    pub(super) fn begin_chat_screen(&mut self, initial: &str, is_draft: bool) -> bool {
+        self.replace_chat_screen(initial, is_draft, ChatExit::Interrupted)
     }
-    pub(super) fn close_chat(&mut self, reason: ChatExit) {
+
+    fn replace_chat_screen(&mut self, initial: &str, is_draft: bool, reason: ChatExit) -> bool {
+        if self.player.is_none() {
+            return false;
+        }
+        self.transition_screen(Screen::Chat, true, |game, accepted| {
+            if accepted != Some(Screen::Chat) {
+                game.remove_chat_screen(ChatExit::Interrupted);
+                return;
+            }
+            game.remove_chat_screen(reason);
+            game.refresh_dynamic_registries();
+            let size = game
+                .renderer
+                .as_ref()
+                .map_or([1280, 720], |r| [r.config.width, r.config.height]);
+            let b = HudBatch::new(size, game.settings.gui_scale_inputs());
+            let m = Measure(&game.gui.atlas.font);
+            let c = Commands {
+                dispatcher: chat_tree(&game.remote),
+                registries: &game.ui.registries,
+            };
+            let mut screen = ChatScreen::new(
+                &m,
+                &c,
+                initial,
+                is_draft,
+                game.ui.chat.recent.len(),
+                b.width as i32,
+                b.height as i32,
+                game.chat_abilities(),
+            );
+            screen.auto_suggestions = game.settings.auto_suggestions;
+            game.ui.chat_screen = Some(screen);
+            game.ui.chat_opened = Some(std::time::Instant::now());
+            game.capture(false);
+        });
+        true
+    }
+    pub(in crate::game) fn close_chat(&mut self, reason: ChatExit) {
         // InBedChatScreen.onClose: leaving the screen means getting up; the
         // screen goes once the player has woken (`tick_in_bed_chat`).
         if self.ui.in_bed_chat && self.sleeping.is_some() {
             self.wake_up(false, true);
             return;
         }
-        let text = self
-            .ui
-            .chat_screen
-            .as_ref()
-            .map_or_else(String::new, |s| s.value().to_owned());
-        self.keep_chat_draft(&text, reason);
-        self.ui.chat_draft_shown = false;
-        self.ui.chat_screen = None;
-        self.ui.chat.reset_scroll();
         if self.screen == Screen::Chat {
-            self.set_screen(Screen::Playing);
-            self.capture(true);
+            // `Gui.setScreen(null)`: Closing fires, no vetoable Opening does.
+            self.dismiss_screen_with(|game| game.remove_chat_screen(reason));
+            if self.screen == Screen::Playing {
+                self.capture(true);
+            }
+        } else {
+            self.remove_chat_screen(reason);
         }
+    }
+    /// `ChatScreen.removed`, called only after the screen transition is accepted.
+    pub(in crate::game) fn remove_chat_screen(&mut self, reason: ChatExit) {
+        if let Some(screen) = self.ui.chat_screen.take() {
+            self.keep_chat_draft(screen.value(), screen.is_draft(), reason);
+            self.ui.chat_opened = None;
+            self.ui.chat.reset_scroll();
+        }
+        self.ui.in_bed_chat = false;
     }
     /// `ChatScreen.removed`: the text left in the box becomes the draft unless
     /// `shouldDiscardDraft` (closed on purpose without Save Chat Drafts, or
     /// sent); blank text discards the draft. A draft still shown unchanged
     /// stays as it is.
-    fn keep_chat_draft(&mut self, text: &str, reason: ChatExit) {
+    fn keep_chat_draft(&mut self, text: &str, is_draft: bool, reason: ChatExit) {
         // During PvP & HUD's chat search the box holds the query: the draft is the text the
         // search put aside, whichever way the chat closed.
-        let aside;
-        let text = if self.pvp.chat_search {
-            self.pvp.chat_search = false;
-            aside = std::mem::take(&mut self.pvp.chat_search_aside);
-            aside.as_str()
-        } else {
-            text
-        };
-        let unchanged =
-            self.ui.chat_draft_shown && self.ui.chat_draft.as_ref().is_some_and(|d| d.text == text);
+        let aside = self.pvp.chat_search_aside.take();
+        let (text, is_draft) = aside.as_ref().map_or((text, is_draft), |(text, is_draft)| {
+            (text.as_str(), *is_draft)
+        });
         if should_discard_draft(reason, self.settings.file.bool("saveChatDrafts"))
             || text.trim().is_empty()
         {
             self.ui.chat_draft = None;
-        } else if !unchanged {
+        } else if !is_draft {
             self.ui.chat_draft = Some(ChatDraft {
                 text: text.to_owned(),
                 command: text.starts_with('/'),
             });
         }
     }
-    /// `ChatScreen.removed` after another screen interrupted chat.
-    pub(super) fn remove_chat_screen(&mut self) {
-        if let Some(chat) = self.ui.chat_screen.take() {
-            self.keep_chat_draft(chat.value(), ChatExit::Interrupted);
-            self.ui.chat_draft_shown = false;
-            self.ui.chat.reset_scroll();
-        }
-        self.ui.in_bed_chat = false;
-    }
-
     /// `Gui.tick`: a sleeper gets `InBedChatScreen`; when the player has
     /// woken (`onPlayerWokeUp`) it closes, or turns into the plain chat
     /// screen if something was typed.
     pub(super) fn tick_in_bed_chat(&mut self) {
         if self.screen != Screen::Chat {
-            self.remove_chat_screen();
+            self.remove_chat_screen(ChatExit::Interrupted);
         }
-        if self.ui.in_bed_chat {
-            if self.sleeping.is_none() {
-                self.ui.in_bed_chat = false;
-                let text = self
-                    .ui
-                    .chat_screen
+        if self.ui.in_bed_chat && self.sleeping.is_none() && !self.screen_over_playing() {
+            // InBedChatScreen.onPlayerWokeUp: replace once, discarding the
+            // outgoing draft only when non-draft typed text transfers into
+            // ordinary chat; empty or untouched-draft wake dismisses via
+            // `Gui.setScreen(null)` (Closing without a vetoable Opening).
+            let typed = self.ui.chat_screen.as_ref().and_then(|screen| {
+                let (text, is_draft) = self
+                    .pvp
+                    .chat_search_aside
                     .as_ref()
-                    .map_or_else(String::new, |s| s.value().to_owned());
-                self.close_chat(ChatExit::Interrupted);
-                if !text.is_empty() {
-                    // InBedChatScreen.onPlayerWokeUp: a new ChatScreen with
-                    // the typed text, not a draft.
-                    self.begin_chat_screen(&text, false);
+                    .map_or((screen.value(), screen.is_draft()), |(text, is_draft)| {
+                        (text.as_str(), *is_draft)
+                    });
+                (!is_draft && !text.is_empty()).then(|| text.to_owned())
+            });
+            if let Some(text) = typed {
+                self.replace_chat_screen(&text, false, ChatExit::Done);
+                // A vetoed replacement keeps the outgoing instance and its draft; the
+                // sleeping-to-awake transition has been offered once and is not repeated.
+                self.ui.in_bed_chat = false;
+            } else {
+                self.dismiss_screen_with(|game| game.remove_chat_screen(ChatExit::Interrupted));
+                if self.screen == Screen::Playing {
+                    self.capture(true);
                 }
             }
-        } else if self.sleeping.is_some() && self.screen == Screen::Playing {
-            self.begin_chat_screen("", false);
+        } else if self.sleeping.is_some()
+            && self.screen == Screen::Playing
+            && !self.screen_over_playing()
+        {
+            let draft = self.ui.chat_draft.as_ref().map(|draft| draft.text.clone());
+            self.begin_chat_screen(draft.as_deref().unwrap_or(""), draft.is_some());
             self.ui.in_bed_chat = self.screen == Screen::Chat;
         }
     }
@@ -1169,15 +1210,11 @@ impl Game<'_> {
         }
     }
     /// A player's chat line on the window's own chat: a guest's message on
-    /// the server's own chat (`HostEvent::Chat`). `ChatListener`
+    /// the server's own chat. `ChatListener`
     /// checks `canReceivePlayerMessages` for these, so Commands Only and
     /// Hidden drop them; command feedback (`/list`, `/tp`) is a system
     /// message and takes the system-message permission instead.
     pub(super) fn player_message(&mut self, text: Text) {
-        if let Some(capture) = self.chat_capture.as_mut() {
-            capture.push(text);
-            return;
-        }
         // A server's client receives the line as a packet (PlayerChat or
         // DisguisedChat) and filters it there.
         if self.remote.is_none() {
@@ -1231,7 +1268,7 @@ impl Game<'_> {
         if self.pvp_chat().search
             && match key {
                 KeyCode::KeyF => ctrl,
-                KeyCode::Enter | KeyCode::NumpadEnter => self.pvp.chat_search,
+                KeyCode::Enter | KeyCode::NumpadEnter => self.pvp.chat_search_aside.is_some(),
                 _ => false,
             }
         {
@@ -1272,19 +1309,28 @@ impl Game<'_> {
                 self.close_chat(ChatExit::Intentional);
             }
             ChatAction::Submit(message) => {
-                // InBedChatScreen sends without closing (`closeOnSubmit` is
-                // false): the box empties and the screen stays.
-                if self.ui.in_bed_chat && self.sleeping.is_some() {
-                    screen.suggest_command(&m, &c, "");
-                    self.ui.chat.reset_scroll();
-                    self.ui.chat_screen = Some(screen);
-                } else {
-                    // The screen is taken here, so close_chat sees no text: a sent
-                    // message discards the draft (DONE).
-                    self.close_chat(ChatExit::Done);
-                }
+                // ChatScreen.keyPressed: handleChatInput runs with the screen still open,
+                // then `closeOnSubmit` closes it. InBedChatScreen sends without closing
+                // (`closeOnSubmit` is false): the box empties and the screen stays.
+                let close_on_submit = !(self.ui.in_bed_chat && self.sleeping.is_some());
+                self.ui.chat_screen = Some(screen);
                 if !message.is_empty() {
                     self.handle_chat_input(&message);
+                }
+                if close_on_submit {
+                    // A sent message discards the draft (DONE), whatever the box holds.
+                    self.close_chat(ChatExit::Done);
+                } else {
+                    // The line is handled first, then the box empties and chat scrolls back.
+                    if let Some(screen) = self.ui.chat_screen.as_mut() {
+                        let m = Measure(&self.gui.atlas.font);
+                        let c = Commands {
+                            dispatcher: chat_tree(&self.remote),
+                            registries: &self.ui.registries,
+                        };
+                        screen.suggest_command(&m, &c, "");
+                    }
+                    self.ui.chat.reset_scroll();
                 }
             }
             ChatAction::None => {
@@ -1361,20 +1407,13 @@ impl Game<'_> {
             self.profiler_chat(args);
             return;
         }
-        // On a server (single player's own included) the server runs it,
-        // unless a client mod owns the command.
         if self.remote.is_some() {
-            if let Some(command) = message.strip_prefix('/')
-                && self.client_mod_command(command)
-            {
-                return;
-            }
-            self.send_chat_from_screen(&message);
+            self.send_signed_chat_input(&message);
             return;
         }
         if let Some(command) = message.strip_prefix('/') {
             // A native mod's command first.
-            if !self.client_mod_command(command) {
+            if self.run_client_native_command(command).is_none() {
                 self.run_command(command);
             }
         } else {
@@ -1636,7 +1675,7 @@ impl Game<'_> {
             .link_prompt_layout(&url, self.gui_size())
             .pressed_at(self.cursor);
         if let Some(button) = pressed {
-            self.audio.play_button_click();
+            self.play_audio_button_click();
             if button == LINK_COPY {
                 // ConfirmLinkScreen.copyToClipboard, then the callback's no.
                 use sunrise_client::clipboard::Clipboard;
@@ -1651,35 +1690,33 @@ impl Game<'_> {
     /// first, as `ClientPacketListener.sendUnattendedCommand` lets client
     /// commands take it.
     pub(super) fn click_command(&mut self, command: &str) {
-        let command = command.strip_prefix('/').unwrap_or(command);
-        if self.client_mod_command(command) {
-            return;
-        }
         if self.remote.is_some() {
             self.send_unattended_command(command);
         } else {
-            self.run_command(command);
+            let command = command.strip_prefix('/').unwrap_or(command);
+            if self.run_client_native_command(command).is_none() {
+                self.run_command(command);
+            }
         }
     }
     /// PvP & HUD's chat search on or off. The box holds the query: what was typed is put aside
     /// when the search starts and comes back when it stops.
     fn toggle_chat_search(&mut self) {
-        let typed = self.ui.chat_screen.as_ref().map(|s| s.value().to_owned());
-        let next = if self.pvp.chat_search {
-            std::mem::take(&mut self.pvp.chat_search_aside)
+        let Some(screen) = self.ui.chat_screen.as_mut() else {
+            return;
+        };
+        let next = if let Some((text, _)) = self.pvp.chat_search_aside.take() {
+            text
         } else {
-            self.pvp.chat_search_aside = typed.unwrap_or_default();
+            self.pvp.chat_search_aside = Some((screen.value().to_owned(), screen.is_draft()));
             String::new()
         };
-        self.pvp.chat_search = !self.pvp.chat_search;
         let m = Measure(&self.gui.atlas.font);
         let c = Commands {
             dispatcher: chat_tree(&self.remote),
             registries: &self.ui.registries,
         };
-        if let Some(screen) = self.ui.chat_screen.as_mut() {
-            screen.suggest_command(&m, &c, &next);
-        }
+        screen.suggest_command(&m, &c, &next);
     }
     /// Chat lines over the HUD (focused while the chat screen is open).
     pub(super) fn draw_chat(&mut self, batch: &mut HudBatch) {
@@ -1687,21 +1724,21 @@ impl Game<'_> {
         let options = self.pvp_chat();
         self.ui.chat.set_qol(&self.gui.atlas, options.qol());
         // A search ends with its option; a chat closed some other way ends it in keep_chat_draft.
-        if self.pvp.chat_search && self.ui.chat_screen.is_none() {
+        if self.ui.chat_screen.is_none() {
             // The chat went without closing (leaving the world): nothing to give back.
-            self.pvp.chat_search = false;
-            self.pvp.chat_search_aside.clear();
-        } else if self.pvp.chat_search && !options.search {
+            self.pvp.chat_search_aside = None;
+        } else if self.pvp.chat_search_aside.is_some() && !options.search {
             self.toggle_chat_search();
         }
+        let searching = focused && self.pvp.chat_search_aside.is_some();
         let query = self
             .ui
             .chat_screen
             .as_ref()
-            .filter(|_| focused && self.pvp.chat_search)
+            .filter(|_| searching)
             .map(|s| s.value());
         self.ui.chat.set_search(&self.gui.atlas, query);
-        self.ui.chat.search_prompt = focused && self.pvp.chat_search;
+        self.ui.chat.search_prompt = searching;
         // `ChatComponent`'s queue row: the messages Chat Delay holds back.
         self.ui.chat.queue = self.chat_queue_len();
         if self.ui.hide_gui && !focused {
@@ -1980,6 +2017,19 @@ impl Game<'_> {
         } else {
             self.ui.command_clocks.get(clock).map_or(0, |c| c.0)
         }
+    }
+    /// Every world clock's total ticks by id, for the loot conditions that read one.
+    pub(in crate::game) fn loot_clock_ticks(&self) -> std::collections::BTreeMap<String, i64> {
+        let mut clocks: std::collections::BTreeMap<String, i64> = self
+            .ui
+            .command_clocks
+            .iter()
+            .map(|(name, state)| (name.clone(), state.0))
+            .collect();
+        for name in [self.active_clock(), OVERWORLD_CLOCK, "minecraft:the_end"] {
+            clocks.insert(name.to_owned(), self.command_clock_time(name));
+        }
+        clocks
     }
     pub(in crate::game) fn set_command_clock_time(&mut self, clock: &str, total: i64) {
         if clock == "minecraft:the_end" {
@@ -2678,33 +2728,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A client command's usage becomes real nodes in the chat tree: its
-    /// argument is parsed (a wrong shape is red, as a vanilla command's would
-    /// be) and a run goes to `native_command` with the line as typed.
+    /// A client command's usage becomes real nodes in the chat tree and binds
+    /// its executor slot to the client dispatcher generation while preserving
+    /// server redirects and permissions in `base`.
     #[test]
     fn a_client_commands_usage_is_parsed_by_the_chat_tree() {
         let reg = Registries::default();
         let vanilla = sunrise_client::command::vanilla::game_dispatcher();
         let commands = [mod_api::Command::new("xmode <mode:word>")];
         let arguments = super::super::native_server::command_arguments();
+        let mut slots = super::super::native_server::CommandExecutorSlots::new();
         let (tree, _, problems) = super::super::native_server::client_command_tree(
             &commands,
-            |name| vanilla.find(name).is_some(),
             &arguments,
+            Some(&mut slots),
         );
         assert!(problems.is_empty(), "{problems:?}");
-        let mut chat = vanilla.clone();
-        super::super::native_server::register_dispatcher(
-            &mut chat,
+        let mut client_dispatcher = Dispatcher::new();
+        super::super::native_server::register_command_nodes(
+            &mut client_dispatcher,
             &tree,
-            sunrise_client::command::MOD_COMMAND,
+            MOD_COMMAND,
             &arguments,
+            Some(&slots),
         );
+        let parsed = client_dispatcher.parse("xmode fast", &reg);
+        let (ctx, handler) = parsed.executable().unwrap();
+        assert_eq!(handler, MOD_COMMAND);
+        let key = ctx.executor.expect("client node binds an executor key");
+        assert_eq!(key.slot(), 0);
+        assert!(client_dispatcher.owns_executor(key));
+
+        // Rebuilding the client dispatcher mints a fresh generation; stale keys are rejected.
+        let mut rebuilt = Dispatcher::new();
+        super::super::native_server::register_command_nodes(
+            &mut rebuilt,
+            &tree,
+            MOD_COMMAND,
+            &arguments,
+            Some(&slots),
+        );
+        assert!(!rebuilt.owns_executor(key));
+
+        let mut chat = vanilla.clone_with_unmerged_redirects();
+        super::super::native_server::register_dispatcher(&mut chat, &tree, MOD_COMMAND, &arguments);
         let parse = chat.parse("xmode fast", &reg);
-        assert_eq!(
-            parse.executable().unwrap().1,
-            sunrise_client::command::MOD_COMMAND
-        );
+        assert_eq!(parse.executable().unwrap().1, MOD_COMMAND);
         assert!(
             chat.parse("xmode", &reg).executable().is_err(),
             "needs its mode"
@@ -2713,13 +2782,112 @@ mod tests {
             chat.parse("xmode fast extra", &reg).executable().is_err(),
             "one word, not two"
         );
-        // A name the game has is not taken over.
-        let (_, _, problems) = super::super::native_server::client_command_tree(
-            &[mod_api::Command::new("help <x:word>")],
-            |name| vanilla.find(name).is_some(),
+        // Server redirects and permissions in `base` remain intact after merging client commands.
+        let tp = chat.find("tp").expect("tp alias remains");
+        let tp_target = chat.nodes[tp].redirect.expect("tp redirect remains");
+        assert_eq!(chat.nodes[tp_target].name(), "teleport");
+        assert_eq!(chat.nodes[tp].permission, 2);
+        let op_reg = Registries {
+            permission: 2,
+            ..Registries::default()
+        };
+        assert!(chat.parse("tp 0 64 0", &reg).executable().is_err());
+        assert_eq!(
+            chat.parse("tp 0 64 0", &op_reg).executable().unwrap().1,
+            "teleport.location"
+        );
+    }
+
+    #[test]
+    fn display_merge_keeps_server_redirects_on_unmerged_server_targets() {
+        let mut server = Dispatcher::new();
+        let shared = server.literal(0, "shared");
+        let remote = server.literal(shared, "server");
+        server.executes(remote, "remote");
+        let alias = server.literal(0, "alias");
+        server.redirect(alias, shared);
+        let run = server.literal(0, "run");
+        server.redirect(run, 0);
+
+        let arguments = super::super::native_server::command_arguments();
+        let client_cmds = [
+            mod_api::Command::new("shared local <value:integer>"),
+            mod_api::Command::new("clientonly"),
+        ];
+        let (tree, _, problems) =
+            super::super::native_server::client_command_tree(&client_cmds, &arguments, None);
+        assert!(problems.is_empty(), "{problems:?}");
+
+        let mut display = server.clone_with_unmerged_redirects();
+        super::super::native_server::register_dispatcher(
+            &mut display,
+            &tree,
+            MOD_COMMAND,
             &arguments,
         );
-        assert_eq!(problems.len(), 1);
+        let reg = Registries::default();
+
+        // Direct path displays both server and client branches.
+        assert_eq!(
+            display.parse("shared server", &reg).executable().unwrap().1,
+            "remote"
+        );
+        assert_eq!(
+            display
+                .parse("shared local 7", &reg)
+                .executable()
+                .unwrap()
+                .1,
+            MOD_COMMAND
+        );
+        let direct_suggestions: Vec<String> = display
+            .client_suggestions(&display.parse("shared ", &reg), 7, &reg)
+            .1
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(direct_suggestions, ["local", "server"]);
+
+        // Server alias to the shared root keeps the server branch and never exposes the client branch.
+        assert_eq!(
+            display.parse("alias server", &reg).executable().unwrap().1,
+            "remote"
+        );
+        assert!(display.parse("alias local 7", &reg).executable().is_err());
+        let alias_suggestions: Vec<String> = display
+            .client_suggestions(&display.parse("alias ", &reg), 6, &reg)
+            .1
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(alias_suggestions, ["server"]);
+
+        // A server redirect to the dispatcher root traverses only the unmerged server tree
+        // and preserves Brigadier's `...` smart-usage marker.
+        assert_eq!(
+            display
+                .parse("run shared server", &reg)
+                .executable()
+                .unwrap()
+                .1,
+            "remote"
+        );
+        assert!(
+            display
+                .parse("run shared local 7", &reg)
+                .executable()
+                .is_err()
+        );
+        assert!(display.parse("run clientonly", &reg).executable().is_err());
+        let run_suggestions: Vec<String> = display
+            .client_suggestions(&display.parse("run ", &reg), 4, &reg)
+            .1
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert!(!run_suggestions.iter().any(|s| s == "clientonly"));
+        let usage = display.smart_usage(0, 0);
+        assert!(usage.iter().any(|(_, line)| line == "run ..."), "{usage:?}");
     }
 
     #[test]
@@ -2751,7 +2919,7 @@ mod tests {
         assert!(plain.find("flyspeed").is_none());
         let tree = with_native_commands(vanilla, &["flyspeed"]);
         assert!(tree.find("flyspeed").is_some());
-        // The rest of the line goes to the mod, as `native_command` gets it.
+        // The rest of the line is parsed as a greedy argument in the chat tree.
         let parse = tree.parse("flyspeed 4", &reg);
         assert_eq!(
             parse.executable().unwrap().1,

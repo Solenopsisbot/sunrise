@@ -118,6 +118,9 @@ impl StartupMenu {
             );
             title.last_server = settings.file.string("lastServer");
             title.skip_multiplayer_warning = settings.file.bool("skipMultiplayerWarning");
+            // The mods' parts are installed before this menu opens, so Create New World's
+            // Game Rules page lists their rules from the first frame.
+            title.set_rule_registry(Arc::new(crate::game::api_values::game_rule_registry()));
             // Gui.addInitialScreens: the accessibility onboarding comes first.
             if settings.file.bool("onboardAccessibility") {
                 title.start_onboarding();
@@ -403,6 +406,7 @@ pub(super) fn spawn_loader(
     vanilla_root: &std::path::Path,
     started: Instant,
     progress: &Progress,
+    max_atlas_size: &Arc<AtomicU32>,
 ) -> Result<(Receiver<LoaderMsg>, JoinHandle<()>)> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let settings = settings.clone();
@@ -411,6 +415,7 @@ pub(super) fn spawn_loader(
     mod_sources.capture_code_switches(&settings.mods.disabled);
     let world = launch_world(options).map(str::to_owned);
     let progress = progress.clone();
+    let max_atlas_size = max_atlas_size.clone();
     let handle = std::thread::Builder::new()
         .stack_size(sunrise_threads::GAME_THREAD_STACK_BYTES)
         .name("resource-loader".into())
@@ -418,7 +423,7 @@ pub(super) fn spawn_loader(
             let result =
                 packs::startup_root(&vanilla_root, &settings.resource_packs, &[], &mod_sources)
                     .and_then(|roots| {
-                        load_resources_for_mods(
+                        load_resources_for_mods_with_limit(
                             roots,
                             super::pack_finders::data_packs(&mod_sources),
                             world.as_deref(),
@@ -428,8 +433,13 @@ pub(super) fn spawn_loader(
                             true,
                             load_role,
                             &progress,
-                            &mut |gui, root| {
-                                let _ = sender.send(LoaderMsg::Ui(gui, root.to_path_buf()));
+                            &max_atlas_size,
+                            &mut |gui, root, source| {
+                                let _ = sender.send(LoaderMsg::Ui(
+                                    gui,
+                                    root.to_path_buf(),
+                                    source.clone(),
+                                ));
                             },
                             &mut || {
                                 // The menu owns live settings; do not save the worker's snapshot.
@@ -458,7 +468,7 @@ impl Loading {
         if self.loaded.is_none() && !self.delivered {
             loop {
                 match self.receiver.try_recv() {
-                    Ok(LoaderMsg::Ui(gui, root)) => self.set_ui(gui, root),
+                    Ok(LoaderMsg::Ui(gui, root, source)) => self.set_ui(gui, root, source),
                     Ok(LoaderMsg::ClearPackSelection { revision, ack }) => {
                         if revision == self.menu.pack_selection_revision {
                             packs::clear_selection(&mut self.settings);
@@ -775,9 +785,12 @@ impl Loading {
                 Event::AccessibilityHelp => {
                     super::packs::open_uri(super::options::ACCESSIBILITY_HELP_LINK)
                 }
-                // Mods' settings pages open only in a running game.
+                // Mods' settings pages and config screens open only in a running game.
                 // The HUD editor needs a world: its button is inactive here.
-                Event::NativeSettings(_) | Event::NativeSetting(..) | Event::HudEditor => {}
+                Event::NativeSettings(_)
+                | Event::NativeSetting(..)
+                | Event::ModConfigScreen(_)
+                | Event::HudEditor => {}
                 // The startup menu runs before the game opens a control socket,
                 // and before its sound engine (no clicks, no volume previews,
                 // and no music tracks to list or play).
@@ -1537,6 +1550,7 @@ impl Loading {
             &self.vanilla_root,
             self.started,
             &self.progress,
+            &self.max_atlas_size,
         )?;
         self.receiver = receiver;
         self.handle = Some(handle);
@@ -1596,6 +1610,7 @@ mod tests {
         Loading {
             window: None,
             renderer: None,
+            max_atlas_size: Arc::new(AtomicU32::new(sunrise_client::hud::MAX_ATLAS_SIZE)),
             boot: sunrise_client::hud::HudAtlas::boot(),
             gui: None,
             settings: Settings::default(),
@@ -1618,6 +1633,54 @@ mod tests {
             menu: StartupMenu::default(),
             error: None,
         }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn startup_menu_creation_carries_installed_mod_rules() {
+        use mod_api::{Hooks, Registrar, RegistrationContext};
+        use sunrise_client::gamerules::Value;
+        struct Mod;
+        #[mod_api::__subscriptions]
+        impl Hooks for Mod {
+            fn register(&self, registrar: &mut dyn Registrar, _: &RegistrationContext) {
+                registrar.game_rule_category("machines").unwrap();
+                registrar
+                    .game_rule_int("cap", "example:machines", 8, 0, 64)
+                    .unwrap();
+            }
+        }
+        // `set_root` replaces the process's language: keep it in a child process.
+        if super::super::native_entity_refs::tests::run_fresh_cases(
+            "game::startup_menu::tests::startup_menu_creation_carries_installed_mod_rules",
+            "SUNRISE_STARTUP_MOD_RULES_CASE",
+            &["rules"],
+        ) {
+            return;
+        }
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new("example", Box::new(Mod))].into();
+        mod_platform::testing::with_mods(mods, || {
+            super::super::native_entity_refs::tests::with_client_game(|_| {
+                let scratch = tempfile::tempdir().unwrap();
+                let mut menu = StartupMenu::default();
+                menu.set_root(
+                    scratch.path().to_path_buf(),
+                    &Settings::default(),
+                    Arc::from([]),
+                    "",
+                );
+                let title = menu.title.as_mut().unwrap();
+                title.enter_singleplayer();
+                let Action::Create { mut options, .. } = title.create_action() else {
+                    panic!("creation")
+                };
+                // The page lists `available_rules`: the mod's integer rule is one of them.
+                assert!(options.rules.rule("example:cap").is_some());
+                assert_eq!(options.rules.get("example:cap"), Some(Value::Int(8)));
+                assert!(options.rules.set("example:cap", Value::Int(12)));
+                assert_eq!(options.rules.get("example:cap"), Some(Value::Int(12)));
+            })
+        });
     }
 
     #[test]
@@ -2066,7 +2129,11 @@ mod tests {
         let worker_root = root.clone();
         let worker = std::thread::spawn(move || {
             sender
-                .send(LoaderMsg::Ui(gui(&worker_root), worker_root))
+                .send(LoaderMsg::Ui(
+                    gui(&worker_root),
+                    worker_root,
+                    sunrise_assets::resource_source::ResourceSource::default(),
+                ))
                 .unwrap();
             published.send(()).unwrap();
             wait.recv().unwrap();
@@ -2091,7 +2158,11 @@ mod tests {
             options: Default::default(),
         };
         title.type_text("My world");
-        loading.set_ui(gui(&root), root);
+        loading.set_ui(
+            gui(&root),
+            root,
+            sunrise_assets::resource_source::ResourceSource::default(),
+        );
         let action = loading.menu.title.as_ref().unwrap().create_action();
         loading.menu.queue_entry(action, "Player".into());
         assert!(
@@ -2171,9 +2242,9 @@ mod tests {
             DeclarationRefusal::new(
                 "porter",
                 DeclarationKind::Item,
-                mod_api::DeclarationError::UnownedNamespace {
+                mod_api::DeclarationError::Rejected {
                     id: "foreign:wrench".into(),
-                    namespace: "foreign".into(),
+                    reason: "declared twice".into(),
                 },
             ),
         ]);

@@ -11,8 +11,9 @@ fn register(&self, registrar: &mut dyn mod_api::Registrar, _: &mod_api::Registra
 }
 ```
 
-The resulting type id belongs to the mod's manifest namespace. Duplicate ids, invalid ids and ids
-in another mod's namespace refuse registration. `minecraft:`, `sunrise:` and `neoforge:` are reserved.
+A bare name uses the declaring mod's namespace while an explicit valid `namespace:path` keeps
+its namespace. Duplicate ids, invalid ids and the built-in `neoforge:add_table` serializer refuse
+registration.
 The static serializer registry is `neoforge:global_loot_modifier_serializers`; it is not synced to clients.
 
 ## Preparing an instance
@@ -30,9 +31,11 @@ not a mutable game host. Report invalid fields with `LootModifierError::new(fiel
 
 A serializer can retain those settings and implement `GlobalLootModifier::priority` and `condition`
 from them, returning `Ok(value)`. An error from either metadata method refuses the modifier instead of silently using
-a default priority or an absent condition. The runtime captures them once during
-decoding, not during rolls. The prepared
-instance and its code store stay alive while a roll retains their generation, even after reload.
+a default priority or an absent condition. The runtime captures them once during decoding,
+not during rolls. An inline condition uses the registered condition codec to bind its rule at the
+same boundary. A named reference uses the bound predicate already in the owning loot generation.
+An invalid condition refuses only that modifier file. The prepared instance and its code store
+stay alive while a roll retains their generation, even after reload.
 
 Instances are selected by files under `data/<namespace>/loot_modifiers/<path>.json`, for example:
 
@@ -81,38 +84,141 @@ can order listeners against it.
 
 ## Applying an instance
 
-`GlobalLootModifier::apply` takes a borrowed `LootModifierContext` and the preceding list as
-`Vec<LootStack>`. It returns the replacement list or a typed error. Like loot functions and
-conditions, it is a data-only callback: it receives no `Host` or world-write access. Its capabilities
-are the facts snapshot, the borrowed roll random and raw sub-rolls. Keep implementations
-`Send + Sync` and retain no borrowed context beyond the callback.
+`GlobalLootModifier::apply` takes a borrowed `LootModifierContext` and a mutable `LootList<'_>`
+borrowing the live generated list in place, returning `Result<(), LootModifierError>`. Like loot
+functions and conditions, it is a data-only callback: it receives no `Host` or world-write access.
+Its capabilities are borrowed parameters, the borrowed roll random, in-place list editing and raw
+sub-rolls. Keep implementations `Send + Sync` and retain no borrowed context or list beyond the
+callback.
 
-The list keeps signed counts and arbitrary component patches. A modifier may add, remove, replace
-or reorder entries, including empty and over-maximum stacks. No second splitter or count clamp runs
-between modifiers or after the pass. If application fails, later modifiers receive the preceding
-list; draws already made from the roll random are not undone. A native panic disables the failing
-prepared instance through the standard retained-callback policy. Only when the Items caller
+`LootList` exposes `len`, `is_empty`, `get` (`Option<LootStackView<'_>>`), `get_mut`
+(`Option<LootStackEditor<'_>>`), `iter`, `push`, `insert`, `replace`, `remove`, `pop`, `clear`,
+`truncate`, `swap`, `reverse`, `reorder` and `retain`. The list keeps signed counts and arbitrary
+component patches. A modifier may edit entries in place, add, remove, replace or reorder entries,
+including empty and over-maximum stacks. Invalid pushed, inserted or replaced stacks return
+`LootStackEditError` (which converts into `LootModifierError` with `?`) without modifying the
+list; out-of-range indices return `Ok(false)` or `false`. No second splitter or count clamp runs
+between modifiers or after the pass.
+
+If application returns `Err`, the failure is reported and later modifiers continue with the list as
+it stood when the error was returned (earlier valid edits and random draws are not rolled back),
+and the modifier remains eligible on future rolls. A native panic disables the registering
+serializer's callback owner through the standard retained-callback policy across its prepared
+instances and reloads while other modifiers continue to run. Only when the Items caller
 materializes its unsigned engine stack does a negative count become zero, retaining that list
 position; subsequent modifiers still observe the original signed count.
 
-`context.snapshot()` reads the current facts and the set-once queried root table id. Missing facts
-stay missing. Its `seed` field is zero: obtaining a snapshot draws no random value.
-`context.random()` borrows the actual selected roll source through `RandomSource`, the existing
-shared draw capability; do not create a separate seeded generator. `context.roll_raw(&table_id)`
-rolls into an appendable list using the same parameters, selected random, visited-table guards and
-data generation. It runs neither the modifier pass nor another stack splitter. A missing table
-returns an error naming it; a visited table terminates with an empty list.
+`context.params()` lends the current parameters, including `queried_table_id()` for the
+set-once root id. Optional parameters stay absent unless supplied. Reading them does not draw
+randomness. `context.random()` borrows the actual selected roll source through `RandomSource`, the
+existing shared draw capability; do not create a separate seeded generator.
+
+Two raw sub-roll methods use the same parameters, selected random, visited-table guards and data
+generation, running neither the modifier pass nor another stack splitter:
+
+- `context.append_raw(&table_id, generated)` rolls the table raw and moves its unmodified engine
+  stacks directly onto `generated` without copying them through API snapshots. The built-in
+  `neoforge:add_table` modifier uses this same path.
+- `context.roll_raw(&table_id, &mut |stack| ...)` rolls the table raw and lends each generated
+  stack as a `LootStackView<'_>` to the visitor; call `stack.to_owned()?` only when keeping a copy.
+
+For both methods, a missing table returns an error naming it and a visited table terminates with no
+output.
+
+```rust,ignore
+use std::sync::Arc;
+use mod_api::{
+    DataLoadContext, GlobalLootModifier, GlobalLootModifierSerializer, Identifier, ItemKey,
+    LootList, LootModifierContext, LootModifierError, LootModifierSettings, LootStack,
+};
+
+struct BonusSerializer {
+    bonus_item: ItemKey,
+}
+
+struct BonusModifier {
+    settings: LootModifierSettings,
+    bonus_item: ItemKey,
+    extra_table: Identifier,
+}
+
+impl GlobalLootModifierSerializer for BonusSerializer {
+    fn decode(
+        &self,
+        data: &serde_json::Value,
+        _load: &dyn DataLoadContext,
+    ) -> Result<Arc<dyn GlobalLootModifier>, LootModifierError> {
+        let settings = LootModifierSettings::decode(data)?;
+        let extra_table = data
+            .get("extra_table")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| LootModifierError::new("extra_table", "expected identifier string"))
+            .and_then(|raw| {
+                Identifier::parse(raw).map_err(|err| LootModifierError::new("extra_table", err))
+            })?;
+        Ok(Arc::new(BonusModifier {
+            settings,
+            bonus_item: self.bonus_item,
+            extra_table,
+        }))
+    }
+}
+
+impl GlobalLootModifier for BonusModifier {
+    fn priority(&self) -> Result<i32, LootModifierError> {
+        Ok(self.settings.priority)
+    }
+
+    fn condition(&self) -> Result<Option<serde_json::Value>, LootModifierError> {
+        Ok(self.settings.condition.clone())
+    }
+
+    fn apply(
+        &self,
+        context: &mut dyn LootModifierContext,
+        generated: &mut LootList<'_>,
+    ) -> Result<(), LootModifierError> {
+        // Edit existing entries in place without cloning the whole list.
+        if let Some(mut first) = generated.get_mut(0) {
+            let count = first.view().count().saturating_add(1);
+            first.set_count(count);
+        }
+        // Push an owned `LootStack` only when introducing a brand-new entry.
+        generated.push(LootStack::new(self.bonus_item, 1))?;
+        // Or append raw sub-rolls directly onto `generated` with zero snapshot copies.
+        context.append_raw(&self.extra_table, generated)?;
+        // Use `roll_raw` when inspecting sub-roll stacks before deciding what to keep.
+        let mut kept = Vec::new();
+        let mut capture_err = None;
+        context.roll_raw(&self.extra_table, &mut |stack| {
+            if capture_err.is_none() && stack.count() > 0 {
+                match stack.to_owned() {
+                    Ok(owned) => kept.push(owned),
+                    Err(err) => capture_err = Some(err),
+                }
+            }
+        })?;
+        if let Some(err) = capture_err {
+            return Err(err.into());
+        }
+        for stack in kept {
+            generated.push(stack)?;
+        }
+        Ok(())
+    }
+}
+```
 
 The server's root pass is after table functions and stack splitting, before caller consumption and
 container shuffle. Nested tables and raw sub-rolls do not run it. `loot_drops` and
 `container_loot_filled` are separate later moments, not aliases for global loot modifiers.
 
-## What a snapshot holds per caller
+## What parameters are available per caller
 
 Each caller supplies vanilla's parameters for its roll, and only those; the rest stay missing.
-`entity` is `THIS_ENTITY`, `tool` is `TOOL`, and `place.origin` is `ORIGIN`.
+`entity()` reads `THIS_ENTITY`, `tool()` reads `TOOL`, and `origin()` reads `ORIGIN`.
 
-| Roll | `entity` | `tool` | `place.origin` | `luck` |
+| Roll | `entity()` | `tool()` | `origin()` | `luck()` |
 | --- | --- | --- | --- | --- |
 | Piglin barter | the piglin | none | none | 0 |
 | Advancement reward | the rewarded player | none | the player's position | 0 |
@@ -122,4 +228,4 @@ Each caller supplies vanilla's parameters for its roll, and only those; the rest
 | Vault display item | none | none | the vault's centre | 0 |
 | A mod's roll call | the entity it named, if any | the tool it gave | the origin it gave | 0 |
 
-The fishing owner is not a damage source: `damage` stays missing, and only a condition's `attacker` target reaches the owner. `place.level` is present on all of them. A player's entity carries their worn and held items.
+The fishing owner is not a damage source: `damage()` stays missing, and only a condition's `attacker` target reaches the owner. `level()` is present on all of them. A player's entity carries their worn and held items.

@@ -21,7 +21,8 @@ pub struct SaveDir {
     pub tables: OnceLock<Arc<SaveTables>>,
     pub(super) professions:
         std::sync::RwLock<Option<Arc<crate::mobs::villager::ResolvedProfessions>>>,
-    pub(super) trusted_fluid_load: bool,
+    /// A server-owned world save, not a remote cache: chunk-disk hooks need its worker context.
+    pub(super) server_owned: bool,
     /// The dimension's skylight and height, from its folder name.
     pub shape: LevelShape,
     /// The region file headers kept for far readers (`far_record`).
@@ -76,7 +77,16 @@ impl SaveDir {
         attachments: &sunrise_mod_runtime::attachments::Attachments,
     ) -> Result<()> {
         let path = self.attachments_path();
-        let data = attachments.to_nbt();
+        let data = match attachments.try_to_nbt() {
+            Ok(data) => data,
+            Err(error) => {
+                log::error!(
+                    "Sunrise: refusing level attachments save at {}: {error}",
+                    path.display()
+                );
+                return Err(error.into());
+            }
+        };
         // Emptied after a Horizon file was read: an empty file under Sunrise's name keeps it unread.
         if data.is_empty()
             && !path.exists()
@@ -122,7 +132,7 @@ impl SaveDir {
             outstanding: Default::default(),
             tables: OnceLock::new(),
             professions: Default::default(),
-            trusted_fluid_load: false,
+            server_owned: false,
             shape,
             far_regions: Default::default(),
             lod_decoded: Default::default(),
@@ -168,8 +178,8 @@ impl SaveDir {
             .ok_or_else(|| "cannot save chunks without a loaded item catalog".into())
     }
     /// Mark this as a server-owned world save, not a remote cache.
-    pub fn enable_trusted_fluid_load(&mut self) {
-        self.trusted_fluid_load = true;
+    pub fn mark_server_owned(&mut self) {
+        self.server_owned = true;
     }
     /// Lets saves of this folder take an old chunk's calculated blending data
     /// (`lookup` must not calculate). Set once, before the folder saves.
@@ -433,14 +443,7 @@ impl SaveDir {
         {
             return Ok(tag.map(|t| (*t).clone()));
         }
-        read_region_record(self.region_storage(kind), x, z).inspect(|record| {
-            if self.trusted_fluid_load
-                && kind == Folder::Region
-                && let Some(root) = record
-            {
-                intern_saved_fluids(root);
-            }
-        })
+        read_region_record(self.region_storage(kind), x, z)
     }
     /// A record brought to the current version (`upgrade_record`); `Err` when that failed.
     fn try_read_record(
@@ -476,7 +479,9 @@ impl SaveDir {
     /// `ChunkMap.handleChunkLoadFailure`: once this chunk's read failure has been reported,
     /// let generation replace it, as `ChunkMap.createEmptyChunk` does.
     pub fn load(&self, x: i32, z: i32, registry: &BlockRegistry, biomes: &Biomes) -> Option<Chunk> {
-        self.try_load(x, z, registry, biomes).ok().flatten()
+        let mut chunk = self.try_load(x, z, registry, biomes).ok().flatten()?;
+        self.load_disk_attachments(&mut chunk, mod_api::ChunkDiskKind::Full);
+        Some(chunk)
     }
     /// `load`, telling a chunk that isn't saved as a full chunk (`Ok(None)`) from a read that
     /// failed (`Err`): a later read may succeed.
@@ -503,10 +508,74 @@ impl SaveDir {
         };
         load_light(&root.tag, &mut chunk, self.shape.sky_light);
         chunk.entities = sunrise_world::chunk::legacy_entities(&root.tag);
-        // A failing load listener does not fail the load: the chunk keeps its stored attachments.
-        self.load_disk_attachments(&mut chunk, mod_api::ChunkDiskKind::Full)
-            .map_err(|_| ())?;
         Ok(Some(chunk))
+    }
+    /// Read the last saved state of full chunk `(x, z)` from pending writes or its `.mca` file
+    /// directly read-only, without touching gameplay `RegionCache`, loading entities, or firing
+    /// mod hooks. Safe to call concurrently from background worker threads.
+    pub fn read_saved_chunk_readonly(
+        &self,
+        x: i32,
+        z: i32,
+        registry: &BlockRegistry,
+        biomes: &Biomes,
+    ) -> Result<Option<Chunk>> {
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|_| "pending writes poisoned")?
+            .get(&(Folder::Region, x, z))
+            .map(|(_, r)| r.clone());
+        let mut root = if let Some(record) = pending {
+            let tag = compression_pool::catch_encoding_panic(|| Ok(record.tag_for_metadata()))?;
+            let Some(tag) = tag else {
+                return Ok(None);
+            };
+            (*tag).clone()
+        } else {
+            let Some(root) =
+                region::read_region_record_readonly(self.region_storage(Folder::Region), x, z)?
+            else {
+                return Ok(None);
+            };
+            root
+        };
+        self.upgrade_record(Folder::Region, &mut root)?;
+        let Some(mut chunk) = decode_readonly_full(&root, (x, z), registry, biomes, self.shape)?
+        else {
+            return Ok(None);
+        };
+        load_light(&root.tag, &mut chunk, self.shape.sky_light);
+        Ok(Some(chunk))
+    }
+    /// List chunk coordinates present in region `(rx, rz)`'s 8 KiB sector header unioned with
+    /// pending unflushed writes (excluding pending deletes), without decompressing chunk payloads.
+    pub fn saved_region_chunks(&self, rx: i32, rz: i32) -> Result<Vec<[i32; 2]>> {
+        // Snapshot pending writes BEFORE reading the region header so a chunk flushed between the
+        // two steps cannot be missed (`writes.rs` removes from `pending` only after writing disk).
+        let mut pending_added = Vec::new();
+        let mut pending_deleted = Vec::new();
+        {
+            let pending = self.pending.lock().map_err(|_| "pending writes poisoned")?;
+            for (&(folder, x, z), (_, record)) in pending.iter() {
+                if folder == Folder::Region && (x >> 5) == rx && (z >> 5) == rz {
+                    if matches!(record.source(), Record::Delete) {
+                        pending_deleted.push([x, z]);
+                    } else {
+                        pending_added.push([x, z]);
+                    }
+                }
+            }
+        }
+        let mut chunks =
+            region::list_region_chunks_readonly(self.region_storage(Folder::Region), rx, rz)?;
+        if !pending_deleted.is_empty() {
+            chunks.retain(|pos| !pending_deleted.contains(pos));
+        }
+        chunks.extend(pending_added);
+        chunks.sort_unstable();
+        chunks.dedup();
+        Ok(chunks)
     }
     /// A proto chunk saved before it became final (`decode_proto`).
     pub fn load_proto(
@@ -516,12 +585,21 @@ impl SaveDir {
         registry: &BlockRegistry,
         biomes: &Biomes,
     ) -> Option<SavedProto> {
+        let mut proto = self.decode_saved_proto(x, z, registry, biomes)?;
+        self.load_disk_attachments(&mut proto.column, mod_api::ChunkDiskKind::Proto);
+        Some(proto)
+    }
+
+    pub(super) fn decode_saved_proto(
+        &self,
+        x: i32,
+        z: i32,
+        registry: &BlockRegistry,
+        biomes: &Biomes,
+    ) -> Option<SavedProto> {
         let root = self.read_record("region", x, z)?;
         let tables = self.tables.get().map(|t| &**t);
-        let mut proto = decode_proto(&root, registry, biomes, tables, self.shape.column())?;
-        self.load_disk_attachments(&mut proto.column, mod_api::ChunkDiskKind::Proto)
-            .ok()?;
-        Some(proto)
+        decode_proto(&root, registry, biomes, tables, self.shape.column())
     }
     /// Queue proto chunks for the writer thread; loads see them meanwhile.
     pub fn save_protos(
@@ -590,7 +668,7 @@ impl SaveDir {
                 let key = (c.x, c.z);
                 match compression_pool::catch_encoding_panic(|| {
                     let blending = self.calculated_blending(c.x, c.z);
-                    Ok(encode_saved(
+                    encode_saved(
                         c,
                         registry,
                         biomes,
@@ -598,7 +676,8 @@ impl SaveDir {
                         self.shape,
                         blending.as_deref(),
                         items,
-                    ))
+                    )
+                    .map_err(std::io::Error::other)
                 }) {
                     Ok(tag) => Some((key, Some(tag))),
                     Err(error) => {
@@ -613,15 +692,22 @@ impl SaveDir {
         Ok(chunks.len())
     }
     pub(super) fn save_poi(&self, chunks: &[Arc<Chunk>], wait: bool) -> Result<()> {
-        let Some(tables) = self.tables.get() else {
+        if self.tables.get().is_none() {
             return Ok(());
+        }
+        self.queue(Folder::Poi, self.poi_records(chunks), wait)
+    }
+
+    fn poi_records(&self, chunks: &[Arc<Chunk>]) -> Vec<((i32, i32), Record)> {
+        let Some(tables) = self.tables.get() else {
+            return Vec::new();
         };
         let professions = self
             .professions
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let records = chunks
+        chunks
             .iter()
             .map(|c| {
                 (
@@ -629,9 +715,9 @@ impl SaveDir {
                     Record::Poi(c.clone(), tables.clone(), professions.clone()),
                 )
             })
-            .collect();
-        self.queue(Folder::Poi, records, wait)
+            .collect()
     }
+
     /// `save` on the writer thread: returns before the files are written;
     /// loads see the chunks meanwhile.
     pub fn save_later(
@@ -640,6 +726,17 @@ impl SaveDir {
         registry: &'static BlockRegistry,
         biomes: &Arc<Biomes>,
     ) -> Result<usize> {
+        self.enqueue_chunk_saves(chunks, registry, biomes, None)?;
+        Ok(chunks.len())
+    }
+
+    fn enqueue_chunk_saves(
+        &self,
+        chunks: &[Arc<Chunk>],
+        registry: &'static BlockRegistry,
+        biomes: &Arc<Biomes>,
+        eviction: Option<&EvictionWrites>,
+    ) -> Result<()> {
         let encoding = self.encoding_for_save_later(chunks, registry, biomes)?;
         let records = chunks
             .iter()
@@ -651,41 +748,78 @@ impl SaveDir {
                 )
             })
             .collect();
-        self.queue(Folder::Region, records, false)?;
-        self.save_poi(chunks, false)?;
-        Ok(chunks.len())
+        self.enqueue_records(Folder::Region, records, eviction)?;
+        self.enqueue_records(Folder::Poi, self.poi_records(chunks), eviction)
     }
+
+    /// Save the records required by an idle column eviction and wait for queued
+    /// writes to finish without forcing every cached region (`sync_all`).
+    /// Returns the columns whose own records were refused or skipped; if the
+    /// writer failed, eviction cannot assume any column was written.
+    pub fn save_eviction(
+        &self,
+        chunks: &[Arc<Chunk>],
+        registry: &'static BlockRegistry,
+        biomes: &Arc<Biomes>,
+        entities: Vec<((i32, i32), Vec<Tag>)>,
+    ) -> Result<HashSet<(i32, i32)>> {
+        let eviction = EvictionWrites::default();
+        if !chunks.is_empty() {
+            self.enqueue_chunk_saves(chunks, registry, biomes, Some(&eviction))?;
+        }
+        let records = self.entity_records(entities, Some(&eviction));
+        self.enqueue_records(Folder::Entities, records, Some(&eviction))?;
+        self.wait_for_writes()?;
+        Ok(eviction.refused())
+    }
+
     /// Write the entity chunks (`EntityStorage`): an empty list deletes it.
     pub fn save_entities(&self, chunks: Vec<((i32, i32), Vec<Tag>)>) -> Result<()> {
-        self.write_entities(chunks, true)
+        self.queue(Folder::Entities, self.entity_records(chunks, None), true)
     }
     /// `save_entities` on the writer thread.
     pub fn save_entities_later(&self, chunks: Vec<((i32, i32), Vec<Tag>)>) -> Result<()> {
-        self.write_entities(chunks, false)
+        self.queue(Folder::Entities, self.entity_records(chunks, None), false)
     }
     /// `PersistentEntitySectionManager.storeChunkSections`: never store a pending entity chunk.
-    fn write_entities(&self, mut chunks: Vec<((i32, i32), Vec<Tag>)>, wait: bool) -> Result<()> {
+    fn entity_records(
+        &self,
+        mut chunks: Vec<((i32, i32), Vec<Tag>)>,
+        eviction: Option<&EvictionWrites>,
+    ) -> Vec<((i32, i32), Record)> {
         {
             let failed = self.failed_entity_reads.lock().unwrap();
             if !failed.is_empty() {
-                chunks.retain(|(key, _)| !failed.contains(key));
+                chunks.retain(|(key, _)| {
+                    if failed.contains(key) {
+                        if let Some(eviction) = eviction {
+                            eviction.refuse(*key);
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
             }
         }
-        let records = chunks
+        chunks
             .into_iter()
             .map(|((x, z), entities)| {
-                let tag = (!entities.is_empty()).then(|| NamedTag {
-                    name: "".into(),
-                    tag: Tag::compound([
-                        ("DataVersion", Tag::Int(DATA_VERSION)),
-                        ("Position", Tag::IntArray(vec![x, z])),
-                        ("Entities", Tag::List(entities)),
-                    ]),
-                });
-                ((x, z), tag)
+                let record = if entities.is_empty() {
+                    Record::Delete
+                } else {
+                    Record::Tag(Arc::new(NamedTag {
+                        name: "".into(),
+                        tag: Tag::compound([
+                            ("DataVersion", Tag::Int(DATA_VERSION)),
+                            ("Position", Tag::IntArray(vec![x, z])),
+                            ("Entities", Tag::List(entities)),
+                        ]),
+                    }))
+                };
+                ((x, z), record)
             })
-            .collect();
-        self.write_records("entities", records, wait)
+            .collect()
     }
 }
 

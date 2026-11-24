@@ -191,7 +191,12 @@ use crate::{
 };
 pub use data::MobData;
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    path::Path,
+    sync::Arc,
+};
 use sunrise_core::{
     geometry::{Aabb, Vec3},
     random::{LegacyRandom, RandomSource},
@@ -416,7 +421,7 @@ impl MobTypes {
                 }
             })
             .transpose()?;
-        let empty_model = Arc::new(Part::parse("root", &Value::Null));
+        let empty_model = Arc::new(Part::empty("root"));
         let item_tags =
             crate::items::load_tags(root, "item", &sunrise_world::loot::PackOverlay::NONE)
                 .unwrap_or_default();
@@ -487,20 +492,22 @@ impl MobTypes {
                 continue;
             };
             let model_key = format!("minecraft:{}", def.model);
-            let model = models
-                .as_ref()
-                .and_then(|models| models.value().get(&model_key));
+            let model = models.as_ref().and_then(|models| models.model(&model_key));
             if models_needed && model.is_none() {
                 continue;
             }
             let defaults = exact.get(&id).cloned().unwrap_or_default();
             let fields = MobType::catalog_fields(&defaults, attributes);
             let mut layers = crate::fast_hash::FxHashMap::default();
-            if let Some(all) = models.as_ref().and_then(|m| m.value().as_object()) {
+            if let Some(models) = &models {
                 for prefix in def.layer_prefixes() {
                     let start = format!("minecraft:{prefix}#");
-                    for (k, v) in all.iter().filter(|(k, _)| k.starts_with(&start)) {
-                        let mut part = Part::parse_layer(k, v);
+                    for (k, part) in models
+                        .0
+                        .range(start.clone()..)
+                        .take_while(|(k, _)| k.starts_with(&start))
+                    {
+                        let mut part = part.clone();
                         if culls_back_faces(k) {
                             part.set_cull_back();
                         }
@@ -558,14 +565,11 @@ impl MobTypes {
                     flags,
                     model: model.map_or_else(
                         || empty_model.clone(),
-                        |model| {
-                            Arc::new({
-                                let mut part = Part::parse_layer(&model_key, model);
-                                if culls_back_faces(&model_key) {
-                                    part.set_cull_back();
-                                }
-                                part
-                            })
+                        |mut model| {
+                            if culls_back_faces(&model_key) {
+                                model.set_cull_back();
+                            }
+                            Arc::new(model)
                         },
                     ),
                     layers,
@@ -1093,7 +1097,7 @@ pub struct Extra {
     /// Saved fish/axolotl bucket flag; tadpoles save a constant true value.
     pub from_bucket: bool,
     /// Tags a mod gave the mob before it joined a level (`finalize_spawn`'s
-    /// `UnspawnedMobEdits`): the level keeps a joined entity's tags with its
+    /// `UnspawnedMobEditor`): the level keeps a joined entity's tags with its
     /// saved data, so they move there when the mob joins.
     pub spawn_tags: Vec<String>,
     /// Command-created armor instances, shared by commands and runtime damage.
@@ -1429,20 +1433,17 @@ pub struct Extra {
     /// What a piglin's or hoglin's brain remembers: its avoid target, the
     /// adults its sensor sees and the activity it is in.
     pub piglin: piglin::Memories,
-    /// What the native mods last heard it hold and wear
-    /// (`LivingEntity.lastEquipmentItems`, empty at first), by
-    /// `EquipmentSlot` ordinal: see `Mob::equipment_stacks`.
-    pub equipment_heard: Option<Box<sunrise_items::equipment::Equipment>>,
     /// The live attribute map (`AttributeMap`), built when an item with
     /// attribute modifiers is worn or it is read. Mob logic still reads
     /// `MobType::attributes` and `attributes` above.
     pub live: crate::living_attributes::LivingAttributes,
+    /// A sulfur cube's fuse countdown and synced `MAX_FUSE`.
+    pub sulfur_fuse: sulfur_cube::Fuse,
+    /// Whether `live` already holds the `oxygen_bonus` instance that
+    /// `LivingEntity.decreaseAirSupply` makes (`ai::make_oxygen_bonus`).
+    pub oxygen_bonus_made: bool,
     /// The knockback resistance modifiers of the items it wears or holds.
     pub gear_knockback: Option<Box<GearKnockback>>,
-    /// What the game last read from the hands' `minecraft:death_protection`
-    /// components (`game/totem.rs`); `None` until it has, when the totem's id
-    /// stands in for the component.
-    pub hand_protection: Option<HandProtection>,
 }
 /// The knockback resistance modifiers of the items a mob wears or holds, with
 /// the stacks they were read from: the game reads them again only when one
@@ -1452,13 +1453,6 @@ pub struct GearKnockback {
     /// The hand and armor stacks, mainhand to head.
     pub worn: [Option<crate::items::ItemStack>; 6],
     pub modifiers: Vec<(f64, finalize::Op)>,
-}
-/// The `death_effects` of the `death_protection` component each hand's stack
-/// carries; `None` for a hand without the component.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct HandProtection {
-    pub main: Option<Vec<crate::items::ConsumeEffect>>,
-    pub off: Option<Vec<crate::items::ConsumeEffect>>,
 }
 impl Extra {
     /// The body item id (`getItemBySlot(BODY)`).
@@ -1604,6 +1598,24 @@ pub struct MovementEmission {
     pub in_water: bool,
 }
 
+/// Staged `register_goals` / `register_behaviors` dispatches waiting for the
+/// owning server `Game` boundary. A clone (e.g. a corpse kept for death events)
+/// resets to non-authoritative with no pending work.
+#[derive(Debug, Default)]
+pub struct StagedMobParts {
+    pub authoritative: bool,
+    pub goal_generation: u64,
+    pub brain_generation: u64,
+    pub pending_goals: Option<u64>,
+    pub pending_behaviors: Option<mod_behaviors::BehaviorTarget>,
+}
+
+impl Clone for StagedMobParts {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Mob {
     /// Entity-owned registration metadata; content clones are detached.
@@ -1675,6 +1687,9 @@ pub struct Mob {
     pub effects_dirty: bool,
     pub random: LegacyRandom,
     pub ai: Box<ai::Ai>,
+    /// Staged `register_goals` and `register_behaviors` dispatches waiting for
+    /// the owning server `Game` boundary.
+    pub staged_parts: StagedMobParts,
     pub extra: Extra,
     pub fluids: living::Fluids,
     /// Entity.wasEyeInWater: the eyes were in water before this tick's fluid
@@ -1736,6 +1751,7 @@ pub struct Mob {
     pub accepted_hit: Option<std::sync::Arc<crate::health::AcceptedHit>>,
     /// The in-flight killing hit; its caller settles death before continuing.
     pub damage_completion: Option<crate::health::DamageCompletion>,
+    protected_hurt: Option<Box<ProtectedHurt>>,
     hurt_paused: bool,
     pub death_canceled: bool,
     /// `DamageSource.getDirectEntity` of `last_damage` when [`Damage`] cannot name it (a
@@ -1826,6 +1842,30 @@ pub fn after_break(events: &mut Vec<MobEvent>, asks: bool, mob: u32, start: usiz
     }
 }
 
+/// A weapon hit queued by the borrowed tick and resolved against the live victim.
+#[derive(Clone, Debug)]
+pub struct WeaponHit {
+    pub target: Who,
+    pub source: Damage,
+    pub weapon: crate::items::ItemStack,
+    pub amount: f32,
+    pub knockback: f32,
+    pub direction: [f64; 2],
+    pub attack: WeaponAttack,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum WeaponAttack {
+    Melee {
+        effect: Option<(&'static str, i32, i32)>,
+    },
+    Stab {
+        deals_damage: bool,
+        deals_knockback: bool,
+        dismounts: bool,
+    },
+}
+
 /// Events a mob tick asks the game to act on.
 #[derive(Clone, Debug)]
 pub enum MobEvent {
@@ -1834,11 +1874,6 @@ pub enum MobEvent {
     ForPlayer {
         conn: Option<u32>,
         event: Box<MobEvent>,
-    },
-    /// A finished drink whose item effects still need the world's living Host.
-    DrinkFinished {
-        mob: u32,
-        stack: crate::items::ItemStack,
     },
     /// Squid.handleEntityEvent(19), resetting the remote tentacle cycle.
     SquidCycle {
@@ -2018,6 +2053,8 @@ pub enum MobEvent {
     },
     /// A sound event id that is not a static string (variant sounds).
     SoundId(String, [f64; 3], f32, f32),
+    /// The hostless fox tick's `PlaySoundConsumeEffect`, at the fox's block position.
+    ConsumeSound(crate::items::ConsumeSound, sunrise_core::position::BlockPos),
     /// `Level.playLocalSound`: a sound the client plays for itself, never
     /// sent by a server (a breeze's whirl and idle sounds).
     LocalSound(&'static str, [f64; 3], f32, f32),
@@ -2052,6 +2089,7 @@ pub enum MobEvent {
     },
     /// A player hit. The last field names the attacker only for `Mob.doHurtTarget`.
     AttackPlayer(f32, [f64; 3], Option<u32>),
+    WeaponAttack(WeaponHit),
     /// `Bee.doHurtTarget`: a sting that lands leaves its stinger and poisons.
     Sting {
         target: Who,
@@ -2075,6 +2113,9 @@ pub enum MobEvent {
         amount: f32,
         from: [f64; 3],
         kind: &'static str,
+        /// The mob whose main-hand weapon's `post_attack` effects follow the
+        /// hit when it lands (a spear's stab).
+        wielder: Option<u32>,
     },
     /// `ElderGuardian`'s curse on players within 50 blocks; a silent elder's
     /// shows the apparition without the curse sound.
@@ -2336,7 +2377,7 @@ pub enum MobEvent {
         stack: crate::items::ItemStack,
         at: [f64; 3],
         motion: [f64; 3],
-        pickup_delay: u32,
+        pickup_delay: i32,
     },
     /// `Goat.dropHorn`: a horn from goat `mob` (`Goat.createHorn` picks the
     /// instrument from its UUID), thrown with `motion` as
@@ -2739,6 +2780,7 @@ impl MobEvent {
             Self::SonicBoom { target, .. }
             | Self::Push { target, .. }
             | Self::Knockback { target, .. }
+            | Self::WeaponAttack(WeaponHit { target, .. })
             | Self::Sting { target, .. }
             | Self::StabDismount { target }
             | Self::StabMemory { target, .. }
@@ -2801,7 +2843,8 @@ pub use hurt_handoff::{MobHurtAction, PausedMobHurt};
 
 impl Mob {
     pub(crate) fn hurt_needs_owner(&self) -> bool {
-        self.hurt_paused
+        self.protected_hurt.is_some()
+            || self.hurt_paused
             || self.damage_completion.is_some()
             || creaking::has_pending_hurt(self)
             || villager::ext(self).is_some_and(|ext| {
@@ -3197,6 +3240,35 @@ pub fn apply_brain_events(
     apply_brain_events_until_hurt(mobs, level, events, from, teams, false);
 }
 
+/// The accepted hit suspended inside `checkTotemDeathProtection`, after
+/// consuming the hand item and setting health, before any protection effects.
+#[derive(Clone, Debug)]
+pub struct ProtectedHurt {
+    pub stack: crate::items::ItemStack,
+    pub effects: Vec<crate::items::ConsumeEffect>,
+    pub post: Option<std::sync::Arc<crate::health::DamagePost>>,
+    tail: HurtTail,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HurtTail {
+    knock: bool,
+    absorbed: bool,
+    crackiness: Option<Option<&'static str>>,
+    kind: DamageKind,
+    success: bool,
+}
+
+impl ProtectedHurt {
+    pub fn before_post(&self, mob: &mut Mob) {
+        mob.finish_hurt_before_post(self.tail);
+    }
+
+    pub fn after_post(&self, mob: &mut Mob) {
+        mob.finish_species_hurt_tail(self.tail.success);
+    }
+}
+
 /// The part of `Pufferfish.touch` after `hurtServer` returns successfully.
 /// The borrowed pass gives the owning game the victim before applying this.
 pub struct PufferfishReaction {
@@ -3220,6 +3292,10 @@ impl PufferfishReaction {
 
     pub fn resolved_hit(&mut self, landed: bool) {
         self.landed = landed;
+    }
+
+    pub fn poison_ticks(&self) -> Option<i32> {
+        self.landed.then_some(self.poison_ticks)
     }
 
     pub fn poison(&self, target: Option<&mut Mob>) -> Vec<MobEvent> {
@@ -3336,13 +3412,29 @@ pub fn apply_brain_events_until_hurt(
                     look: fish.look_angle(),
                     feet: pos,
                 };
-                let mut hit_level = level.reborrow().attacked_by(&attack);
-                if let Some(t) = mobs.iter_mut().find(|m| {
+                let target_index = mobs.iter().position(|m| {
                     m.id == target
                         && m.alive()
                         && !m.removed
                         && target_join.is_none_or(|join| m.join == join)
-                }) {
+                });
+                if let Some(ti) = target_index {
+                    // The fish is the sting's causing entity: lent beside its target from the
+                    // tick's own list, only while a `HitHost` hook listens.
+                    let fish_index = crate::health::hit_host_listened()
+                        .then(|| mobs.iter().position(|m| m.id == mob && !m.removed))
+                        .flatten()
+                        .filter(|&fi| fi != ti);
+                    let (t, lend) = match fish_index {
+                        Some(fi) => {
+                            let [t, fish] = mobs
+                                .get_disjoint_mut([ti, fi])
+                                .expect("the sting's target and fish are two mobs");
+                            (t, crate::health::HitLend::mob(fish))
+                        }
+                        None => (&mut mobs[ti], None),
+                    };
+                    let mut hit_level = level.reborrow().attacked_by(&attack).lending(lend);
                     let landed =
                         t.damage_aimed(&mut hit_level, 1.0 + size as f32, source, Some(aim));
                     let tail = PufferfishReaction {
@@ -3354,7 +3446,10 @@ pub fn apply_brain_events_until_hurt(
                         poison_ticks: 60 * size,
                         landed,
                     };
-                    if can_pause && t.hurt_needs_owner() {
+                    if can_pause
+                        && (t.hurt_needs_owner()
+                            || (landed && hit_level.defers_death_protection_effects()))
+                    {
                         let mut position = 0;
                         // The rest of this candidate list belongs to the same objects
                         // even if the host removes one or inserts a new occupant of its id.
@@ -3448,7 +3543,7 @@ pub struct PlayerView {
     /// `isSleeping` and `getSleepTimer` (100 once slept through, then the
     /// ticks fading out after waking up).
     pub sleeping: bool,
-    pub sleep_timer: u32,
+    pub sleep_timer: i32,
     /// `isPassenger`.
     pub passenger: bool,
     /// The vehicle entity id, including mounts without a `Vehicle` follow view.
@@ -3665,6 +3760,13 @@ pub enum TargetChange {
     Keep,
 }
 impl MobWorld<'_> {
+    /// Whether this breeding action must meet the listener before either parent cools down.
+    pub fn asks_live_birth(&self, species: Species) -> bool {
+        self.asks_baby_spawn
+            && finalize::ageable(species)
+            && !matches!(species, Species::Turtle | Species::Frog | Species::Sniffer)
+    }
+
     /// The currently selected player view. The ordinary tick uses `player`;
     /// target-change callbacks can switch a scoped selection during a tick.
     pub fn selected_player(&self) -> Option<&PlayerView> {
@@ -3841,9 +3943,9 @@ pub fn living_random() -> (LegacyRandom, [i32; 4]) {
 }
 impl Mob {
     /// A mob as its authoritative side builds it — spawned, or loaded from a
-    /// chunk (`Mob.finalizeSpawn` runs around it): the species' own goals, then
-    /// the goals every mod part attached to its type (#1077), vanilla's
-    /// `registerGoals` moment.
+    /// chunk (`Mob.finalizeSpawn` runs around it): the species' own goals. The
+    /// goals every mod part attached to its type (#1077) join at
+    /// [`Self::attach_mod_parts`], where the game constructs the mob.
     pub fn new(id: u32, kind: Arc<MobType>, position: Vec3, yaw: f32) -> Self {
         Self::with_random(id, kind, position, yaw, entity_random(id, position))
     }
@@ -3858,11 +3960,80 @@ impl Mob {
         mob.attach_mod_parts();
         mob
     }
-    /// Register the server-only goals and behaviors after the mob has its
+    /// Stage the server-only goals and behaviors after the mob has its
     /// runtime id. A deferred NBT load can read geometry before taking an id.
+    /// The owning `Game` flushes staged registrations with a scoped server host.
     pub fn attach_mod_parts(&mut self) {
-        part_goals::attach(self);
-        mod_behaviors::attach_at_construction(self);
+        self.staged_parts.authoritative = true;
+        if mod_api::__private::entity_part_hooked(
+            mod_api::HookId::RegisterGoals,
+            "register_goals",
+            &self.kind.id,
+        ) {
+            self.stage_mod_goals();
+        }
+        self.stage_initial_mod_behaviors();
+    }
+    /// Stage a `register_goals` dispatch for this mob's current selectors.
+    pub fn stage_mod_goals(&mut self) {
+        self.staged_parts.authoritative = true;
+        self.staged_parts.goal_generation = self.staged_parts.goal_generation.wrapping_add(1);
+        self.staged_parts.pending_goals = Some(self.staged_parts.goal_generation);
+    }
+    /// Stage construction-time `register_behaviors`: `NoBrain` for species with no
+    /// brain, or the already-built brain for species whose brain is constructed inside
+    /// `ai::register` (warden, axolotl, tadpole). Lazy-brain species stage when their
+    /// brain is built.
+    fn stage_initial_mod_behaviors(&mut self) {
+        if !mod_api::__private::entity_part_hooked(
+            mod_api::HookId::RegisterBehaviors,
+            "register_behaviors",
+            &self.kind.id,
+        ) {
+            return;
+        }
+        let target = if !mod_behaviors::has_brain(self.species()) {
+            Some(mod_behaviors::BehaviorTarget::NoBrain)
+        } else if let Some(warden) = self.extra.warden.as_ref() {
+            Some(mod_behaviors::BehaviorTarget::Warden(
+                warden.brain.generation,
+            ))
+        } else if let Some(animal) = self.extra.animal_brain.as_ref() {
+            Some(mod_behaviors::BehaviorTarget::Animal(animal.generation))
+        } else if let Some(monster) = self.extra.brain.as_ref() {
+            Some(mod_behaviors::BehaviorTarget::Monster(monster.generation))
+        } else {
+            villager::ext(self)
+                .and_then(|e| e.brain.as_ref())
+                .map(|b| mod_behaviors::BehaviorTarget::Villager(b.generation))
+        };
+        if let Some(target) = target {
+            self.staged_parts.pending_behaviors = Some(target);
+        }
+    }
+    /// Allocate the next brain generation token on this mob.
+    pub(crate) fn next_brain_generation(&mut self) -> u64 {
+        self.staged_parts.brain_generation = self.staged_parts.brain_generation.wrapping_add(1);
+        self.staged_parts.brain_generation
+    }
+    /// Stage `register_behaviors` for a freshly built or rebuilt brain when this mob
+    /// is authoritative and at least one part subscribed to `register_behaviors` is
+    /// attached to its entity type.
+    pub(crate) fn stage_brain_behaviors(&mut self, target: mod_behaviors::BehaviorTarget) {
+        if self.staged_parts.authoritative
+            && mod_api::__private::entity_part_hooked(
+                mod_api::HookId::RegisterBehaviors,
+                "register_behaviors",
+                &self.kind.id,
+            )
+        {
+            self.staged_parts.pending_behaviors = Some(target);
+        }
+    }
+    /// Whether this mob has staged `register_goals` or `register_behaviors` waiting
+    /// for the owning server `Game`.
+    pub fn has_pending_mod_parts(&self) -> bool {
+        self.staged_parts.pending_goals.is_some() || self.staged_parts.pending_behaviors.is_some()
     }
     /// The same construction without the mod parts' goals: a client's copy of
     /// a server's mob, from its spawn packet. The species' goals stand — the
@@ -3921,6 +4092,7 @@ impl Mob {
             persistent: false,
             random,
             ai: Box::default(),
+            staged_parts: StagedMobParts::default(),
             extra: Extra::default(),
             fluids: living::Fluids::default(),
             was_eye_in_water: false,
@@ -3950,6 +4122,7 @@ impl Mob {
             last_damage: None,
             accepted_hit: None,
             damage_completion: None,
+            protected_hurt: None,
             hurt_paused: false,
             death_canceled: false,
             last_direct: None,
@@ -4183,7 +4356,7 @@ impl Mob {
     /// `LivingEntity.hurtServer`'s partial mob adapter, with health reductions inline.
     /// `damage` by a source with a weapon: `armor_effectiveness` runs the
     /// weapon's armor-effectiveness enchantments (breach) over the armor fraction, with the
-    /// level's random.
+    /// victim's random. Requirements draw from the level.
     pub fn damage_with(
         &mut self,
         level: &mut DamageLevel<'_>,
@@ -4427,24 +4600,26 @@ impl Mob {
             let entered = amount;
             if !source.bypasses_armor() {
                 let (armor, armor_toughness) = armor::values(self);
-                if armor > 0.0 {
-                    // CombatRules.getDamageAfterAbsorb
-                    let toughness = 2.0 + armor_toughness / 4.0;
-                    let effective = sunrise_world::living_damage::java_clamp_f32(
-                        armor - amount / toughness,
-                        armor * 0.2,
-                        20.0,
-                    );
-                    let mut fraction = effective / 25.0;
-                    if let Some(modify) = armor_effectiveness {
-                        fraction = sunrise_world::living_damage::java_clamp_f32(
-                            modify(fraction, level.random()),
-                            0.0,
-                            1.0,
-                        );
-                    }
-                    amount *= 1.0 - fraction;
-                }
+                let toughness = 2.0 + armor_toughness / 4.0;
+                let effective = sunrise_world::living_damage::java_clamp_f32(
+                    armor - amount / toughness,
+                    armor * 0.2,
+                    20.0,
+                );
+                let fraction = effective / 25.0;
+                let fraction = if let Some(modify) = armor_effectiveness {
+                    modify(fraction, level.random())
+                } else {
+                    let attack = level.attack();
+                    level.armor_effectiveness(
+                        crate::health::mob_source(&source, attack),
+                        &self.kind.id,
+                        (self.fall_distance, self.extra.fall_flying),
+                        &mut self.random,
+                        fraction,
+                    )
+                };
+                amount *= 1.0 - sunrise_world::living_damage::java_clamp_f32(fraction, 0.0, 1.0);
             }
             // LivingEntity.actuallyHurt always sets Reduction::Armor (with 0.0 on #bypasses_armor).
             amount = container.reduce(Reduction::Armor, entered, entered - amount, amount);
@@ -4527,9 +4702,39 @@ impl Mob {
                 if local_magic <= 0.0 {
                     local_magic = 0.0;
                 } else if !source.kind.bypasses_enchantments() {
-                    let epf = gear::protection(self, source.kind);
+                    let epf = if let Some(items) = level.tags() {
+                        let attack = level.attack();
+                        let mut ctx = attack.enchantment_context(
+                            crate::health::mob_source(&source, attack),
+                            &self.kind.id,
+                        );
+                        ctx.this_motion = Some((self.fall_distance, self.extra.fall_flying));
+                        let mut value = 0.0;
+                        let equipment =
+                            sunrise_core::equipment_slot::EquipmentSlot::ALL.map(|slot| {
+                                finalize::equipment_slot(self, slot)
+                                    .map(|piece| piece.project().into_owned())
+                            });
+                        for (piece, slot) in
+                            equipment.iter().zip(sunrise_items::equipment::SLOT_NAMES)
+                        {
+                            if let Some(piece) = piece {
+                                value = items.enchantments.equipment_protection(
+                                    piece,
+                                    slot,
+                                    &ctx,
+                                    level.random(),
+                                    &mut self.random,
+                                    value,
+                                );
+                            }
+                        }
+                        value
+                    } else {
+                        gear::protection(self, source.kind)
+                    };
                     if epf > 0.0 {
-                        local_magic *= 1.0 - epf / 25.0;
+                        local_magic *= 1.0 - epf.min(20.0) / 25.0;
                         amount = container.reduce(
                             Reduction::Enchantments,
                             amount,
@@ -4634,13 +4839,58 @@ impl Mob {
             self.knockback(level, f64::from(0.4f32), dx, dz, &source, incoming);
         }
         ai::after_hurt(self, &source);
-        if self.health <= 0.0 {
+        let protection = if self.health <= 0.0 {
             self.health = 0.0;
-            // `LivingEntity.hurtServer`: a killing blow is taken by a
-            // `death_protection` item in either hand instead of dying.
-            self.use_death_protection(level, &source);
-        }
+            self.use_death_protection(level, &source)
+        } else {
+            None
+        };
         self.remember_accepted_hit(level, &source, success);
+        let tail = HurtTail {
+            knock,
+            absorbed,
+            crackiness,
+            kind: source.kind,
+            success,
+        };
+        if let Some((stack, effects)) = protection {
+            let post = level
+                .finish_damage(crate::health::Hurting::Mob(self, &source), container, true)
+                .and_then(|completion| completion.post);
+            self.protected_hurt = Some(Box::new(ProtectedHurt {
+                stack,
+                effects,
+                tail,
+                post,
+            }));
+        } else {
+            self.finish_hurt_before_post(tail);
+            // The last of `LivingEntity.hurtServer`: Post also runs for a hit taking no health.
+            // A killing hit's owner runs it after die, including when death is vetoed.
+            self.damage_completion = level.finish_damage(
+                crate::health::Hurting::Mob(self, &source),
+                container,
+                self.health <= 0.0,
+            );
+            self.finish_species_hurt_tail(success);
+        }
+        // Squid.hurtServer (also GlowSquid's result): parent health damage has
+        // happened, but without a last living attacker the subclass returns false.
+        // Ghast.hurtServer returns true for a reflected large fireball whatever
+        // super.hurtServer did.
+        (success || reflected)
+            && (!matches!(self.species(), Species::Squid | Species::GlowSquid)
+                || self.ai.last_hurt_by.is_some())
+    }
+
+    fn finish_hurt_before_post(&mut self, tail: HurtTail) {
+        let HurtTail {
+            knock,
+            absorbed,
+            crackiness,
+            kind,
+            success,
+        } = tail;
         if knock {
             // playHurtSound (Mob: also resets the ambient sound clock) or the
             // death sound: makeSound draws the voice pitch whenever there is a sound.
@@ -4664,7 +4914,7 @@ impl Mob {
             };
             // playSecondaryHurtSound: a thorns hit sounds where the mob
             // stands, silent or not.
-            let thorns = (source.kind == DamageKind::Thorns).then_some(villager::HurtSound(
+            let thorns = (kind == DamageKind::Thorns).then_some(villager::HurtSound(
                 "enchant.thorns.hit",
                 at,
                 1.0,
@@ -4705,13 +4955,9 @@ impl Mob {
                 self.outbox.push(MobEvent::Infested { at, velocities });
             }
         }
-        // The last of `LivingEntity.hurtServer`: Post also runs for a hit taking no health.
-        // A killing hit's owner runs it after die, including when death is vetoed.
-        self.damage_completion = level.finish_damage(
-            crate::health::Hurting::Mob(self, &source),
-            container,
-            self.health <= 0.0,
-        );
+    }
+
+    fn finish_species_hurt_tail(&mut self, success: bool) {
         // Shulker.hurtServer: the low-health teleport roll after `super.hurtServer`.
         if success && self.species() == Species::Shulker {
             shulker::after_hurt(self);
@@ -4732,14 +4978,16 @@ impl Mob {
         if self.species() == Species::GlowSquid && self.ai.last_hurt_by.is_some() {
             aquatic::hurt_server(self);
         }
-        // Squid.hurtServer (also GlowSquid's result): parent health damage has
-        // happened, but without a last living attacker the subclass returns false.
-        // Ghast.hurtServer returns true for a reflected large fireball whatever
-        // super.hurtServer did.
-        (success || reflected)
-            && (!matches!(self.species(), Species::Squid | Species::GlowSquid)
-                || self.ai.last_hurt_by.is_some())
     }
+
+    pub fn take_protected_hurt(&mut self) -> Option<Box<ProtectedHurt>> {
+        self.protected_hurt.take()
+    }
+
+    pub fn has_protected_hurt(&self) -> bool {
+        self.protected_hurt.is_some()
+    }
+
     /// `damage` by a source whose direct entity is `direct` (an entity type id), which `source`
     /// cannot carry: `DamageSources.indirectMagic(potion or cloud, owner)`.
     pub fn damage_by(
@@ -5105,49 +5353,36 @@ impl Mob {
     /// `death_protection` stack uses one item up, the mob survives at 1 health
     /// with that component's `death_effects`, and entity event 35 tells the
     /// clients.
-    fn use_death_protection(&mut self, level: &mut DamageLevel<'_>, source: &Damage) -> bool {
+    fn use_death_protection(
+        &mut self,
+        level: &mut DamageLevel<'_>,
+        source: &Damage,
+    ) -> Option<(crate::items::ItemStack, Vec<crate::items::ConsumeEffect>)> {
         // `DamageTypeTags.BYPASSES_INVULNERABILITY`: the void and /kill take it.
         if source.kind.bypasses_invulnerability() {
-            return false;
+            return None;
         }
-        // `getItemInHand`: the main hand first. The game reads the components
-        // (`hand_protection`); before it has, the totem is the only item in the
-        // shipped data with `minecraft:death_protection`.
-        const TOTEM: &str = "minecraft:totem_of_undying";
-        let (main, off) = match self.extra.hand_protection.clone() {
-            Some(h) => (h.main, h.off),
-            None => {
-                let totem = || Some(living::totem_death_effects());
-                (
-                    (self.extra.main_hand_id() == Some(TOTEM))
-                        .then(totem)
-                        .flatten(),
-                    (self.extra.off_hand_id() == Some(TOTEM))
-                        .then(totem)
-                        .flatten(),
-                )
-            }
-        };
-        let (slot, effects) = if let Some(effects) = main {
-            (sunrise_items::equipment::MAINHAND, effects)
-        } else if let Some(effects) = off {
-            (sunrise_items::equipment::OFFHAND, effects)
-        } else {
-            return false;
-        };
-        if level.totem_canceled(
-            crate::health::Hurting::Mob(self, source),
-            slot == sunrise_items::equipment::OFFHAND,
-        ) {
-            return false;
-        }
-        let remaining = self.extra.slot_stack(slot).cloned().and_then(|mut s| {
-            s.count -= 1;
-            (s.count > 0).then_some(s)
+        let (slot, protector, effects) =
+            crate::health::PROTECTION_HANDS
+                .into_iter()
+                .find_map(|(hand, slot)| {
+                    let stack = self.extra.slot_stack(slot)?;
+                    let effects = level.death_protection(stack)?;
+                    if level.totem_canceled(crate::health::Hurting::Mob(self, source), hand, stack)
+                    {
+                        return None;
+                    }
+                    Some((slot, stack.clone(), effects.to_vec()))
+                })?;
+        let cell = &mut self.extra.equipment[slot];
+        *cell = cell.take().and_then(|mut remaining| {
+            remaining.count -= 1;
+            (remaining.count > 0).then_some(remaining)
         });
-        self.extra.set_slot_stack(slot, remaining);
-        self.extra.hand_protection = None;
         self.health = 1.0;
+        if level.defers_death_protection_effects() {
+            return Some((protector, effects));
+        }
         for effect in &effects {
             self.apply_consume_effect(effect);
         }
@@ -5157,7 +5392,7 @@ impl Mob {
             event: 35,
             at,
         });
-        true
+        None
     }
     /// One built-in effect of death protection or a consumed item. Adding a status
     /// effect does not run its tick: that tick owns its own hurt, if any.
@@ -5269,12 +5504,18 @@ impl Mob {
         !(self.kind.flags.undead && matches!(effect, "minecraft:poison" | "minecraft:regeneration"))
     }
     pub fn add_effect(&mut self, effect: &'static str, ticks: i32, amplifier: i32) {
+        let _ = self.try_add_effect(effect, ticks, amplifier);
+    }
+    /// `LivingEntity.addEffect`: returns whether the effect was accepted and
+    /// changed the mob's active effect set. Durations other than `-1` that
+    /// are already exhausted expire in the effect tick, not at admission.
+    pub fn try_add_effect(&mut self, effect: &'static str, ticks: i32, amplifier: i32) -> bool {
         let effect = sunrise_client_core::potions::namespaced(effect);
         // LivingEntity.addEffect: an effect the mob refuses is never added, so it
         // never joins the list the client draws or an effect tick reads.
         // WitherBoss.addEffect returns false for every effect.
         if self.species() == Species::Wither || !self.can_be_affected(effect) {
-            return;
+            return false;
         }
         let had = self
             .extra
@@ -5284,7 +5525,7 @@ impl Mob {
             .map(|e| e.show_icon);
         let ambient = self.extra.ambient_effects.contains(&effect);
         let hidden = self.extra.hidden_effects.contains(&effect);
-        self.add_effect_with(effect, ticks, amplifier, false, true);
+        let changed = self.add_effect_with(effect, ticks, amplifier, false, true);
         // The basic overload changes the chain, not the existing active flags.
         if let Some(show_icon) = had {
             if let Some(e) = self.extra.effects.iter_mut().find(|e| e.id == effect) {
@@ -5298,6 +5539,24 @@ impl Mob {
             if hidden {
                 self.extra.hidden_effects.push(effect);
             }
+        }
+        changed
+    }
+    /// `BaseFireBlock.fireIgnite` for a mob: advances the fire delay, ignites
+    /// for 8s scaled by `burning_time`, and clears freeze when lit.
+    pub fn fire_ignite_contact(&mut self) {
+        if self.fire_immune() {
+            return;
+        }
+        let multiplier = self.burning_time();
+        self.fire_ticks = crate::motion::environment::ignite_contact(
+            self.fire_ticks,
+            false,
+            &mut self.random,
+            multiplier,
+        );
+        if self.fire_ticks >= 0 {
+            self.ticks_frozen = 0;
         }
     }
     pub fn center(&self) -> [f64; 3] {
@@ -5374,32 +5633,41 @@ pub fn render(
 ) {
     render::render_single(mob, alpha, camera, uv, light, out);
 }
-/// A parsed `entity-models.json` document, shared while loading model batches.
-/// Each lookup still constructs an independent part tree for the caller.
+/// Validated vanilla model trees shared while loading model batches.
+/// Each lookup still returns an independent part tree for the caller.
 #[derive(Clone)]
-pub struct EntityModelDocument(Arc<Value>);
+pub struct EntityModelDocument(Arc<BTreeMap<String, Part>>);
 
 impl EntityModelDocument {
     pub fn load(root: &Path) -> crate::Result<Self> {
-        Ok(Self(Arc::new(serde_json::from_slice(&fs::read(
-            root.join("entity-models.json"),
-        )?)?)))
+        let path = root.join("entity-models.json");
+        let layers: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        let Value::Object(layers) = layers else {
+            return Err(format!("{}: expected a top-level JSON object", path.display()).into());
+        };
+        // EntityModelSet.vanilla builds a populated set from LayerDefinitions.createRoots.
+        if layers.is_empty() {
+            return Err(format!("{}: no entity model definitions", path.display()).into());
+        }
+        let mut models = BTreeMap::new();
+        for (key, model) in layers {
+            if !model_layers::is_layer_id(&key) {
+                return Err(format!("{}: invalid model layer key {key:?}", path.display()).into());
+            }
+            let mut part = Part::decode("root", model)
+                .map_err(|error| format!("{}: layer {key}: {error}", path.display()))?;
+            part.layer = Some(key.as_str().into());
+            models.insert(key, part);
+        }
+        Ok(Self(Arc::new(models)))
     }
 
     pub fn model(&self, key: &str) -> Option<Part> {
-        self.0.get(key).map(|m| Part::parse_layer(key, m))
+        self.0.get(key).cloned()
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.0
-            .as_object()
-            .into_iter()
-            .flat_map(|all| all.keys().map(String::as_str))
-    }
-
-    /// The parsed document, for loaders that read several keys from it.
-    pub fn value(&self) -> &Value {
-        &self.0
+        self.0.keys().map(String::as_str)
     }
 }
 
@@ -5776,7 +6044,6 @@ mod teams_tests {
 #[cfg_attr(not(test), allow(dead_code))] // only kind() is used by the gameplay crates' tests
 pub mod sensor_scan_tests {
     use super::*;
-    use serde_json::json;
     use sunrise_core::geometry::Vec3;
 
     pub fn kind() -> Arc<MobType> {
@@ -5823,7 +6090,7 @@ pub mod sensor_scan_tests {
                 animal: true,
                 ..Default::default()
             },
-            model: Arc::new(Part::parse("root", &json!({}))),
+            model: Arc::new(Part::empty("root")),
             layers: Default::default(),
             texture: String::new(),
             brain: Brain::Passive,
@@ -6585,6 +6852,20 @@ mod magic_absorb_tests {
     }
 
     #[test]
+    fn an_expired_effect_is_admitted_then_removed_on_the_effect_tick() {
+        let mut m = witch();
+        m.add_effect("speed", -2, 0);
+        assert_eq!(m.extra.effects[0].duration, -2);
+        ai::tick_effects(
+            &mut m,
+            crate::test_resources::server_loop_context(),
+            &mut crate::health::TestLevel::new(0).level(),
+            None,
+        );
+        assert!(m.extra.effects.is_empty());
+    }
+
+    #[test]
     fn stronger_effect_restores_its_hidden_predecessor_after_expiry() {
         let mut m = witch();
         m.add_effect_with("speed", 200, 0, false, true);
@@ -7107,6 +7388,39 @@ mod totem_tests {
         Mob::new(1, Arc::new(t), Vec3::ZERO, 0.0)
     }
 
+    pub(super) fn totem_with_components() -> crate::items::ItemStack {
+        use sunrise_core::nbt::Tag;
+        let effect = |id: &str, duration, amplifier| {
+            Tag::compound([
+                ("id", Tag::String(id.into())),
+                ("duration", Tag::Int(duration)),
+                ("amplifier", Tag::Int(amplifier)),
+            ])
+        };
+        let mut stack = crate::items::ItemStack::new("minecraft:totem_of_undying", 1);
+        stack.data_mut().set_other(
+            "minecraft:death_protection",
+            Some(Tag::compound([(
+                "death_effects",
+                Tag::List(vec![
+                    Tag::compound([("type", Tag::String("minecraft:clear_all_effects".into()))]),
+                    Tag::compound([
+                        ("type", Tag::String("minecraft:apply_effects".into())),
+                        (
+                            "effects",
+                            Tag::List(vec![
+                                effect("minecraft:regeneration", 900, 1),
+                                effect("minecraft:absorption", 100, 1),
+                                effect("minecraft:fire_resistance", 800, 0),
+                            ]),
+                        ),
+                    ]),
+                ]),
+            )])),
+        );
+        stack
+    }
+
     #[test]
     fn a_death_component_adds_an_instant_effect_without_ticking_it() {
         let mut level = crate::health::TestLevel::new(0);
@@ -7147,8 +7461,7 @@ mod totem_tests {
         let mut test_level = crate::health::TestLevel::new(0);
         let level = &mut test_level.level();
         let mut m = fox();
-        m.extra
-            .set_main_hand(Some("minecraft:totem_of_undying".into()));
+        m.extra.set_main_hand_stack(Some(totem_with_components()));
         assert!(m.damage(level, 1000.0, Damage::of(DamageKind::Generic)));
         assert!(m.alive(), "the totem kept it alive");
         assert_eq!(m.health, 1.0);
@@ -7175,9 +7488,9 @@ mod totem_tests {
         let mut test_level = crate::health::TestLevel::new(0);
         let level = &mut test_level.level();
         let mut m = fox();
-        m.extra.set_slot_id(
+        m.extra.set_slot_stack(
             sunrise_items::equipment::OFFHAND,
-            Some("minecraft:totem_of_undying".into()),
+            Some(totem_with_components()),
         );
         assert!(m.damage(level, 1000.0, Damage::of(DamageKind::Generic)));
         assert!(m.alive());
@@ -7204,8 +7517,7 @@ mod totem_tests {
         let mut test_level = crate::health::TestLevel::new(0);
         let level = &mut test_level.level();
         let mut m = fox();
-        m.extra
-            .set_main_hand(Some("minecraft:totem_of_undying".into()));
+        m.extra.set_main_hand_stack(Some(totem_with_components()));
         assert!(m.damage(level, 1000.0, Damage::of(DamageKind::GenericKill)));
         assert!(!m.alive());
         assert_eq!(
@@ -7520,7 +7832,17 @@ mod model_document_sharing_tests {
         }
     }
 }
-crate::impl_joined!(Mob);
+impl crate::join_seq::Joined for Mob {
+    fn join_seq(&self) -> crate::join_seq::JoinSeq {
+        self.join
+    }
+    fn set_join_seq(&mut self, seq: crate::join_seq::JoinSeq) {
+        self.join = seq;
+    }
+    fn pending_mod_part_id(&self) -> Option<u32> {
+        (!self.removed && self.has_pending_mod_parts()).then_some(self.id)
+    }
+}
 sunrise_mod_runtime::impl_attachment_lifetime!(Mob);
 
 #[cfg(test)]

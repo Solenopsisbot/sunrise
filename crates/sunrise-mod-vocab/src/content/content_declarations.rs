@@ -233,15 +233,16 @@ pub enum BlockStateProperty {
 }
 
 /// An unvalidated draft; `Content::declare` validates it at load.
-/// Refused drafts are reported by the content admission path as
-/// `native blocks and items of <namespace>: <reason>`, without admitting part of that namespace.
+/// Refused drafts are reported by the content admission path naming the submitting mod,
+/// without admitting part of its declarations.
 /// `Default` and [`Block::new`] leave out what a content file leaves out: every field is empty
 /// except `item`, true, as in a file.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
 pub struct Block {
-    /// `<mod id>:<path>`.
+    /// Block identifier: a bare name uses the declaring mod's ID, and an explicit valid
+    /// `namespace:path` keeps its namespace.
     pub id: String,
     /// The vanilla block it copies, `minecraft:<path>`.
     pub template: String,
@@ -345,13 +346,14 @@ pub enum Rarity {
 }
 
 /// An unvalidated draft; `Content::declare` validates it at load.
-/// Refused drafts are reported by the content admission path as
-/// `native blocks and items of <namespace>: <reason>`, without admitting part of that namespace.
+/// Refused drafts are reported by the content admission path naming the submitting mod,
+/// without admitting part of its declarations.
 #[derive(Clone, Debug, PartialEq, Default)]
 #[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
 pub struct Item {
-    /// Identifier in the declaring mod's namespace.
+    /// Item identifier: a bare name uses the declaring mod's ID, and an explicit valid
+    /// `namespace:path` keeps its namespace.
     pub id: String,
     /// The vanilla item it copies, `minecraft:<path>`.
     pub template: String,
@@ -362,11 +364,10 @@ pub struct Item {
     /// A component patch over the template: `Some(tag)` sets, `None` removes.
     /// Component names are namespaced identifiers, without a removal prefix `!`; repeated IDs are refused.
     pub components: Vec<(String, Option<crate::Tag>)>,
-    /// What it leaves in the crafting grid (`Item.Properties.craftRemainder`):
-    /// a vanilla item (`minecraft:<path>`) or one of the mod's own (a bare name is the mod's).
+    /// The registered item it leaves in the crafting grid (`Item.Properties.craftRemainder`).
+    /// A bare name uses this mod's namespace. Omit it for no remainder; `minecraft:air` is not a stack.
     pub crafting_remainder: Option<String>,
-    /// The block placed by this item, if any: one of this mod's (a bare name is this mod's)
-    /// or a vanilla one (`minecraft:<path>`).
+    /// The registered block placed by this item, if any. A bare name uses this mod's namespace.
     pub block: Option<String>,
     /// The arm pose a humanoid takes holding it, in place of vanilla's (`ArmPose`).
     pub arm_pose: Option<ArmPose>,

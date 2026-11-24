@@ -4,8 +4,8 @@
 //! Transparency's depth-tested text and the native world text with its polygon-offset outline
 //! among them, draw with the native shaders.
 
-use crate::core_shader::{CoreProgram, Glue};
 use std::sync::Arc;
+use sunrise_glsl::{Glue, Translated};
 
 /// The entity vertices' light bytes are sky then block; vanilla's `UV2` is block then sky.
 pub(crate) const WORLD_GLUE: Glue = Glue {
@@ -38,9 +38,9 @@ pub(crate) const SEE_THROUGH_GLUE: Glue = Glue {
 
 #[derive(Default)]
 pub struct TextShaders {
-    pub gui: Option<Arc<CoreProgram>>,
-    pub world: Option<Arc<CoreProgram>>,
-    pub see_through: Option<Arc<CoreProgram>>,
+    pub gui: Option<Arc<Translated>>,
+    pub world: Option<Arc<Translated>>,
+    pub see_through: Option<Arc<Translated>>,
     /// Each program's Polytone expression uniforms (`shader_modifiers`), resolved when it
     /// loaded: the blocks its stages read, with their programs, bound after the pipeline's own
     /// (`expression_blocks`).
@@ -198,8 +198,8 @@ impl CoreText {
     pub(super) fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        world: Option<(&CoreProgram, &[crate::polytone_post::ExpressionUniform])>,
-        see_through: Option<(&CoreProgram, &[crate::polytone_post::ExpressionUniform])>,
+        world: Option<(&Translated, &[crate::polytone_post::ExpressionUniform])>,
+        see_through: Option<(&Translated, &[crate::polytone_post::ExpressionUniform])>,
         atlas: &wgpu::TextureView,
         lightmap: (&wgpu::TextureView, &wgpu::Sampler),
     ) -> Option<Self> {
@@ -335,7 +335,7 @@ impl CoreText {
     fn bind_group(
         device: &wgpu::Device,
         label: &str,
-        program: &CoreProgram,
+        program: &Translated,
         extra: &super::expression_blocks::ExpressionBlocks,
         (uniform, textures): (
             &wgpu::Buffer,
@@ -364,7 +364,7 @@ impl CoreText {
     fn world_part(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        program: &CoreProgram,
+        program: &Translated,
         extra: super::expression_blocks::ExpressionBlocks,
         (normal_depth, offset_depth): (wgpu::DepthStencilState, wgpu::DepthStencilState),
         (mark_normal_depth, mark_offset_depth): (wgpu::DepthStencilState, wgpu::DepthStencilState),
@@ -511,7 +511,7 @@ impl CoreText {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         label: &str,
-        program: &CoreProgram,
+        program: &Translated,
         extra: super::expression_blocks::ExpressionBlocks,
         depth: wgpu::DepthStencilState,
         resources: (
@@ -614,7 +614,7 @@ impl CoreText {
 /// fragment shaders: any discard or zero-alpha fragment in the pack shader also skips marking,
 /// and marked pixels match the colour pass's exact clip depth and brightness.
 pub(super) fn wrap_program_for_hdr_mark(
-    program: &CoreProgram,
+    program: &Translated,
 ) -> Option<(naga::Module, naga::Module)> {
     let (vertex, tier_location) = wrap_vertex_for_hdr_mark(&program.vertex)?;
     let fragment = wrap_fragment_for_hdr_mark(&program.fragment, tier_location)?;

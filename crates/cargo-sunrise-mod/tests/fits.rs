@@ -95,9 +95,11 @@ fn build_data(build: &str, internals: &[(&str, &str, &str)]) -> Vec<(&'static st
     let functions = format!(
         r#"{{"schema":1,"build":{{"commit":"{build}"}},"crates":{{}},"functions":{{}},"refused":{{}}}}"#
     );
+    let loops = format!(r#"{{"schema":1,"build":{{"commit":"{build}"}},"loops":[]}}"#);
     vec![
         ("internals.json", catalog.to_string().into_bytes()),
         ("functions.json", functions.into_bytes()),
+        ("loops.json", loops.into_bytes()),
     ]
 }
 
@@ -238,6 +240,48 @@ fn pin_without_a_build_moves_to_the_current_nightly() {
     assert_eq!(
         Manifest::parse(&manifest).unwrap().native.unwrap().sunrise,
         NEW
+    );
+}
+
+#[test]
+#[ignore = "daily"]
+fn check_answers_a_made_for_build_before_reading_its_surface() {
+    // A build id whose SDK this tool can fetch but whose surface it cannot read.
+    const FUTURE: &str = "cafebabecafebabecafebabecafebabecafebabe";
+    // A schema from a newer tool: the build is signed and known, its surface unreadable here.
+    const SURFACE: &str = r#"{"schema":9999,"hash":"ab"}"#;
+    let project = Project::new("future-surface", &[]);
+    let sdk = &project.sdk;
+    sdk.release_with_surface(FUTURE, MIXINS, None, SURFACE);
+    // A package made for exactly that build: its identity answers, whatever its surface says.
+    let manifest = format!(
+        "id = 'example'\nname = 'Example'\nversion = '0.1.0'\napi = '0.2'\ncapabilities = ['registries']\n\
+         [native]\ngame = '26.3'\nsunrise = '{FUTURE}'\n"
+    );
+    let uses = serde_json::to_vec(&UsesTable {
+        schema: PLAIN_SCHEMA,
+        made_for: FUTURE.into(),
+        entries: vec![],
+    })
+    .unwrap();
+    let files: Vec<(&str, &[u8])> = vec![
+        (
+            "Cargo.toml",
+            b"[package]\nname = 'example'\nversion = '0.1.0'\n",
+        ),
+        ("src/lib.rs", b""),
+        (USES_FILE, &uses),
+    ];
+    let file = "example.smod";
+    fs::write(
+        project.dir.join(file),
+        Package::write_files(&manifest, &files).unwrap(),
+    )
+    .unwrap();
+    let report = assert_answer(project.run(&["check", file, "--build", FUTURE]), 0, &[]);
+    assert!(
+        report.lines().any(|line| line.ends_with("  made for")),
+        "{report}"
     );
 }
 

@@ -1,3 +1,4 @@
+pub use world::pool_element::JigsawSpace;
 pub use world::pool_element::{
     ElementContext, ElementDecodeContext, ElementPlacement, JigsawBlock, JigsawJoint,
     JigsawJunction, PoolElement, PoolElementRef, PoolElementType, PoolPiece, Projection,

@@ -709,9 +709,11 @@ impl Game<'_> {
     }
 
     /// `mainCamera().position()` once aligned, or the camera entity's position before first align.
+    /// This is the placement before a mod's `camera_position` overrides, which are render-only:
+    /// streaming and the level-entry readiness never follow them.
     pub(in crate::game) fn visual_camera_position(&self) -> Option<[f64; 3]> {
         if self.view.initialized {
-            Some(self.view.position)
+            Some(self.view.placed_position)
         } else if self.remote.is_some() {
             self.camera_eye_position()
         } else {
@@ -774,9 +776,9 @@ impl Game<'_> {
             } else {
                 MAINHAND
             };
-            let item = match m.extra.slot_stack(slot).map(|s| &*s.item) {
-                Some("minecraft:bow") => UseItem::Bow,
-                Some("minecraft:spyglass") => UseItem::Spyglass,
+            let item = match m.extra.slot_stack(slot) {
+                Some(s) if &*s.item == "minecraft:bow" => UseItem::Bow,
+                Some(s) if self.stack_scopes(s) => UseItem::Spyglass,
                 _ => UseItem::Other,
             };
             (item, (m.extra.using_item - 1).max(0))

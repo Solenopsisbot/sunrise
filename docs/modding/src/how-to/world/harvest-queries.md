@@ -51,6 +51,30 @@ effects, block-break speed, submerged mining and the on-ground penalty, then the
 an unbreakable state), so a value of `1.0` or more breaks the block at once. Nothing requires `pos` to hold
 `state`. On a server it answers for a connected or fake player; on a client, for its local player.
 
+A block Part's `destroy_progress` answer for `state` replaces all of that, as a block overriding
+`getDestroyProgress` does in vanilla; the query returns the Part's answer. From inside such an answer the
+query gives the game's math for the state and asks no Part, which is how a block mines as another:
+
+```rust,ignore
+impl BlockPart for MinesAsPedestal {
+    fn destroy_progress(&self, host: HostSide<'_>, event: &mut DestroyProgressEvent) -> Option<f32> {
+        // The query takes a server host.
+        let HostSide::Server(host) = host else {
+            return None;
+        };
+        let level = event.player.level(host)?;
+        let below = [event.pos[0], event.pos[1] - 1, event.pos[2]];
+        let pedestal = level.block_state(host, below)?;
+        event.player.destroy_progress(host, level, below, pedestal)
+    }
+}
+```
+
+`PlayerRef::destroy_progress` takes a server host, so on a client this Part answers `None` and the
+client predicts the block's own progress; the server's dig decides when it breaks. A Part whose
+answer needs no query (a fixed share, or one worked out from the state) answers the same on both
+sides, and the client predicts it.
+
 It runs those three hooks, so it answers `None` from inside any of them, even for a different state. It also
 answers `None` for a stale handle, an unknown state, a dead server player and a level other than the one in
 place.

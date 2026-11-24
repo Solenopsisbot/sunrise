@@ -65,6 +65,7 @@ enum ErrorDetail {
     Frame(frame::FrameTooLarge),
     UnknownPacketId(i32),
     ExtraBytes { extra: usize },
+    SignLine(usize),
 }
 impl Error {
     const TIMED_OUT: &str = "Timed out";
@@ -92,6 +93,20 @@ impl Error {
     pub fn extra_packet_bytes(&self) -> Option<usize> {
         match self.1 {
             Some(ErrorDetail::ExtraBytes { extra }) => Some(extra),
+            _ => None,
+        }
+    }
+    /// A sign line past `ServerboundSignUpdatePacket.MAX_STRING_LENGTH`; `line` is its index.
+    pub fn sign_line_too_long(line: usize, max: usize) -> Self {
+        Self(
+            format!("sign line {line} longer than {max} chars"),
+            Some(ErrorDetail::SignLine(line)),
+        )
+    }
+    /// The index of the sign line a validation refused as too long.
+    pub fn oversize_sign_line(&self) -> Option<usize> {
+        match self.1 {
+            Some(ErrorDetail::SignLine(line)) => Some(line),
             _ => None,
         }
     }

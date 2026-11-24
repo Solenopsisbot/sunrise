@@ -479,6 +479,48 @@ fn a_newer_sdks_asset_kind_is_left_out_and_refused_only_by_a_route_that_needs_it
     );
 }
 
+/// `index` written with the asset `name`'s entry replaced by the raw JSON `entry`: text that
+/// a `serde_json::Value` cannot hold, such as a repeated key or a number past `f64`.
+fn with_raw_entry(index: &Index, name: &str, entry: &str) -> Vec<u8> {
+    let mut value = json(index);
+    value["assets"][name] = "@entry@".into();
+    value.to_string().replace("\"@entry@\"", entry).into_bytes()
+}
+
+#[test]
+fn an_entry_is_decoded_from_its_own_text_once_its_kind_is_known() {
+    const SYMBOLS: &str = "symbols-x86_64-unknown-linux-gnu.tar.xz";
+    let written = index(&[(ENGINE, b"engine")]);
+    // The engine's entry as written, with `extra` text before its closing brace.
+    let engine = |extra: &str| {
+        let written = json(&written)["assets"][ENGINE].to_string();
+        format!("{}{extra}}}", written.strip_suffix('}').unwrap())
+    };
+    // A newer SDK's entry is skipped unread, and so is a known entry's unknown field.
+    let newer = with_raw_entry(&written, SYMBOLS, r#"{"kind":"symbols","size":1e400}"#);
+    assert_eq!(Index::read(&newer, COMMIT).unwrap(), written);
+    let later_field = with_raw_entry(&written, ENGINE, &engine(r#","later":1e400"#));
+    assert_eq!(Index::read(&later_field, COMMIT).unwrap(), written);
+    let refused = [
+        ("a repeated known field", engine(r#","size":7"#)),
+        ("a repeated kind", engine(r#","kind":"runtime""#)),
+        (
+            "a repeated unknown kind",
+            r#"{"kind":"symbols","kind":"runtime"}"#.to_owned(),
+        ),
+        ("no kind", r#"{"size":1}"#.to_owned()),
+        ("a kind that is not a string", r#"{"kind":1}"#.to_owned()),
+        ("an array", r#"["symbols"]"#.to_owned()),
+    ];
+    for (case, entry) in refused {
+        let bytes = with_raw_entry(&written, ENGINE, &entry);
+        assert!(
+            matches!(Index::read(&bytes, COMMIT), Err(Refusal::Malformed(why)) if why.starts_with(ENGINE)),
+            "{case}"
+        );
+    }
+}
+
 #[test]
 #[should_panic(expected = "route play names asset kind \"symbols\"")]
 fn the_bundled_input_list_refuses_a_route_naming_an_unknown_kind() {

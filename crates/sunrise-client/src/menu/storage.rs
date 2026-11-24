@@ -146,13 +146,18 @@ pub struct State {
     /// Stacks taken from brewing stand bottle slots, for
     /// `PlayerBrewedPotionEvent`.
     pub brewed_potion_takes: Vec<ItemStack>,
-    /// Set by a server caller when a mod listens: every
+    /// Set by a caller when a mod listens: every nonzero
     /// `FurnaceResultSlot.checkTakeAchievements` then goes to `item_smelted`.
     pub item_smelted_hook: bool,
-    /// What each `checkTakeAchievements` of a furnace's result slot passed,
-    /// for `ItemSmeltedEvent`: the stack (`None` for vanilla's empty one)
-    /// and `removeCount`.
-    pub item_smelted: Vec<(Option<ItemStack>, u32)>,
+    /// `FurnaceResultSlot.checkTakeAchievements` ran on the server side, so
+    /// the furnace must award its used recipes and pop experience
+    /// (`AbstractFurnaceBlockEntity.awardUsedRecipesAndPopExperience`) even
+    /// when `removeCount == 0` (such as a hotbar swap) or no mod listens.
+    pub furnace_awarded: bool,
+    /// Each `FurnaceResultSlot.checkTakeAchievements` with `removeCount != 0`
+    /// and a non-empty stack, for `ItemSmeltedEvent` (`getSmelting`,
+    /// `getAmountRemoved`).
+    pub item_smelted: Vec<(ItemStack, u32)>,
     /// Set by a server caller when a mod listens: every smithing result
     /// taken then goes to `item_smithed`.
     pub item_smithed_hook: bool,
@@ -164,9 +169,6 @@ pub struct State {
     pub(super) takes: Option<super::click::TakeTracker>,
     /// `FurnaceResultSlot.removeCount`.
     pub(super) output_removed: u32,
-    /// Stacks transferred out of a furnace by a take, shift-click or hotbar swap, independent of
-    /// whether `item_smelted` has a listener. Direct `Slot.set` edits never record an extraction.
-    pub furnace_extracted: Vec<(ItemStack, u32)>,
     /// `LivingEntity.onEquipItem` calls that change the item: the
     /// `EquipmentSlot` name and the new stack, in order, for the caller.
     pub equipped: Vec<(&'static str, Option<ItemStack>)>,

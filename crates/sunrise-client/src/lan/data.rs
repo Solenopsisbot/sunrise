@@ -16,6 +16,7 @@ use sunrise_protocol::{
     packets::configuration::{RegistryData, RegistryEntry, RegistryTags, TagEntry, UpdateTags},
     registry::{Builtin, Dynamic},
 };
+use sunrise_world::worldgen::biome::BiomeDefinition;
 use sunrise_world::{damage_source::Catalog, level::classes::is_generated_tag};
 
 /// RegistryDataLoader.SYNCHRONIZED_REGISTRIES, in vanilla's order.
@@ -81,26 +82,38 @@ pub const BIOME_REGISTRY: &str = "minecraft:worldgen/biome";
 pub fn client_biomes(
     known: &crate::biome::Biomes,
     registry: &[(String, Option<Tag>)],
-) -> Option<crate::biome::Biomes> {
+) -> crate::Result<Option<crate::biome::Biomes>> {
     let files: Vec<(&str, Value)> = registry
         .iter()
         .filter_map(|(name, data)| {
-            let json = crate::scoreboard::tag_to_json(data.as_ref()?);
-            // Both sides through the NBT form: it turns 0.8 into the float it is sent as.
+            let data = data.as_ref()?;
+            // Compare the network projection, not the local generation settings.
             let same = known
                 .builtin_file(name)
-                .is_some_and(|own| crate::scoreboard::tag_to_json(&json_to_nbt(own)) == json);
-            (!same).then_some((name.as_str(), json))
+                .and_then(|own| BiomeDefinition::encode_network(own).ok())
+                .is_some_and(|own| &own == data);
+            (!same).then(|| (name.as_str(), crate::scoreboard::tag_to_json(data)))
         })
         .collect();
-    if files.is_empty() {
-        return None;
+    // A name the registry lists with no data that this game does not define: it keeps a slot
+    // under its own key, so a stored biome of it is never read back as plains.
+    let unresolved: Vec<&str> = registry
+        .iter()
+        .filter(|(name, data)| data.is_none() && !known.contains(name))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if files.is_empty() && unresolved.is_empty() {
+        return Ok(None);
     }
+    let table = known
+        .with_packs(files.iter().map(|(n, v)| (*n, v)))?
+        .with_unresolved(unresolved.iter().copied())?;
     log::info!(
-        "Sunrise: the server has {} biomes the game lacks or changes",
-        files.len()
+        "Sunrise: the server has {} biomes the game lacks or changes, {} without data",
+        files.len(),
+        unresolved.len()
     );
-    Some(known.with_packs(files.iter().map(|(n, v)| (*n, v))))
+    Ok(Some(table))
 }
 /// KnownPack.vanilla("core") for this version.
 pub const CORE_PACK: (&str, &str, &str) = ("minecraft", "core", sunrise_protocol::GAME_VERSION);
@@ -112,7 +125,7 @@ pub const CORE_PACK: (&str, &str, &str) = ("minecraft", "core", sunrise_protocol
 /// world's pack definitions too, so their ids must reach clients.
 /// World clocks are too: a dimension type's `default_clock` must name a
 /// clock the client was sent, or it reads that dimension's time as zero.
-const PACK_REGISTRIES: &[&str] = &[
+pub const PACK_REGISTRIES: &[&str] = &[
     "minecraft:banner_pattern",
     "minecraft:instrument",
     "minecraft:painting_variant",
@@ -127,13 +140,32 @@ mod pack_registries;
 pub use pack_registries::PackRegistryDefinitions;
 use pack_registries::bind_dialog_tags;
 
+/// Bind one registry's resource and pack tags to its actual holders. Shared by
+/// WorldLoader's pending condition context and the configuration tag snapshot.
+pub fn registry_tag_bindings(
+    resources: &Path,
+    overlay: &sunrise_world::loot::PackOverlay<'_>,
+    registry: &str,
+    contains: impl Fn(&str) -> bool,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    if registry == "minecraft:dialog" {
+        // Dialog registry admission also tracks missing writable holders.
+        return Ok(bind_dialog_tags(&resources.join("data/minecraft"), overlay, contains).0);
+    }
+    let kind = registry.split_once(':').map_or(registry, |(_, path)| path);
+    sunrise_world::tag_layers::load(resources, kind, overlay, contains)
+        .map(|tags| tags.into_iter().collect())
+        .map_err(|error| error.to_string())
+}
+
 /// World overlays key definition files by `registry/id`.
 pub fn is_pack_registry_file(key: &str) -> bool {
-    key.split_once('/').is_some_and(|(kind, _)| {
-        PACK_REGISTRIES
-            .iter()
-            .any(|registry| registry.strip_prefix("minecraft:") == Some(kind))
-    })
+    key.starts_with("worldgen/biome/")
+        || key.split_once('/').is_some_and(|(kind, _)| {
+            PACK_REGISTRIES
+                .iter()
+                .any(|registry| registry.strip_prefix("minecraft:") == Some(kind))
+        })
 }
 
 /// A registry's entries from the resource root's namespaces other than
@@ -144,6 +176,7 @@ fn mod_entries(resources: &Path, dir: &str, entries: &mut Vec<((String, String),
         let mut found = BTreeMap::new();
         walk(
             &resources.join("data").join(&ns).join(dir),
+            &ns,
             &mut found,
             dir == "enchantment",
         );
@@ -251,11 +284,14 @@ pub struct SyncData {
 /// Every `*.json` under `dir`, as (path without extension relative to dir, value), sorted;
 /// a file that can't be read or doesn't parse is left out. Through `json_folder`: from the
 /// prepared data file, and read once for the tables a load builds from the same folder.
-fn walk(dir: &Path, out: &mut BTreeMap<String, Value>, enchantment: bool) {
+fn walk(dir: &Path, namespace: &str, out: &mut BTreeMap<String, Value>, enchantment: bool) {
     let Ok(folder) = sunrise_world::json_folder::read(dir) else {
         return;
     };
     for file in &folder.files {
+        if !sunrise_world::json_folder::valid_resource_path(namespace, &file.name) {
+            continue;
+        }
         let bytes = file.bytes().unwrap_or_default();
         let value = if enchantment {
             sunrise_world::json_folder::enchantment_definition(
@@ -280,7 +316,7 @@ fn synchronized_entries(
     let path = key.trim_start_matches("minecraft:");
     let enchantments = key == "minecraft:enchantment";
     let mut found = BTreeMap::new();
-    walk(&root.join(path), &mut found, enchantments);
+    walk(&root.join(path), "minecraft", &mut found, enchantments);
     let mut entries: Vec<_> = found
         .into_iter()
         .map(|(id, value)| (("minecraft".to_owned(), id), value, false))
@@ -306,16 +342,7 @@ fn synchronized_entries(
             &mut entries,
         );
     }
-    if key == BIOME_REGISTRY {
-        // A content mod's own biomes are always sent to clients.
-        for (id, value) in crate::biome::mod_biome_files(resources) {
-            let (ns, path) = id.split_once(':').unwrap_or(("minecraft", &id));
-            entries.push(((ns.to_owned(), path.to_owned()), value, true));
-        }
-        // Use the world's winner in both staging and eager decoding, even
-        // before a hub supplies the world's biome table with modifiers applied.
-        pack_entries(path, overlay, &mut entries);
-    }
+
     // The gameplay table already selects the pack's song. Validate that
     // winner, not a losing bootstrap definition.
     if path == "jukebox_song" {
@@ -433,6 +460,7 @@ pub fn component_nbt(v: &Value) -> Tag {
 impl SyncData {
     /// Admit the typed pack winners and collect conditions from the other
     /// files used by the lazy wire reader, even if typed admission fails.
+    /// Keep tombstones available for dependent diagnostics on a refused candidate.
     /// The world's damage catalog is already staged, and supplies its frozen wire data.
     pub fn stage_registry_definitions(
         resources: &Path,
@@ -441,8 +469,8 @@ impl SyncData {
         read_errors: &BTreeMap<String, String>,
         text_registries: &crate::command::Registries,
         sound_exists: impl Fn(&str) -> bool,
-    ) -> Result<PackRegistryDefinitions, String> {
-        let (packed, admitted) = PackRegistryDefinitions::stage(
+    ) -> (PackRegistryDefinitions, Result<(), String>) {
+        let (mut packed, admitted) = PackRegistryDefinitions::stage(
             resources,
             defaults,
             overlay,
@@ -452,7 +480,7 @@ impl SyncData {
         );
         let root = resources.join("data/minecraft");
         for &key in SYNCHRONIZED {
-            if key == "minecraft:damage_type"
+            if matches!(key, "minecraft:damage_type" | BIOME_REGISTRY)
                 || PackRegistryDefinitions::includes_prepared_entries(key)
             {
                 continue;
@@ -462,8 +490,13 @@ impl SyncData {
             // Admission already checked the typed winners' conditions.
             packed.discard_replaced(key, &mut entries);
             condition_filter::filter(&mut entries, false, overlay.conditions, path);
+            packed.prepared_ids.extend(
+                entries
+                    .into_iter()
+                    .map(|((namespace, path), ..)| (key, format!("{namespace}:{path}"))),
+            );
         }
-        admitted.map(|()| packed)
+        (packed, admitted)
     }
 
     /// No registries, tags or recipes: enough for tests of the login phase.
@@ -593,6 +626,7 @@ impl SyncData {
         resources: &Path,
         overlay: &sunrise_world::loot::PackOverlay,
         damage: &FrozenDamage,
+        biomes: Option<&crate::biome::Biomes>,
         packed: Option<&Arc<PackRegistryDefinitions>>,
         defaults: &sunrise_world::item_defaults::ItemDefaults,
         sources: &crate::crafting::ResolvedSources,
@@ -602,7 +636,7 @@ impl SyncData {
         Self::load_with_frozen(
             resources,
             overlay,
-            None,
+            biomes,
             None,
             Some(damage),
             packed,
@@ -696,6 +730,54 @@ impl SyncData {
                 registries.push(((*key).into(), damage.0.clone()));
                 continue;
             }
+            if *key == BIOME_REGISTRY {
+                let prepared;
+                let modified = crate::mod_content::biomes::modified(resources);
+                let table = match biomes {
+                    Some(table) => table,
+                    None => {
+                        if !modified.is_empty() {
+                            return Err(
+                                "modified biomes require the world's admitted biome table".into()
+                            );
+                        }
+                        prepared = crate::biome::Biomes::load_vanilla_for_server(
+                            &sunrise_assets::resource_source::ResourceRoot::directory(
+                                resources.to_owned(),
+                            ),
+                        )
+                        .map_err(|error| error.to_string())?;
+                        &prepared
+                    }
+                };
+                let names = table.registry_order();
+                let entries = Entries {
+                    data: names
+                        .iter()
+                        .map(|name| {
+                            let file = table
+                                .pack_file(name)
+                                .or_else(|| table.builtin_file(name))
+                                .ok_or_else(|| {
+                                format!("biome {name}: missing admitted definition")
+                            })?;
+                            BiomeDefinition::encode_network(file)
+                                .map_err(|error| format!("biome {name}: {error}"))
+                        })
+                        .collect::<Result<_, _>>()?,
+                    from_pack: names
+                        .iter()
+                        .map(|&name| table.pack_file(name).is_some() || modified.contains(name))
+                        .collect(),
+                    names: names.into_iter().map(str::to_owned).collect(),
+                };
+                dynamic.registries.insert(
+                    (*key).into(),
+                    entries.names.iter().map(|id| (id.clone(), None)).collect(),
+                );
+                registries.push(((*key).into(), entries));
+                continue;
+            }
             let path = key.trim_start_matches("minecraft:");
             let mut entries = if PackRegistryDefinitions::includes_prepared_entries(key) {
                 Vec::new()
@@ -724,14 +806,13 @@ impl SyncData {
                     let top: BTreeMap<String, &serde_json::value::RawValue> =
                         serde_json::from_slice(&bytes)
                             .map_err(|e| format!("damage type {id}: {e}"))?;
-                    let conditions = top
-                        .get("neoforge:conditions")
-                        .map(|raw| serde_json::from_str::<Value>(raw.get()))
-                        .transpose()
-                        .map_err(|e| format!("damage type {id}: {e}"))?;
-                    let conditions = serde_json::json!({ "neoforge:conditions": conditions.unwrap_or(Value::Null) });
-                    if !overlay.conditions.allows_id(&conditions, path, &id) {
-                        continue;
+                    if let Some(raw) = top.get("neoforge:conditions") {
+                        let payload: Value = serde_json::from_str(raw.get())
+                            .map_err(|e| format!("damage type {id}: {e}"))?;
+                        let conditions = serde_json::json!({ "neoforge:conditions": payload });
+                        if !overlay.conditions.allows_id(&conditions, path, &id) {
+                            continue;
+                        }
                     }
                     let definition =
                         sunrise_world::damage_source::Definition::from_json(&id, &bytes)
@@ -748,44 +829,20 @@ impl SyncData {
             if let Some(packed) = &packed {
                 packed.discard_replaced(key, &mut entries);
             }
-            // A biome the mods' modifiers changed is not the client's own file any more:
-            // its data is sent, as a pack's biome is.
-            let modified = match *key == BIOME_REGISTRY {
-                true => crate::mod_content::biomes::modified(resources),
-                false => Default::default(),
-            };
-            for ((ns, p), _, from_pack) in entries.iter_mut() {
-                *from_pack |= modified.contains(&format!("{ns}:{p}"));
-            }
-            if *key == BIOME_REGISTRY
-                && let Some(table) = biomes.filter(|b| b.has_packs())
-            {
-                // A pack's biome goes with its data: no client knows it.
-                let found: HashMap<_, _> = entries
-                    .drain(..)
-                    .map(|((ns, p), v, _)| (format!("{ns}:{p}"), v))
-                    .collect();
-                for name in table.registry_order() {
-                    let (ns, p) = name.split_once(':').unwrap_or(("minecraft", name));
-                    let pack = table.pack_file(name);
-                    let json = pack.or_else(|| found.get(name)).cloned();
-                    let json = json.unwrap_or_else(|| Value::Object(Default::default()));
-                    let packed = pack.is_some() || modified.contains(name);
-                    entries.push(((ns.to_owned(), p.to_owned()), json, packed));
-                }
-            }
             condition_filter::filter(
                 &mut entries,
                 damage_entries.is_some(),
                 overlay.conditions,
                 path,
             );
-            let mut entries = damage_entries.unwrap_or_else(|| {
+            let mut entries = if let Some(damage_entries) = damage_entries {
+                damage_entries
+            } else {
                 entries
                     .into_iter()
                     .map(|(key, value, packed)| (key, json_to_nbt(&value), packed))
                     .collect()
-            });
+            };
             if let Some(packed) = &packed {
                 packed.append_encoded(key, &mut entries);
             }
@@ -1248,11 +1305,9 @@ mod tests {
                 .to_string()
                 .into_bytes()
         };
-        std::fs::create_dir(root.path().join("worldgen")).unwrap();
-        std::fs::write(
-            root.path().join("worldgen/biomes.json"),
-            serde_json::json!({"test:wire_biome": String::from_utf8(bad("absent:wire_biome")).unwrap()}).to_string(),
-        ).unwrap();
+        let chat = root.path().join("data/minecraft/chat_type");
+        std::fs::create_dir_all(&chat).unwrap();
+        std::fs::write(chat.join("rejected.json"), bad("absent:chat")).unwrap();
         let instrument = root.path().join("data/minecraft/instrument");
         std::fs::create_dir_all(&instrument).unwrap();
         std::fs::write(
@@ -1282,7 +1337,7 @@ mod tests {
         std::fs::write(root.path().join("items.json"), b"{}").unwrap();
         let defaults = sunrise_world::item_defaults::read(root.path()).unwrap();
         let conditions = sunrise_world::conditions::LoadConditions::new([]);
-        let Err(typed) = SyncData::stage_registry_definitions(
+        let (packed, Err(typed)) = SyncData::stage_registry_definitions(
             root.path(),
             &defaults,
             &sunrise_world::loot::PackOverlay {
@@ -1304,8 +1359,16 @@ mod tests {
             assert!(typed.contains(diagnostic), "{typed}");
         }
         assert!(!typed.contains("absent:loser"), "{typed}");
+        assert!(packed.entries().any(|(registry, id, admitted)| {
+            registry == "minecraft:instrument" && id == "minecraft:override" && !admitted
+        }));
         let untyped = conditions.check_errors().unwrap_err();
-        assert!(untyped.contains("data/test/worldgen/biome/wire_biome.json: unknown load conditions [absent:wire_biome]"), "{untyped}");
+        assert!(
+            untyped.contains(
+                "data/minecraft/chat_type/rejected.json: unknown load conditions [absent:chat]"
+            ),
+            "{untyped}"
+        );
         for losing_or_already_checked in [
             "absent:root_instrument",
             "absent:dialog",
@@ -1330,7 +1393,7 @@ mod tests {
         for (tags, emitted) in [(["test:unrelated"], true), (["test:marker"], false)] {
             let conditions = sunrise_world::conditions::LoadConditions::new([])
                 .with_tags([("minecraft:item", tags)]);
-            let packed = SyncData::stage_registry_definitions(
+            let (packed, admitted) = SyncData::stage_registry_definitions(
                 root.path(),
                 &defaults,
                 &sunrise_world::loot::PackOverlay {
@@ -1341,9 +1404,17 @@ mod tests {
                 &BTreeMap::new(),
                 &Default::default(),
                 |_| true,
-            )
-            .unwrap();
+            );
+            admitted.unwrap();
             assert_eq!(conditions.check_errors(), Ok(()));
+            assert_eq!(
+                packed.entries().collect::<Vec<_>>(),
+                [(
+                    "minecraft:world_clock",
+                    "test:conditional".to_owned(),
+                    emitted
+                ),]
+            );
             let mut entries = Vec::new();
             packed.append_encoded("minecraft:world_clock", &mut entries);
             assert_eq!(
@@ -1579,9 +1650,13 @@ mod tests {
     #[ignore = "daily"]
     fn datapack_damage_registry_reload_keeps_wire_ids_and_reloads_tags_before_future_join() {
         use sunrise_world::loot::PackOverlay;
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.local/sunrise-client")
-            .join(sunrise_core::VANILLA_VERSION);
+        let root = std::env::var_os("SUNRISE_TEST_RESOURCES")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/sunrise-client")
+                    .join(sunrise_core::VANILLA_VERSION)
+            });
         let files = vec![
             ("damage_type/demo:heat".into(), vec![br#"{"message_id":"heat","scaling":"never","exhaustion":0.1,"effects":"burning"}"#.to_vec()]),
             ("damage_type/demo:infinite".into(), vec![br#"{"message_id":"infinite","scaling":"never","exhaustion":1e400}"#.to_vec()]),
@@ -1691,6 +1766,29 @@ mod tests {
         )
         .unwrap();
         assert!(fresh.id("minecraft:damage_type", "demo:heat").is_none());
+
+        let mut explicit_null = files;
+        explicit_null.push(("damage_type/demo:null_conditions".into(), vec![
+            br#"{"message_id":"test","scaling":"never","exhaustion":0,"neoforge:conditions":null}"#.to_vec(),
+        ]));
+        let conditions = sunrise_world::conditions::LoadConditions::new([]);
+        let error = SyncData::load(
+            &root,
+            &PackOverlay {
+                conditions: &conditions,
+                ..PackOverlay::new(&explicit_null)
+            },
+            &sunrise_world::item_defaults::read(&root).unwrap(),
+            &crate::crafting::ResolvedSources::default(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            error.contains(
+                "data/demo/damage_type/null_conditions.json: neoforge:conditions: expected a list"
+            ),
+            "{error}"
+        );
     }
 
     /// A content mod's enchantments (`data/<ns>/enchantment/`, in the resource

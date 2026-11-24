@@ -9,19 +9,24 @@ impl mod_api::Hooks for Catch {
     fn item_fished(
         &self,
         host: &mut dyn mod_api::ServerHost,
-        event: &mut mod_api::ItemFishedEvent<'_>,
+        event: &mut mod_api::ItemFishedEvent<'_, '_>,
     ) -> mod_api::Flow {
         match self.0 {
             1 => {
                 event.drops.clear();
-                event.drops.push(
-                    mod_api::ItemStack::new(
-                        host.item_key(&mod_api::Identifier::parse("minecraft:diamond").unwrap())
+                event
+                    .drops
+                    .push(
+                        mod_api::ItemStack::new(
+                            host.item_key(
+                                &mod_api::Identifier::parse("minecraft:diamond").unwrap(),
+                            )
                             .unwrap(),
-                        2,
+                            2,
+                        )
+                        .unwrap(),
                     )
-                    .unwrap(),
-                );
+                    .unwrap();
             }
             2 => {
                 event.rod_damage = 5;
@@ -40,7 +45,7 @@ impl mod_api::Hooks for InvalidCatch {
     fn item_fished(
         &self,
         host: &mut dyn mod_api::ServerHost,
-        event: &mut mod_api::ItemFishedEvent<'_>,
+        event: &mut mod_api::ItemFishedEvent<'_, '_>,
     ) -> mod_api::Flow {
         assert!(event.cancelled);
         assert_eq!(event.rod_damage, 5);
@@ -49,8 +54,10 @@ impl mod_api::Hooks for InvalidCatch {
             .unwrap();
         let mut stack = mod_api::ItemStack::new(key, 1).unwrap();
         stack.set_count(65).unwrap();
-        event.drops.clear();
-        event.drops.push(stack);
+        assert_eq!(
+            event.drops.push(stack),
+            Err(mod_api::StackWriteError::CountExceeded { maximum: 64 })
+        );
         mod_api::Flow::Continue
     }
 }
@@ -225,9 +232,8 @@ fn fishing_catch_invalid_drops_keep_the_earlier_listeners_outputs() {
     }
     log::set_logger(&LOG).unwrap();
     log::set_max_level(log::LevelFilter::Warn);
-    // Each listener's stack-list outputs are validated in its own scope: the refused drops keep
-    // the value before that listener, while the first listener's cancellation and rod damage
-    // commit. The catch ends as that cancelling listener alone leaves it.
+    // A refused append doesn't alter the catch or clear an earlier listener's cancellation.
+    // The catch ends as that cancelling listener alone leaves it.
     let cancelled = run(Some(2));
     LOG.0.lock().unwrap().clear();
     let refused = run(Some(4));
@@ -245,8 +251,9 @@ fn fishing_catch_invalid_drops_keep_the_earlier_listeners_outputs() {
         .collect();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(
-        warnings[0]
-            .ends_with("hook item_fished output drops refused: CountExceeded { maximum: 64 }"),
+        warnings[0].ends_with(
+            "mod invalid_catch hook item_fished output drops refused: CountExceeded { maximum: 64 }"
+        ),
         "{warnings:?}"
     );
 }

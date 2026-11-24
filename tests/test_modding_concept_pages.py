@@ -82,12 +82,12 @@ class ConceptPages(unittest.TestCase):
 
     def test_design_page_dropped_into_concepts_fails(self):
         (self.src / "concepts/next.md").write_text("# Design: what comes next\n\nA proposal.\n")
-        with self.assertRaisesRegex(AssertionError, "concepts/next.md: .* docs/design/"):
+        with self.assertRaisesRegex(AssertionError, "concepts/next.md: .* issues and PRs"):
             self.expand()
 
     def test_design_page_dropped_into_a_group_folder_fails(self):
         (self.src / "concepts/parts/c-plan.md").write_text("# Parts roadmap\n")
-        with self.assertRaisesRegex(AssertionError, "concepts/parts/c-plan.md: .* docs/design/"):
+        with self.assertRaisesRegex(AssertionError, "concepts/parts/c-plan.md: .* issues and PRs"):
             self.expand()
 
     def test_page_outside_the_discovered_folders_must_be_listed(self):

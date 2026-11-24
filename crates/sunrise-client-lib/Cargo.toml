@@ -237,6 +237,10 @@ name = "custom_component_wire"
 path = "../sunrise-client/tests/custom_component_wire.rs"
 
 [[test]]
+name = "custom_bundle_wire"
+path = "../sunrise-client/tests/custom_bundle_wire.rs"
+
+[[test]]
 name = "datapack_join"
 path = "../sunrise-client/tests/datapack_join.rs"
 

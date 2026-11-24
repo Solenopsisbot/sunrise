@@ -8,10 +8,11 @@
 //! [`StructureInputs::assemble_jigsaw`] are jigsaw pieces (`Piece::Pool`), saved
 //! and loaded as `minecraft:jigsaw` pieces are. Runs on the worldgen worker
 //! threads, so a type keeps no mutable state and its contexts carry no `Host`.
-use super::jigsaw::{JigsawConfig, Pools, assemble};
+use super::jigsaw::{Jigsaw, JigsawConfig, PoolElement, PoolPiece, Pools, assemble, attach};
 use super::legacy::LegacyPiece;
 use super::start::{Piece, StartContext};
 use crate::worldgen::block_feature::FeatureBlockBindings;
+use mod_api::JigsawSpace;
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 use sunrise_core::nbt::{Compound, Tag};
@@ -70,6 +71,33 @@ impl<'a> StructureInputs<'a> {
             position,
         )?;
         Some((position, pieces.into_iter().map(Piece::Pool).collect()))
+    }
+    /// One candidate on one jigsaw of `source`, as a structure type laying
+    /// its own jigsaw out calls it: [`attach`] with the bundle's pools looked
+    /// up by name, without aliases.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach(
+        &self,
+        source: &mut PoolPiece,
+        jigsaw: &Jigsaw<'_>,
+        target: &Arc<PoolElement>,
+        space: &mut JigsawSpace,
+        use_expansion_hack: bool,
+        mut context: &mut dyn StartContext,
+        random: &mut impl RandomSource,
+    ) -> Option<PoolPiece> {
+        attach(
+            source,
+            jigsaw,
+            target,
+            space,
+            use_expansion_hack,
+            &|name| self.pool(name),
+            self.resources,
+            &mut None,
+            &mut context,
+            random,
+        )
     }
 }
 
@@ -389,6 +417,9 @@ mod tests {
         }
         fn generation(&self) -> crate::worldgen::anchor::WorldGenerationContext {
             crate::worldgen::anchor::WorldGenerationContext::new(-64, 384, 63)
+        }
+        fn biome_key(&self, _: crate::worldgen::biome::BiomeId) -> mod_api::BiomeKey {
+            unreachable!("a pool chain asks no biome")
         }
         fn noise_biome(&mut self, _: [i32; 3]) -> crate::worldgen::biome::BiomeId {
             unreachable!("a pool chain asks no biome")

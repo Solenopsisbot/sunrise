@@ -215,13 +215,18 @@ fn every_walk_family_of_the_entity_lists_fires_its_case() {
             // its tick's gravity.
             assert!(game.run_command(&format!("summon experience_orb {} 40.5 5.5", at(7)[0])));
             // The falling block: thrown by the game's own spawn, eastbound.
-            assert!(game.spawn_falling_block(
-                "minecraft:overworld",
-                stone,
-                at(6),
-                [0.5, 0.0, 0.0],
-                mod_api::Falling::default()
-            ));
+            let level = game.level("minecraft:overworld").unwrap();
+            assert!(
+                game.level_spawn_falling_block(
+                    level,
+                    stone,
+                    at(6),
+                    [0.5, 0.0, 0.0],
+                    mod_api::Falling::default(),
+                )
+                .unwrap()
+                .is_some()
+            );
             // The trident: a thrown one in flight, a `setPos` flyer.
             let id = game.take_entity_id();
             let mut trident = super::trident::ThrownTrident::remote(

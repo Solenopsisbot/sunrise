@@ -326,5 +326,5 @@ python3 tools/parity.py dedicated_server server_entities server_player_damage
 [docs/parity-workflow.md](docs/parity-workflow.md) (runner, gate, shards, scopes) ·
 [docs/native-client.md](docs/native-client.md) (options, controls, sunrise-ctl) ·
 [docs/server-levels.md](docs/server-levels.md) (levels per dimension) ·
-[docs/rust-parity.md](docs/rust-parity.md) (what is ported) · [docs/known-issues.md](docs/known-issues.md) ·
+[docs/status.md](docs/status.md) (what is ported) · [docs/known-issues.md](docs/known-issues.md) ·
 [docs/release-flow.md](docs/release-flow.md) · [docs/README.md](docs/README.md) (index).

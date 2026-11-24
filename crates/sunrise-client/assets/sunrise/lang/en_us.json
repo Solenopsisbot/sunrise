@@ -577,7 +577,6 @@
   "sunrise.mods.declaration.item": "Mod %s: item declaration refused: %s",
   "sunrise.mods.declaration.closed": "registration is closed for %s",
   "sunrise.mods.declaration.invalid_id": "invalid identifier %s",
-  "sunrise.mods.declaration.unowned_namespace": "%s in unowned namespace %s",
   "sunrise.mods.declaration.rejected": "%s: %s",
   "sunrise.mods.warning.discouraged": "Loading %s with %s (version %s) is discouraged.%s",
   "sunrise.mods.warning.discouraged_missing": "Loading %s without %s is discouraged.%s",

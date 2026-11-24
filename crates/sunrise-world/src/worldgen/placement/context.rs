@@ -346,7 +346,7 @@ pub trait PlacementContext {
     ) -> Result<crate::registry::BlockStateId, PlacementQueryError> {
         Err(PlacementQueryError::Unavailable)
     }
-    /// Whether `state` is in block tag `tag` (a mod feature's own staged block).
+    /// Whether `state` is in block tag `tag`.
     fn state_matches_tag(
         &mut self,
         _state: crate::registry::BlockStateId,

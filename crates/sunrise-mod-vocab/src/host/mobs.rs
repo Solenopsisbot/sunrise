@@ -14,10 +14,6 @@ pub trait MobsHost {
 #[sunrise_mod_api_macros::host_area]
 pub trait MobsServerHost {
     /// Side: server.
-    /// Kills mob `id` as `/kill` does: it falls and drops its loot. False for
-    /// no such living mob or another dimension.
-    fn kill_mob(&mut self, dimension: &str, id: u32) -> bool;
-    /// Side: server.
     /// The entity as the ender dragon, or None for another kind, a stale
     /// handle or a client.
     fn dragon(&self, entity: EntityRef) -> Option<DragonRef>;
@@ -175,48 +171,20 @@ pub trait MobsBackend {
     /// `Raider.getCurrentRaid`: the raid a raider belongs to, even a stopped
     /// one. None for a mob that is no raider or in no raid.
     fn mob_raid(&self, mob: MobRef) -> Option<RaidRef>;
-    /// Side: server.
-    /// The unspawned mob's entity type (`minecraft:zombie`). `Expired` once the hook that lent it has returned.
-    fn unspawned_mob_kind(&self, mob: UnspawnedMobRef) -> Result<Identifier, UnspawnedMobError>;
-    /// Side: server.
-    /// Where the unspawned mob will join the level. `Expired` once the hook that lent it has returned.
-    fn unspawned_mob_position(&self, mob: UnspawnedMobRef) -> Result<[f64; 3], UnspawnedMobError>;
-    /// Side: server.
-    /// The stack in `slot` (`LivingEntity.getItemBySlot`) and its count; `None` for an empty slot. `Expired` once the hook that lent it has returned.
-    fn unspawned_mob_equipment(
-        &self,
-        mob: UnspawnedMobRef,
-        slot: EquipmentSlot,
-    ) -> Result<Option<ItemStack>, UnspawnedMobError>;
-    /// Side: server.
-    /// An attribute's base value, before modifiers; `Unsupported` for one the mob's type does not have. `Expired` once the hook that lent it has returned.
-    fn unspawned_mob_attribute_base(
-        &self,
-        mob: UnspawnedMobRef,
-        attribute: &Identifier,
-    ) -> Result<f64, UnspawnedMobError>;
-    /// Side: server.
-    /// An attribute's value with its modifiers, its equipment's included; `Unsupported` for one the mob's type does not have. `Expired` once the hook that lent it has returned.
-    fn unspawned_mob_attribute_value(
-        &self,
-        mob: UnspawnedMobRef,
-        attribute: &Identifier,
-    ) -> Result<f64, UnspawnedMobError>;
-    /// Side: server.
-    /// The tags a mod gave the unspawned mob so far (`Entity.entityTags()`). `Expired` once the hook that lent it has returned.
-    fn unspawned_mob_tags(&self, mob: UnspawnedMobRef) -> Result<Vec<String>, UnspawnedMobError>;
-    /// Side: server.
-    /// The unspawned mob's custom name, if it has one. `Expired` once the hook that lent it has returned.
-    fn unspawned_mob_custom_name(
-        &self,
-        mob: UnspawnedMobRef,
-    ) -> Result<Option<Text>, UnspawnedMobError>;
 }
 /// The handles' writes of the `mobs` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
 #[doc(hidden)]
 #[sunrise_mod_api_macros::host_area]
 pub trait MobsBackendMut {
+    // hidden: a scoped pending-child editor completes construction via the listener's host loan.
+    #[doc(hidden)]
+    fn initialize_pending_child(
+        &mut self,
+        child: UnspawnedMob,
+        action: u64,
+    ) -> Result<UnspawnedMob, UnspawnedMobError>;
+
     /// Side: server.
     /// `EnderDragonPhaseManager.setPhase`: the dragon ends its phase and
     /// begins the new one fresh (targets and counters cleared), and the
@@ -270,17 +238,18 @@ pub trait MobsBackendMut {
     /// cauldron is raised onto its rim, and with avoid-sun a ground navigation
     /// cuts at the first node that can see the sky. The path is finished once
     /// its next-node index reaches the node count; [`mob_is_done`](MobsBackend::mob_is_done)
-    /// is true when there is no path or it is finished. A supplied path keeps
-    /// no recompute target, so a block change on it or the stuck check drops
-    /// it and no search is ever run in its place (stricter than vanilla, which
-    /// re-searches to the previous target); the per-node timeout drops it as
-    /// well. Only non-finite coordinates and speeds are refused; there is no
-    /// cap on the node count, and unloaded or out-of-world nodes are neither
-    /// refused nor clamped: a finite coordinate at the edge of the `i32` range
-    /// saturates when it is floored to its block, and every block step after
-    /// it (the classifier's neighbours, the floor under a node, the follower's
-    /// waypoint) saturates too, so no mod input panics the engine. As in
-    /// vanilla, the mob's own goals may replace the path next tick. Refuses
+    /// is true when there is no path or it is finished. As in vanilla, taking
+    /// the path leaves the navigation's recompute target (the target it last
+    /// searched for) as it was: a block change on the path re-searches to that
+    /// target, and with none the path is kept. The stuck check and the per-node
+    /// timeout drop it, as they drop any path. Only non-finite coordinates and
+    /// speeds are refused; there is no cap on the node count, and unloaded or
+    /// out-of-world nodes are neither refused nor clamped: a finite coordinate
+    /// at the edge of the `i32` range saturates when it is floored to its
+    /// block, and every block step after it (the classifier's neighbours, the
+    /// floor under a node, the follower's waypoint) saturates too, so no mod
+    /// input panics the engine. As in vanilla, the mob's own goals may replace
+    /// the path next tick. Refuses
     /// with a [`MoveToPathError`]: `NotFinite` for such a coordinate or speed,
     /// `Unavailable` for a stale or unavailable mob, a client, and the dragon
     /// (which flies by its phase and keeps no navigation), and `Empty` when

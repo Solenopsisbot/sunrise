@@ -11,12 +11,13 @@ impl Renderer {
         sprite_mips: &[crate::mipmap::Settings],
         animations: &[SpriteAnimation],
         hud_atlas: (&[u8], u32, u32),
+        hud_pages: Option<&crate::hud::HudAtlas>,
         glint: (&[u8], u32, u32),
         glint_armor: (&[u8], u32, u32),
         forcefield: (&[u8], u32),
         panorama_faces: Arc<panorama::Faces>,
         prepared: Option<PreparedTextures>,
-        previous: Option<&Self>,
+        render_device: RendererDevice<'_>,
         api: GraphicsApi,
         translucent_batching: bool,
         (shader_pack, pack_starts_wide): (bool, bool),
@@ -26,6 +27,10 @@ impl Renderer {
         request: output::FrameRequest,
         display: output::DisplayReading,
     ) -> Result<Self> {
+        let previous = match &render_device {
+            RendererDevice::Reuse(renderer) => Some(*renderer),
+            _ => None,
+        };
         let Opened {
             instance,
             surface,
@@ -34,11 +39,11 @@ impl Renderer {
             queue,
             device_lost,
             configured,
-        } = match previous {
+        } = match render_device {
             // Reload resources on the same device; replacing live Vulkan
             // devices can invalidate the driver's swapchain state on the same
             // window.
-            Some(renderer) => {
+            RendererDevice::Reuse(renderer) => {
                 describe_adapter(&renderer.adapter);
                 check_layers(&renderer.adapter, layers)?;
                 Opened {
@@ -63,10 +68,8 @@ impl Renderer {
                     configured: None,
                 }
             }
-            None => {
-                let _step = crate::spans::startup::step("renderer.open_device");
-                open_device(&window, offscreen, api, layers).await?
-            }
+            RendererDevice::Opened(opened) => *opened,
+            RendererDevice::New => Opened::for_window(&window, offscreen, api, layers).await?,
         };
         // Computed once: the sprite arrays, the shaders' constants and the
         // shader pack atlas all cut the sprites by it.
@@ -973,7 +976,7 @@ impl Renderer {
         let limit = device.limits().max_texture_dimension_2d;
         if atlas_width.max(atlas_height) > limit {
             return Err(format!(
-                "the shared atlas is {atlas_width}x{atlas_height}; this GPU allows {limit}x{limit}"
+                "HUD atlas {atlas_width}x{atlas_height} exceeds device texture limit {limit}"
             )
             .into());
         }
@@ -1063,6 +1066,13 @@ impl Renderer {
             &glint_armor_view,
             &glint_sampler,
             hud_coverage,
+            hud_pages.map_or_else(Vec::new, |atlas| {
+                atlas
+                    .registered_pages
+                    .iter()
+                    .map(|page| crate::hud::upload_atlas_page(&device, &queue, page))
+                    .collect()
+            }),
         )?;
         hud.atlas_texture = Some(atlas.clone());
         let entity_step = crate::spans::startup::step("renderer.entity_pipelines");
@@ -1101,44 +1111,51 @@ impl Renderer {
             label: Some("Atlas"),
             ..Default::default()
         });
-        let entity_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Entity resources"),
-            layout: &entity_bindings,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: globals.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&lightmap_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&lightmap_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&glint_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::Sampler(&glint_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::TextureView(&glint_armor_view),
-                },
-            ],
-        });
+        let entity_group_for = |view: &wgpu::TextureView| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Entity resources"),
+                layout: &entity_bindings,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: globals.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&lightmap_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&lightmap_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&glint_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&glint_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&glint_armor_view),
+                    },
+                ],
+            })
+        };
+        let entity_group = entity_group_for(&atlas_view);
+        let screen_page_groups = hud
+            .atlas_page_views()
+            .map(|view| view.map(entity_group_for))
+            .collect();
         let static_entity_transform =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Static block-entity camera position"),
@@ -2056,15 +2073,22 @@ impl Renderer {
         crate::mesher::group_parts(adapter.get_info().backend == wgpu::Backend::Metal);
         // Readable as storage where flat draws run, or while a `shaders/` pack's terrain programs
         // read them per section (`arena_storage`): it starts as for the picked pack, taken to
-        // read them, so the pack loading keeps it (`follow_arena_storage`).
-        let terrain_pages = flat::pages_readable(&adapter, &device);
+        // read them, so the pack loading keeps it (`follow_arena_layout`).
+        // `SUNRISE_SHADER_PACK_WITHOUT=vertex-storage` takes reads away as for a pack
+        // (`pack_post::Gpu::vertex_reads`).
+        let terrain_pages = flat::pages_readable(&adapter, &device)
+            && pack_post::Gpu::of(&adapter, device.features()).vertex_reads;
         let arena_storage = arena_storage(flat_wanted, pack_starts_wide && terrain_pages);
+        // With a normal stream where the pack's per-section draws read no pages
+        // (`follow_arena_layout`), as for the pack's taken to fit with it.
+        let arena_normals = pack_starts_wide && !flat_wanted && !terrain_pages;
         let arena = arena::Arena::new(
             &device,
             std::mem::size_of::<TerrainVertex>() as u64,
             1 << 20,
             arena_storage,
-        );
+        )
+        .with_normals(arena_normals);
         // Sections as one index list per frame where multi-draw is emulated.
         let mut flat = flat_wanted.then(|| {
             let buffers = [Some(wgpu::VertexBufferLayout {
@@ -2214,6 +2238,7 @@ impl Renderer {
                 shader_pack,
                 false,
             ),
+            arena_normals,
         );
         if let (Some(flat), Some(arena)) = (&mut flat, &translucent_arena) {
             flat.set_translucent_page_vertices(arena.page_vertices());
@@ -2404,7 +2429,7 @@ impl Renderer {
             lightning_pipeline,
             lightning: lightning::Renderer::new(),
             see_through_pipeline,
-            world_primitives,
+            world_primitives: Some(world_primitives),
             text_polygon_offset_pipeline,
             world_text_pipeline,
             text_mark_pipelines,
@@ -2423,6 +2448,7 @@ impl Renderer {
             border_uniform,
             border_vertices,
             screen_pipelines,
+            screen_page_groups,
             screen_buffer,
             screen_capacity,
             entity_group,
@@ -2515,6 +2541,11 @@ impl Renderer {
             multi_draw,
             visible: Vec::new(),
             visible_lods: Vec::new(),
+            visible_renderable_sections: Vec::new(),
+            visible_renderable_scratch: Vec::new(),
+            hook_geometry: Default::default(),
+            hook_entities_scratch: Vec::new(),
+            hook_see_through_scratch: Vec::new(),
             translucent_lods: Vec::new(),
             shadow_visible: Vec::new(),
             translucent_draws: Vec::new(),
@@ -2572,6 +2603,7 @@ impl Renderer {
             pack_terrain_flat: false,
             terrain_pages,
             pack_terrain_pages: false,
+            pack_terrain_normals: false,
             pack_terrain_bindings: Default::default(),
             arena_storage,
             separate_ao: false,

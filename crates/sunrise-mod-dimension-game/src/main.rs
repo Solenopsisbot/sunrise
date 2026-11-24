@@ -103,7 +103,7 @@ impl Hooks for DimProbe {
                 let line = travel(host, source, command)?;
                 let ran = host.commands().run_command(&line);
                 host.commands()
-                    .feedback(Text::literal(format!("dimprobe ran={ran}")))
+                    .feedback(Text::literal(format!("dimprobe ran={ran}")), false)
                     .expect("bounded probe text");
                 Ok(1)
             }),
@@ -111,7 +111,7 @@ impl Hooks for DimProbe {
                 let line = travel(host, source, command)?;
                 *later.lock().unwrap() = Some(line);
                 host.commands()
-                    .feedback(Text::literal("dimprobe queued"))
+                    .feedback(Text::literal("dimprobe queued"), false)
                     .expect("bounded probe text");
                 Ok(1)
             }),

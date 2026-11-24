@@ -581,6 +581,17 @@ impl GeneralTypeCatalog {
     pub fn save_policy(&self, slot: usize) -> mod_api::GeneralSavePolicy {
         self.entries[slot].save_policy
     }
+
+    /// The Minecraft feature flags this type requires (`EntityType.requiredFeatures`).
+    pub fn required_features(&self, slot: usize) -> &[mod_api::FeatureFlag] {
+        &self.entries[slot].required_features
+    }
+
+    /// Whether every Minecraft feature flag this type requires is enabled in `enabled_features`
+    /// (`EntityType.isEnabled(FeatureFlagSet)`).
+    pub fn is_enabled(&self, slot: usize, enabled_features: &mod_api::FeatureFlags) -> bool {
+        enabled_features.contains_all(self.required_features(slot))
+    }
 }
 
 /// The game's frozen registry, built from the installed declarations: the
@@ -887,7 +898,7 @@ impl Game<'_> {
     /// A general row's own compound with its attachments, before its passengers.
     pub(super) fn general_own_nbt(&mut self, id: u32, transferring: bool) -> Option<Tag> {
         let mut tag = self.general_row_record(id, transferring)?.to_tag();
-        crate::game::persist::write_attachments(&mut tag, id, &self.entity_attachments);
+        self.write_entity_attachments(&mut tag, id);
         Some(tag)
     }
 
@@ -1086,6 +1097,57 @@ impl Game<'_> {
             log::error!("could not reopen {}: {error}", source.id());
         }
         Ok(true)
+    }
+
+    /// `EntityType.loadEntityRecursive`: an entity that cannot be created never
+    /// brings its passengers into the candidate tree. Prune before UUID checks
+    /// or decoding general payloads, including under vanilla vehicle records.
+    pub(in crate::game) fn retain_feature_eligible_entity_tree(&self, tag: &mut Tag) -> bool {
+        let catalog = general_type_catalog();
+        if catalog.entries.is_empty() {
+            return true;
+        }
+        let features = mod_api::FeatureFlags::new(self.level.enabled_features.as_arc().clone());
+        fn retain(
+            game: &Game<'_>,
+            tag: &mut Tag,
+            catalog: &GeneralTypeCatalog,
+            features: &mod_api::FeatureFlags,
+        ) -> bool {
+            let Some(kind) = sunrise_client::entity_nbt::kind(tag) else {
+                return true;
+            };
+            let slot = catalog.slot(&kind);
+            // An unavailable mod's raw record is opaque and stays intact for quarantine.
+            if slot.is_none()
+                && quarantined_kind(&kind)
+                && !game.res.mob_types().contains_key(&kind)
+            {
+                return true;
+            }
+            if let Some(slot) = slot
+                && !catalog.is_enabled(slot, features)
+            {
+                let missing: Vec<_> = catalog
+                    .required_features(slot)
+                    .iter()
+                    .filter(|&&flag| !features.contains_flag(flag))
+                    .map(|flag| flag.id())
+                    .collect();
+                log::warn!(
+                    "Skipping entity with id {kind}: missing feature flags {}",
+                    missing.join(", ")
+                );
+                return false;
+            }
+            if let Tag::Compound(compound) = tag
+                && let Some(Tag::List(riders)) = compound.get_mut(&format::PASSENGERS.into())
+            {
+                riders.retain_mut(|rider| retain(game, rider, catalog, features));
+            }
+            true
+        }
+        retain(self, tag, catalog, &features)
     }
 
     /// Load one saved general entity tree whose root kind the frozen
@@ -1294,6 +1356,7 @@ fn general_tree_uuid_admission_refused(game: &Game<'_>, record: &GeneralEntityRe
 }
 
 impl Entity for GeneralRow {
+    const SERIALIZES_ATTACHMENTS: bool = true;
     fn id(&self) -> u32 {
         self.id
     }
@@ -1612,6 +1675,49 @@ mod tests {
             Err(refusal) => assert!(refusal.contains("duplicate general entity type amod:same")),
             Ok(_) => panic!("a duplicate type key froze"),
         }
+    }
+
+    #[test]
+    fn catalog_enforces_required_minecraft_feature_flags() {
+        let mut plain = declaration("amod", "amod:plain");
+        plain.required_features = Vec::new();
+        let mut redstone = declaration("amod", "amod:redstone");
+        redstone.required_features = vec![mod_api::FeatureFlag::RedstoneExperiments];
+        let mut both = declaration("amod", "amod:both");
+        both.required_features = vec![
+            mod_api::FeatureFlag::RedstoneExperiments,
+            mod_api::FeatureFlag::MinecartImprovements,
+        ];
+        let catalog = GeneralTypeCatalog::freeze(&[plain, redstone, both]).unwrap();
+        let plain_slot = catalog.slot("amod:plain").unwrap();
+        let redstone_slot = catalog.slot("amod:redstone").unwrap();
+        let both_slot = catalog.slot("amod:both").unwrap();
+
+        let vanilla_only = mod_api::FeatureFlags::new(["minecraft:vanilla".to_owned()].into());
+        assert!(catalog.is_enabled(plain_slot, &vanilla_only));
+        assert!(!catalog.is_enabled(redstone_slot, &vanilla_only));
+        assert!(!catalog.is_enabled(both_slot, &vanilla_only));
+
+        let with_redstone = mod_api::FeatureFlags::new(
+            [
+                "minecraft:vanilla".to_owned(),
+                "minecraft:redstone_experiments".to_owned(),
+            ]
+            .into(),
+        );
+        assert!(catalog.is_enabled(plain_slot, &with_redstone));
+        assert!(catalog.is_enabled(redstone_slot, &with_redstone));
+        assert!(!catalog.is_enabled(both_slot, &with_redstone));
+
+        let with_both = mod_api::FeatureFlags::new(
+            [
+                "minecraft:vanilla".to_owned(),
+                "minecraft:redstone_experiments".to_owned(),
+                "minecraft:minecart_improvements".to_owned(),
+            ]
+            .into(),
+        );
+        assert!(catalog.is_enabled(both_slot, &with_both));
     }
 
     #[test]

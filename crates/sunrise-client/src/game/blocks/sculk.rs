@@ -1303,7 +1303,7 @@ impl Game<'_> {
                         center(relative),
                         ctx,
                     );
-                    self.audio.play(
+                    self.play_audio(
                         "minecraft:block.amethyst_block.resonate",
                         Some(center(relative)),
                         1.0,
@@ -1493,7 +1493,7 @@ impl Game<'_> {
             f64::from(offset(key.1)),
             f64::from(offset(key.2)),
         ];
-        self.audio.play(sound, Some(at), 5.0, 1.0);
+        self.play_audio(sound, Some(at), 5.0, 1.0);
     }
     /// `SpawnUtil.trySpawnMob(WARDEN, TRIGGERED, level, pos, 20, 5, 6,
     /// ON_TOP_OF_COLLIDER, false)`: every candidate spot creates a warden
@@ -1541,7 +1541,7 @@ impl Game<'_> {
                 continue;
             }
             self.mobs.push(mob);
-            self.native_mobs_joined(self.mobs.len() - 1, false);
+            self.admit_new_mobs(self.mobs.len() - 1);
             return true;
         }
         false
@@ -1681,7 +1681,7 @@ impl Game<'_> {
         let effect =
             sunrise_client::effects::EffectInstance::new("darkness", warden::DARKNESS_DURATION, 0)
                 .with_flags(false, false);
-        self.apply_player_effect(effect);
+        self.add_player_effect(effect);
     }
 
     // ---- catalysts ----
@@ -1748,8 +1748,7 @@ impl Game<'_> {
             self.particles.add(&options, p, [0.0; 3]);
         }
         let pitch = 0.6 + self.world.random.next_float() * 0.4;
-        self.audio
-            .play("minecraft:block.sculk_catalyst.bloom", Some(c), 2.0, pitch);
+        self.play_audio("minecraft:block.sculk_catalyst.bloom", Some(c), 2.0, pitch);
     }
 
     // ---- particles ----
@@ -1764,8 +1763,7 @@ impl Game<'_> {
             if r.next_float() < 0.3 + count as f32 * 0.1 {
                 let volume = 0.15 + 0.02 * (count * count) as f32 * r.next_float();
                 let pitch = 0.4 + 0.3 * count as f32 * r.next_float();
-                self.audio
-                    .play("minecraft:block.sculk.charge", Some(c), volume, pitch);
+                self.play_audio("minecraft:block.sculk.charge", Some(c), volume, pitch);
             }
             let face_data = data & 63;
             let faces: Vec<(Direction, f32, f64)> = if face_data == 0 {
@@ -1809,8 +1807,7 @@ impl Game<'_> {
                 }
             }
         } else {
-            self.audio
-                .play("minecraft:block.sculk.charge", Some(c), 1.0, 1.0);
+            self.play_audio("minecraft:block.sculk.charge", Some(c), 1.0, 1.0);
             let solid = self
                 .res
                 .facts()
@@ -1877,7 +1874,7 @@ impl Game<'_> {
         let state = self.world.block(pos.x, pos.y, pos.z);
         if self.state_property(state, "waterlogged") != Some("true") {
             let pitch = 0.6 + self.particles.random().next_float() * 0.4;
-            self.audio.play_unshared(
+            self.play_audio_unshared(
                 "minecraft:block.sculk_shrieker.shriek",
                 Some([f64::from(pos.x) + 0.5, top, f64::from(pos.z) + 0.5]),
                 2.0,
@@ -3263,8 +3260,7 @@ mod shriek_capture_tests {
         let before = "minecraft:block.note_block.pling";
         let after = "minecraft:block.amethyst_block.chime";
         game.audio.capture = Some(Vec::new());
-        game.audio
-            .play_on(4, before, Some([1.5, 200.0, 4.5]), 1.0, 1.0);
+        game.play_audio_on(4, before, Some([1.5, 200.0, 4.5]), 1.0, 1.0);
         game.level_events.push(LevelEvent::LevelEvent {
             source: None,
             id: 3007,
@@ -3308,8 +3304,7 @@ mod shriek_capture_tests {
             assert_eq!(*position, [if i < 10 { 4.5 } else { 7.5 }, 200.5, 4.5]);
             assert_eq!(*velocity, [0.0; 3]);
         }
-        game.audio
-            .play_on(4, after, Some([2.5, 200.0, 4.5]), 0.5, 1.25);
+        game.play_audio_on(4, after, Some([2.5, 200.0, 4.5]), 0.5, 1.25);
         assert_eq!(game.audio.heard.get(before), Some(&1));
         assert_eq!(game.audio.heard.get(after), Some(&1));
         assert_eq!(game.world.game_time, clock);

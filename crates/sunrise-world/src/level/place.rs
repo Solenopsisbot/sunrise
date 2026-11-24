@@ -2050,17 +2050,20 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         })
     }
 
-    fn report_placement(&mut self, placed: &AppliedPlacement) {
+    fn report_placement(&mut self, placed: &AppliedPlacement, placer: Option<u32>) {
         let pos = placed.context.pos;
         let state = placed.state;
-        let own = self.b.data(state).sounds.clone();
-        let sounds = self.level.place_sound_type(pos, state, own);
+        let sound = self
+            .level
+            .override_place_sound(pos, state, placer)
+            .unwrap_or_else(|| self.b.facts(state).placement_sound.clone())
+            .for_placement(&placed.context.item);
         self.emit(LevelEvent::Sound {
             pos,
-            sound: sounds.place.clone(),
-            source: None,
-            volume: (sounds.volume + 1.0) / 2.0,
-            pitch: sounds.pitch * 0.8,
+            sound: mod_api::__private::game::sound_event_name(sound.event),
+            source: Some(super::LevelSoundSource::BlockPlacement { except: placer }),
+            volume: sound.volume,
+            pitch: sound.pitch,
         });
         self.game_event_state(pos, "minecraft:block_place", state);
     }
@@ -2186,7 +2189,7 @@ impl Behaviours {
         if placed.matches_candidate {
             sim.set_placed_by(placed.context.pos, placed.state);
         }
-        sim.report_placement(&placed);
+        sim.report_placement(&placed, None);
         placed.state = sim.state(placed.context.pos);
         Some(placed)
     }
@@ -2237,8 +2240,9 @@ impl Behaviours {
         level: &mut L,
         ticks: &mut Ticks,
         placed: &AppliedPlacement,
+        placer: Option<u32>,
     ) {
-        self.sim(level, ticks).report_placement(placed);
+        self.sim(level, ticks).report_placement(placed, placer);
     }
     /// `new BlockPlaceContext(...).canPlace()` for `input`, as `RedStoneOreBlock.useItemOn`
     /// asks it before letting a `BlockItem` through: the context resolves as `BlockItem.place`
@@ -2428,6 +2432,66 @@ mod can_place_tests {
             &mut level,
             &place_ctx(clicked, Direction::Up, "minecraft:stone", false)
         ));
+    }
+}
+
+#[cfg(test)]
+mod placement_sound_tests {
+    use super::*;
+    use crate::level::{GameplayStateSource, LevelSoundSource, data, tests::TestLevel};
+    use mod_api::SoundEventKey;
+
+    #[test]
+    fn placement_reports_the_resolved_key_and_levels_of_the_placed_state() {
+        let mut b = data::inert_support_fixture();
+        // A synthetic multi-state block: distinguish the selected state's sound from its
+        // default's without loading prepared resources or depending on block-item eligibility.
+        let default = b.default_of(b.named.water);
+        let state = b.table.set_int(default, b.props.level, 1);
+        assert_ne!(state, default);
+        let facts = serde_json::json!({"sound": {
+            "place": {"id": ":block.stone.place"}, "volume": 3.0, "pitch": 1.25
+        }});
+        b.facts[state.0 as usize].placement_sound = facts
+            .placement_sound(&mut |name| {
+                SoundEventKey::parse(name).ok_or_else(|| crate::compression::invalid(name))
+            })
+            .unwrap();
+        let mut level = TestLevel::new(&b);
+        let pos = BlockPos::new(1, 2, 1);
+        b.report_placement(
+            &mut level,
+            &mut Ticks::new(0),
+            &AppliedPlacement {
+                context: PlacementContext {
+                    pos,
+                    hit_pos: pos,
+                    face: Direction::Up,
+                    hit: Vec3::ZERO,
+                    inside: false,
+                    source: PlacementSource::Player {
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        sneaking: false,
+                    },
+                    item: "test:block_item".into(),
+                    replace_clicked: true,
+                },
+                state,
+                matches_candidate: true,
+            },
+            None,
+        );
+        assert_eq!(
+            level.events.first(),
+            Some(&LevelEvent::Sound {
+                pos,
+                sound: "minecraft:block.stone.place".into(),
+                source: Some(LevelSoundSource::BlockPlacement { except: None }),
+                volume: 2.0,
+                pitch: 1.0,
+            })
+        );
     }
 }
 

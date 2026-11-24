@@ -219,6 +219,9 @@ struct Pass {
     shadowed: bool,
     /// The first fragment a whole-module pass could not read inside an inline module.
     scope_error: Option<String>,
+    /// Every `macro_rules!` name the game crate defines: an import of one stays as written,
+    /// since only `#[macro_export]` makes such a macro public.
+    game_macros: BTreeSet<String>,
 }
 
 /// Crates whose types are the mod API's own: their fields stay private in every build.
@@ -636,6 +639,17 @@ impl Shapes {
         } else {
             Ok(BTreeMap::new())
         }
+    }
+}
+
+/// The names a `use` tree imports, before any rename: what each binding refers to.
+fn use_names(tree: &syn::UseTree) -> Vec<String> {
+    match tree {
+        syn::UseTree::Path(path) => use_names(&path.tree),
+        syn::UseTree::Name(name) => vec![name.ident.to_string()],
+        syn::UseTree::Rename(rename) => vec![rename.ident.to_string()],
+        syn::UseTree::Glob(_) => Vec::new(),
+        syn::UseTree::Group(group) => group.items.iter().flat_map(use_names).collect(),
     }
 }
 
@@ -1114,6 +1128,20 @@ impl Pass {
                     self.cfg = outer;
                     self.shadowed = outer_shadowed;
                 }
+            }
+            // A game module's restricted import, such as `pub(super) use lower::Item;` left where
+            // an item moved to a lower crate: the game's code reaches the item through it, and so
+            // do a mixin's copy of that code and the patch crate's repeated imports, so it is
+            // widened with the game's own items.
+            Item::Use(value)
+                if !test_only(&value.attrs)
+                    && module.split("::").next() == Some("sunrise_client")
+                    && matches!(value.vis, Visibility::Restricted(_))
+                    && !use_names(&value.tree)
+                        .iter()
+                        .any(|name| self.game_macros.contains(name)) =>
+            {
+                self.sources[file].public(&value.vis, value.use_token.span(), "use");
             }
             // A lower crate's import under one of its own Cargo features: the patch crate is built
             // with the game's features, so its mirror reaches the binding the prebuilt crate chose
@@ -1626,6 +1654,7 @@ fn collect(root: &Path, lists: &[(&str, String)], discovery: bool) -> Result<Pas
         ..Pass::default()
     };
     let src = root.join("crates/sunrise-client/src");
+    let mut files = Vec::new();
     for source in crate::source::game_files(&src, false)?
         .into_iter()
         .chain(std::iter::once(mod_source::modules::ModuleFile {
@@ -1636,6 +1665,26 @@ fn collect(root: &Path, lists: &[(&str, String)], discovery: bool) -> Result<Pas
         }))
     {
         let file = pass.load(&source.path)?;
+        // Inline modules' macros too: `pub(crate) use` re-exports one from anywhere in the crate.
+        fn macros(items: &[Item], out: &mut BTreeSet<String>) {
+            for item in items {
+                match item {
+                    Item::Macro(value) if value.mac.path.is_ident("macro_rules") => {
+                        out.extend(value.ident.as_ref().map(ToString::to_string));
+                    }
+                    Item::Mod(value) => {
+                        if let Some((_, items)) = &value.content {
+                            macros(items, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        macros(&pass.sources[file].parsed.items, &mut pass.game_macros);
+        files.push((file, source));
+    }
+    for (file, source) in files {
         pass.cfg = source.cfg;
         pass.items(
             file,
@@ -2490,6 +2539,38 @@ pub struct ItemStack { a: First, b: Second, c: second::Kind }
         assert!(!declared.shape_only);
         assert_eq!(declared.cfg, first.cfg);
         assert_eq!(declared.hash, first.hash);
+    }
+
+    #[test]
+    fn restricted_game_imports_widen_but_macro_imports_stay() {
+        let fixture = Fixture::new(
+            r#"mod moved {
+    pub(super) use std::collections::HashMap;
+    pub(in crate::game) use std::vec::{Vec as List, IntoIter};
+    use std::fmt;
+    macro_rules! local { () => {} }
+    pub(super) use local;
+}
+mod macros { macro_rules! shared { () => {} } pub(crate) use shared; }
+pub(crate) use macros::shared as reexported;
+"#,
+        );
+        widen_with(&fixture.0, &[]).unwrap();
+        let source = fixture.game();
+        for expected in [
+            "    pub use std::collections::HashMap;",
+            "    pub use std::vec::{Vec as List, IntoIter};",
+            "    use std::fmt;",
+            "    pub(super) use local;",
+            "pub(crate) use shared; }",
+            "pub(crate) use macros::shared as reexported;",
+        ] {
+            assert!(
+                source.contains(expected),
+                "missing {expected:?} in {source}"
+            );
+        }
+        syn::parse_file(&source).unwrap();
     }
 
     #[test]

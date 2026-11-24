@@ -185,8 +185,9 @@ naming one (`cargo install`); a tool older than that option answers with its usa
 [`tool.json`](https://github.com/sunrise-org/sunrise/releases/download/mod-tool/tool.json).
 
 [`cargo sunrise-mod release`](../how-to/publish.md#releasing) pushes a tag that runs the registry's shared
-release workflow. That workflow installs the signed `mod-tool` itself and checks it against the signed sums, so
-a release needs nothing else from this page. The mod's SDK is a separate pin.
+release workflow. Your own tool needs the `release` command, which a Nightly's tool may lack: take `mod-tool` then.
+The workflow installs the signed `mod-tool` itself and checks it against the signed sums. The mod's SDK is a
+separate pin.
 
 ## Updating the tool
 

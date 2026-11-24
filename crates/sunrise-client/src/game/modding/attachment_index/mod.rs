@@ -33,10 +33,9 @@ mod saved_entity_tests;
 impl Game<'_> {
     pub(in crate::game) fn attachment_query(
         &self,
-        namespace: &str,
-        name: &str,
+        key: &mod_api::AttachmentCaptureKey<'_>,
     ) -> Result<mod_api::AttachmentBatch, mod_api::AttachmentError> {
-        mod_api::__private::validate_attachment_use(namespace, name, false)?;
+        let (namespace, name) = key.id();
         let batch = self
             .attachment_indexes
             .get(&self.dim)
@@ -159,7 +158,7 @@ mod tests {
             default: || 0,
             codec: None,
             copy_on_death: false,
-            sync: false,
+            sync_codec: None,
         };
         with_game(|game| {
             game.options.dedicated = Some(Vec::new());
@@ -257,7 +256,7 @@ mod tests {
                 &game.attachment_indexes[&Dim::Overworld]
             ));
             assert_eq!(overworld.lock().unwrap().snapshot(&key).len(), 1);
-            game.native_levels_closing();
+            game.close_loaded_levels_for_stop();
             assert!(game.attachment_indexes.is_empty());
             assert_eq!(old.len(), 1);
             game.native_lifecycle_open_started();

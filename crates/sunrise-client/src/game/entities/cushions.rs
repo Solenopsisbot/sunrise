@@ -293,7 +293,7 @@ impl Game<'_> {
         if self.cushion_in_fire(&self.cushions[placed]) {
             self.break_cushion(placed, false);
         }
-        self.audio.play(
+        self.play_audio(
             "minecraft:entity.cushion.place",
             Some([position.x, position.y, position.z]),
             0.75,
@@ -363,7 +363,7 @@ impl Game<'_> {
         };
         self.start_riding(id);
         let p = self.cushions[i].position;
-        self.audio.play(
+        self.play_audio(
             "minecraft:entity.cushion.sit",
             Some([p.x, p.y, p.z]),
             1.0,
@@ -428,7 +428,7 @@ impl Game<'_> {
             // BlockAttachedEntity.kill, before dropItem.
             self.entity_killed_event_by([p.x, p.y, p.z], source);
         }
-        self.audio.play(
+        self.play_audio(
             "minecraft:entity.cushion.break",
             Some([p.x, p.y, p.z]),
             1.0,
@@ -497,7 +497,7 @@ impl Game<'_> {
             tint,
         );
         self.particles
-            .send_particles(&options, particle_at, [0.25, 0.0625, 0.25], 0.05, 10);
+            .send_particles(&options, particle_at, [0.25, 0.0625, 0.25], 0.05, 10, None);
     }
 
     /// `BlockAttachedEntity.tick`: survive and burn checks after the post-increment reaches 100.
@@ -579,7 +579,7 @@ impl Game<'_> {
             p.velocity = Vec3::ZERO;
             p.fall_distance = 0.0;
         }
-        self.audio.play(
+        self.play_audio(
             "minecraft:entity.cushion.get_up",
             Some([c.position.x, c.position.y, c.position.z]),
             1.0,

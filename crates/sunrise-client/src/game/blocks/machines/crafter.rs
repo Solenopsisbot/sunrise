@@ -215,7 +215,7 @@ impl Game<'_> {
                     this: Some(&me),
                     origin: me.position,
                     tool: None,
-                    block_pos: None,
+                    event_block: None,
                     target: None,
                     interacting: None,
                 };
@@ -409,8 +409,7 @@ impl Game<'_> {
             ));
         }
         let pitch = if enabled { 1.0 } else { 0.75 };
-        self.audio
-            .play("minecraft:ui.button.click", None, 0.4, pitch);
+        self.play_audio("minecraft:ui.button.click", None, 0.4, pitch);
     }
 }
 

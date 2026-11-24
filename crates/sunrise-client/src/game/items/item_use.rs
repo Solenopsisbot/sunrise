@@ -193,7 +193,7 @@ impl Game<'_> {
     /// a `native_use_duration` above 0. Its use is its own `Item.use`.
     pub(super) fn mod_use(&self, stack: &ItemStack) -> bool {
         let info = self.items().get(&stack.item);
-        !stack.item.starts_with("minecraft:")
+        mod_api::__private::is_content_item(&stack.item)
             && info.is_some()
             && self.consumable(stack).is_none()
             && !self.stack_carries_blocks_attacks(stack, info)
@@ -227,12 +227,15 @@ impl Game<'_> {
     /// `ServerPlayer.completeUsingItem` of `stack` in `slot`: the client is
     /// told, `ItemStack.finishUsingItem` (a consumable is eaten, a potion
     /// drunk, a spyglass lowered, anything else given back) with its use
-    /// cooldown, then `LivingEntityUseItemEvent.Finish`.
+    /// cooldown, then `LivingEntityUseItemEvent.Finish`, then `stopUsingItem`'s
+    /// vibration and `on_stop_using`, nothing left of the use.
     pub(super) fn complete_using_item(&mut self, slot: usize, stack: &ItemStack, info: &ItemInfo) {
+        let hand = hand_of(Some((slot, 0))).unwrap_or(self.hand);
         // a potion is drunk (no last tick of its own: a mod's tick ran it out).
         if self.finish_drinking(slot, stack) {
             self.use_item_finished(stack);
             self.use_vibration(stack, "minecraft:item_interact_finish");
+            self.stopped_using(stack, None, hand, 0);
             return;
         }
         self.using = None;
@@ -246,6 +249,7 @@ impl Game<'_> {
         self.use_item_finished(stack);
         // `LivingEntity.completeUsingItem` ends with `stopUsingItem`.
         self.use_vibration(stack, "minecraft:item_interact_finish");
+        self.stopped_using(stack, None, hand, 0);
     }
     /// `LivingEntityUseItemEvent.Finish` after `finishUsingItem` of `stack`
     /// (no ticks left): the hand holds what a mod made the result.
@@ -265,7 +269,8 @@ impl Game<'_> {
     /// the slot; the server's inventory update replaces either. Finishing a use
     /// sends no creative packet in vanilla (its inventory-slot edits go out
     /// through the open creative screen's `CreativeInventoryListener`), so the
-    /// slot counts as synced for this client's creative sync.
+    /// slot counts as synced for this client's creative sync. `stopUsingItem`
+    /// ends it: `on_stop_using`, the use already taken.
     pub(super) fn remote_use_item_finished(
         &mut self,
         slot: usize,
@@ -286,6 +291,7 @@ impl Game<'_> {
         }
         *self.stack_in_mut(slot) = result.filter(|s| s.count > 0);
         self.remote_synced_since(&before);
+        self.stopped_using(stack, None, hand, 0);
     }
     /// What `Item.finishUsingItem` leaves in the hand on a server's client: a
     /// stack that is not a consumable stays as it is (a spyglass); a
@@ -384,23 +390,7 @@ impl Game<'_> {
                 Some(item) if item.item != stack.item => (item, true),
                 _ => (stack, game.use_hand_changed(slot)),
             };
-            let player = (!mod_api::__private::mods().is_empty()).then(|| {
-                let name = game.acting_player_name().to_owned();
-                (game.native_acting_id(), name)
-            });
-            if let Some((uuid, name)) = &player
-                && !hand_changed
-                && &*stack.item == "minecraft:bow"
-                && let Some(arrow) = game
-                    .projectile_slot("minecraft:bow")
-                    .and_then(|slot| game.stack_in(slot).map(|s| s.item.clone()))
-            {
-                game.native_player_ready_arrow(*uuid, name, &arrow);
-            }
             game.release_used_item(&stack, ticks, hand_changed);
-            if let Some((uuid, name)) = &player {
-                game.native_player_stop_using_item(*uuid, name);
-            }
             true
         })
     }
@@ -497,7 +487,8 @@ impl Game<'_> {
         true
     }
     /// `LivingEntity.releaseUsingItem` of mob `id`: a mod's `Stop` and
-    /// `Item.releaseUsing`, the use over before them as for a player. A bow's
+    /// `Item.releaseUsing`, the use over before them as for a player, then
+    /// `stopUsingItem`'s vibration and `on_stop_using`. A bow's
     /// and a trident's own release ask for a player, and a use cooldown too
     /// (`UseCooldown.apply`). False when no use runs.
     pub(super) fn release_mob_using_item(&mut self, id: u32) -> bool {
@@ -522,6 +513,7 @@ impl Game<'_> {
             self.native_release_using(&stack, entity, remaining, &mut false);
         }
         self.mob_use_vibration(id, &stack, "minecraft:item_interact_finish");
+        self.stopped_using(&stack, entity, hand, remaining);
         true
     }
     /// `Player.canEat(canAlwaysEat)` for `stack`, food that is eaten only
@@ -1803,7 +1795,7 @@ pub(super) mod interact_vibration_tests {
         );
         game.reset_entity_residency();
         game.native_lifecycle
-            .begin_open(mod_api::Authority::IntegratedServer);
+            .begin_open(Some(mod_api::Authority::IntegratedServer));
         super::super::native_entity_refs::tests::bind_local_player(&mut game, 41, 123);
         *game.held_mut() = Some(ItemStack::new(held, 1));
         crate::game::dispense_fixture::start_recording();
@@ -1949,7 +1941,7 @@ pub(super) mod interact_vibration_tests {
                 game.world
                     .chunks
                     .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
-                game.with_level(|b, level, _| {
+                let cake = game.with_level(|b, level, _| {
                     let cake = b
                         .table
                         .default_state(b.table.block_by_name("minecraft:cake").unwrap());
@@ -1961,6 +1953,7 @@ pub(super) mod interact_vibration_tests {
                         )
                         .is_some()
                     );
+                    cake
                 });
                 let hit = super::super::Hit {
                     pos: [0, 64, 0],
@@ -1969,9 +1962,17 @@ pub(super) mod interact_vibration_tests {
                     inside: false,
                 };
                 let held = game.held().cloned();
-                let (result, (changes, _)) =
-                    game.remote_block_template(&hit, held.as_ref(), true, true);
-                assert_eq!(result, sunrise_world::level::InteractionResult::Success);
+                let (result, (changes, _)) = game.remote_block_template(
+                    &hit,
+                    cake,
+                    held.as_ref(),
+                    Some(sunrise_world::level::UseBranch::WithoutItem),
+                    true,
+                );
+                assert_eq!(
+                    result,
+                    Some(sunrise_world::level::InteractionResult::Success)
+                );
                 assert_eq!(changes.len(), 1, "the client predicts a bitten cake");
                 let bitten = game.with_level(|b, _, _| {
                     let cake = b
@@ -2274,5 +2275,97 @@ pub(super) mod interact_vibration_tests {
         }) else {
             panic!("prepared resources failed to load")
         };
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn admitted_minecraft_and_custom_items_start_and_complete_timed_native_use() {
+        use crate::game::native_entity_refs::tests::{run_fresh_cases, with_game_at};
+        use mod_api::{
+            Hooks, Host, HostSide, ItemPart, ItemsEvent, LivingEntityUseItemFinishEvent, ModEntry,
+            Mods, Registrar, RegistrationContext, UseDurationEvent,
+        };
+        use std::sync::{Arc, Mutex};
+
+        if run_fresh_cases(
+            "game::item_use::interact_vibration_tests::admitted_minecraft_and_custom_items_start_and_complete_timed_native_use",
+            "SUNRISE_MINECRAFT_ITEM_USE_CHILD",
+            &["valid"],
+        ) {
+            return;
+        }
+
+        const MC_ITEM: &str = "minecraft:p3_04_wand";
+        const ALT_ITEM: &str = "p3_04_use:wand";
+        const BUILTIN_ITEM: &str = "minecraft:stick";
+
+        #[derive(Clone)]
+        struct TimedUseMod(Arc<Mutex<Vec<String>>>);
+        #[mod_api::__subscriptions]
+        impl Hooks for TimedUseMod {
+            fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+                for id in [MC_ITEM, ALT_ITEM, BUILTIN_ITEM] {
+                    let key = r.item_key(id);
+                    r.item_part(key, self.clone());
+                }
+            }
+            fn items(&self, _: &RegistrationContext, event: &mut ItemsEvent<'_>) {
+                for id in [MC_ITEM, ALT_ITEM] {
+                    event
+                        .register(mod_api::Item::new(id, BUILTIN_ITEM))
+                        .unwrap();
+                }
+            }
+            fn living_entity_use_item_finish(
+                &self,
+                _: HostSide<'_>,
+                event: &mut LivingEntityUseItemFinishEvent<'_>,
+            ) {
+                if let Some(id) = mod_api::__private::item_key_id(event.stack.item()) {
+                    self.0.lock().unwrap().push(id.to_owned());
+                }
+            }
+        }
+        #[mod_api::sunrise_part]
+        impl ItemPart for TimedUseMod {
+            fn use_duration(&self, _: &dyn Host, event: &mut UseDurationEvent<'_>) {
+                event.duration = 4;
+            }
+        }
+
+        let finished = Arc::new(Mutex::new(Vec::new()));
+        let mods: Mods = vec![ModEntry::new(
+            "p3_04_use",
+            Box::new(TimedUseMod(finished.clone())),
+        )]
+        .into();
+        mod_platform::__private::install(mods.clone());
+        crate::game::api_values::install_parts(&mods).unwrap();
+        let base = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
+        let root = crate::game::mods::content_root(&base, &Default::default()).unwrap();
+        with_game_at(root.prepared().to_path_buf(), |game| {
+            game.options.dedicated = Some(Vec::new());
+            // Built-in vanilla items keep their normal path even when use_duration is non-zero.
+            let stick = ItemStack::new(BUILTIN_ITEM, 1);
+            game.inventory[game.selected] = Some(stick.clone());
+            assert_eq!(game.use_duration(&stick), 4);
+            assert!(!game.mod_use(&stick));
+            assert!(!game.start_mod_use(&stick));
+            assert!(game.using.is_none());
+
+            for id in [MC_ITEM, ALT_ITEM] {
+                let stack = ItemStack::new(id, 1);
+                game.inventory[game.selected] = Some(stack.clone());
+                assert!(game.mod_use(&stack), "{id}");
+                assert!(game.start_mod_use(&stack), "{id}");
+                assert_eq!(game.using, Some((game.selected, 0)), "{id}");
+                assert_eq!(game.use_duration, 4, "{id}");
+                for ticks in 0..4 {
+                    game.tick_mod_use(game.selected, ticks, &stack);
+                }
+                assert!(game.using.is_none(), "{id} should complete after 4 ticks");
+            }
+            assert_eq!(*finished.lock().unwrap(), [MC_ITEM, ALT_ITEM]);
+        });
     }
 }

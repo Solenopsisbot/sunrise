@@ -6,7 +6,7 @@ use crate::game::{
     Dim, Game, api_values::test_snapshot, dispense_fixture,
     native_entity_refs::tests::run_fresh_cases, transactions::After,
 };
-use mod_api::{prelude::ItemsServerHost, *};
+use mod_api::*;
 use std::sync::{Arc, Mutex};
 use sunrise_client::{chunk::Chunk, items::ItemStack};
 use sunrise_core::{
@@ -351,7 +351,7 @@ fn with_dispenser_notices(notices: Notices, test: impl FnOnce(&mut Game<'_>, Lev
                 .chunks
                 .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
             game.native_lifecycle
-                .begin_open(mod_api::Authority::IntegratedServer);
+                .begin_open(Some(mod_api::Authority::IntegratedServer));
             let stone = state(game, "minecraft:stone");
             for x in 0..16 {
                 for z in 0..16 {
@@ -413,6 +413,90 @@ fn item(stack: &Option<ItemStack>) -> Option<(String, u32)> {
     stack
         .as_ref()
         .map(|stack| (stack.item.to_string(), stack.count))
+}
+
+#[test]
+#[ignore = "daily"]
+fn dispenser_writes_follow_the_parked_level_handle() {
+    use crate::game::{Dim, native_entity_refs::tests::run_fresh_cases};
+
+    if run_fresh_cases(
+        "game::dispense_container_tests::dispenser_writes_follow_the_parked_level_handle",
+        "SUNRISE_DISPENSE_ROUTE_CHILD",
+        &["parked"],
+    ) {
+        return;
+    }
+    with_dispenser(|game, level| {
+        let key = game
+            .item_key(&Identifier::parse("minecraft:bucket").unwrap())
+            .unwrap();
+        let filled = game
+            .item_key(&Identifier::parse("minecraft:water_bucket").unwrap())
+            .unwrap();
+        let stack = mod_api::ItemStack::new(key, 2).unwrap();
+        let remainder = mod_api::ItemStack::of(filled);
+        let chest_at = [8, 64, 8];
+        let chest = state(game, "minecraft:chest");
+        assert_eq!(
+            game.level_set_block(level, chest_at, chest, BlockUpdateFlags::NONE),
+            Ok(true)
+        );
+        game.enter_command_level(Dim::Nether).unwrap();
+        assert_eq!(
+            level.dispense_default(game, [32, 64, 32], Direction::East, stack.clone()),
+            Err(LevelWriteError::InvalidDispenser)
+        );
+        assert_eq!(
+            level.dispense_with_remainder(
+                game,
+                [32, 64, 32],
+                Direction::East,
+                stack.clone(),
+                remainder.clone()
+            ),
+            Err(LevelWriteError::InvalidDispenser)
+        );
+        assert_eq!(
+            level.dispense_with_remainder(
+                game,
+                chest_at,
+                Direction::East,
+                stack.clone(),
+                remainder.clone()
+            ),
+            Err(LevelWriteError::InvalidDispenser)
+        );
+        assert_eq!(
+            level.dispense_default(game, chest_at, Direction::East, stack.clone()),
+            Err(LevelWriteError::InvalidDispenser)
+        );
+        let left = level
+            .dispense_default(game, DISPENSER, Direction::East, stack.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!((left.item(), left.count()), (key, 1));
+        let left = level
+            .dispense_with_remainder(game, DISPENSER, Direction::East, stack, remainder)
+            .unwrap()
+            .unwrap();
+        assert_eq!((left.item(), left.count()), (key, 1));
+        assert_eq!(game.dim, Dim::Nether);
+        assert!(game.dropped.is_empty());
+
+        game.enter_command_level(Dim::Overworld).unwrap();
+        assert_eq!(game.dropped.len(), 1);
+        assert_eq!(&*game.dropped[0].stack.item, "minecraft:bucket");
+        let dispenser = game
+            .world
+            .block_entities
+            .get(&(DISPENSER[0], DISPENSER[1], DISPENSER[2]))
+            .unwrap();
+        assert_eq!(
+            item(&dispenser.slots()[0]),
+            Some(("minecraft:water_bucket".into(), 1))
+        );
+    });
 }
 
 #[test]
@@ -658,7 +742,7 @@ fn nested_dispense_settles_in_the_command_source_level() {
             .slots_mut()[0] = Some(marker.clone());
         let mut source = game.server_source();
         source.dimension = Dim::Nether;
-        game.with_source(source, |game| {
+        game.with_source(source.clone(), |game| {
             game.world
                 .chunks
                 .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
@@ -677,28 +761,24 @@ fn nested_dispense_settles_in_the_command_source_level() {
 
         let dispense = |game: &mut Game<'_>| {
             game.storage_transaction(|game, _| {
+                let nether = game.level(Dim::Nether.id()).unwrap();
                 let stick = ItemStack::new("minecraft:stick", 1);
                 let stack = test_snapshot(&ItemStack::new("minecraft:bucket", 2));
                 for rest in [&stick, &ItemStack::new("minecraft:dirt", 1)] {
-                    let left = ItemsServerHost::dispense_with_remainder(
-                        game,
-                        Dim::Nether.id(),
-                        DISPENSER,
-                        Direction::East,
-                        stack.clone(),
-                        test_snapshot(rest),
-                    )
-                    .unwrap();
+                    let left = nether
+                        .dispense_with_remainder(
+                            game,
+                            DISPENSER,
+                            Direction::East,
+                            stack.clone(),
+                            test_snapshot(rest),
+                        )
+                        .unwrap();
                     assert_eq!(left.unwrap().count(), 1);
                 }
-                let left = ItemsServerHost::dispense_default(
-                    game,
-                    Dim::Nether.id(),
-                    DISPENSER,
-                    Direction::East,
-                    stack,
-                )
-                .unwrap();
+                let left = nether
+                    .dispense_default(game, DISPENSER, Direction::East, stack)
+                    .unwrap();
                 assert_eq!(left.unwrap().count(), 1);
                 assert_eq!(
                     game.world.block_entities.get(&SLOT_POS).unwrap().slots()[0],
@@ -712,7 +792,7 @@ fn nested_dispense_settles_in_the_command_source_level() {
 
         // A child remains tentative while a transaction in the dispenser's own level is open.
         dispense_fixture::start_recording();
-        game.with_source(source, |game| {
+        game.with_source(source.clone(), |game| {
             let outcome = game.storage_transaction(|game, _| {
                 dispense(game);
                 assert!(notices.lock().unwrap().is_empty());
@@ -739,7 +819,7 @@ fn nested_dispense_settles_in_the_command_source_level() {
                 .unwrap()
                 .slots_mut()[0] = None;
             game.after_commit(After::Changed(SLOT_POS));
-            game.with_source(source, dispense);
+            game.with_source(source.clone(), dispense);
             assert_eq!(*notices.lock().unwrap(), [DimensionKey::NETHER]);
             Err::<(), _>(())
         });
@@ -780,7 +860,7 @@ fn nested_dispense_container_publishes_fluid_changes_only_in_the_source_level() 
     }
     with_dispenser_notices(Notices::default(), |game, _, notices| {
         let overworld = game.server_source();
-        let mut nether = overworld;
+        let mut nether = overworld.clone();
         nether.dimension = Dim::Nether;
         let [x, y, z] = FRONT;
         let pos = BlockPos::new(x, y, z);
@@ -789,7 +869,7 @@ fn nested_dispense_container_publishes_fluid_changes_only_in_the_source_level() 
                 .fluids
                 .has_scheduled(pos, TickTypeId(FluidKind::Water.tick_id()))
         };
-        game.with_source(nether, |game| {
+        game.with_source(nether.clone(), |game| {
             game.world
                 .chunks
                 .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
@@ -851,11 +931,11 @@ fn nested_dispense_container_publishes_fluid_changes_only_in_the_source_level() 
             game.world.set(x, y, z, before).unwrap();
             game.world.block_log = Some(Vec::new());
             game.block_ticks.add_empty_chunk(pos.chunk()).unwrap();
-            game.with_source(nether, |game| {
+            game.with_source(nether.clone(), |game| {
                 for commit in [false, true] {
                     dispense_fixture::start_recording();
                     let outcome = game.storage_transaction(|game, _| {
-                        game.with_source(overworld, |game| {
+                        game.with_source(overworld.clone(), |game| {
                             let source = game.storage_transaction(|game, _| {
                                 let (left, _) = dispense_part(game, input);
                                 let expected = test_snapshot(&ItemStack::new(output, 1));
@@ -887,7 +967,7 @@ fn nested_dispense_container_publishes_fluid_changes_only_in_the_source_level() 
                     assert!(game.world.block_log.as_ref().unwrap().is_empty());
                     assert!(!water_tick(game));
                     assert!(game.dropped.is_empty());
-                    game.with_source(overworld, |game| {
+                    game.with_source(overworld.clone(), |game| {
                         assert_eq!(front(game), if commit { after } else { before });
                         let log = game.world.block_log.as_ref().unwrap();
                         assert_eq!(
@@ -924,7 +1004,7 @@ fn a_transaction_in_the_fluid_pickup_listener_does_not_delay_later_attachment_re
         default: || 0,
         codec: None,
         copy_on_death: false,
-        sync: false,
+        sync_codec: None,
     };
     let notices = Notices {
         reopen_on_pickup: true,
@@ -942,11 +1022,11 @@ fn a_transaction_in_the_fluid_pickup_listener_does_not_delay_later_attachment_re
             .unwrap();
         set_front(game, "minecraft:water");
         let overworld = game.server_source();
-        let mut nether = overworld;
+        let mut nether = overworld.clone();
         nether.dimension = Dim::Nether;
         game.with_source(nether, |game| {
             game.storage_transaction(|game, _| {
-                game.with_source(overworld, |game| {
+                game.with_source(overworld.clone(), |game| {
                     let (left, _) = dispense_part(game, "minecraft:bucket");
                     assert_eq!(
                         left,

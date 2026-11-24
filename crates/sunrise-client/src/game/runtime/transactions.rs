@@ -21,7 +21,8 @@
 //! or a parked guest's record. On abort, the journal follows that storage through guest turns.
 //! An item a write drops from a player waits for
 //! the root commit too. Item entities keep their stack, pickup delay, target and velocity on
-//! first write; one emptied stays, empty, until the root commit removes it. General entity views
+//! first write. An item place drained by extraction is removed at root commit if still empty;
+//! `ItemEntity.setItem` alone leaves an empty item for the tick to discard. General entity views
 //! keep velocity, rotation and fall distance on first write. A guest's menu storage (ender chest,
 //! crafting grid, a mod's chest menu) is kept whole on its first write through a menu slot; a
 //! crafting grid changed by the transaction has its result made again at the root commit.
@@ -36,8 +37,8 @@ use super::{
     maps::MapData,
 };
 use mod_api::{
-    __private::TransactionFrame, LevelRef, TransactionContext, TransactionLifecycle,
-    TransactionScopeError,
+    __private::TransactionFrame, LevelRef, PlayerRef, RecipeBookTypeKey, TransactionContext,
+    TransactionLifecycle, TransactionScopeError,
 };
 use std::collections::{BTreeMap, HashMap};
 use sunrise_client::{
@@ -48,6 +49,7 @@ use sunrise_client::{
     living_attributes::ModifierChanges,
     menu::QuickCraftDrag,
     mobs::{Mob, StoredEffect, finalize::EffectModifierUndo, gear::Gear},
+    recipe_book::BookFlags,
     world::{BlockEntityExtras, ModifiedChunks, World},
 };
 use sunrise_core::{geometry::Vec3, position::BlockPos, random::LegacyRandom};
@@ -109,6 +111,7 @@ pub(super) struct OpenTransactions {
     closing: Option<TransactionLifecycle>,
     /// Implicit container notices waiting for this quick move's source settlement.
     quick_move_notices: Option<Vec<QuickMoveNotice>>,
+    pub(super) menu_publications: HashMap<u32, super::lan_menus::MenuPublications>,
     /// How many writes the journals have been asked to keep, ever: a whole-state epoch that no
     /// restore moves back. A decision that read a player's inventory or a container's slots
     /// compares it before and after its listeners ran; an equal rewrite counts as a write.
@@ -126,6 +129,8 @@ pub(super) struct OpenTransactions {
     /// kept in sync with open transaction frames so mutations roll back on abort.
     retained_original_attachments:
         Vec<std::sync::Arc<std::sync::Mutex<super::original_player::OriginalAttachmentSlot>>>,
+    /// Negative staged-open identity counter (`i32::MIN..=-1`), separate from live protocol ids.
+    staged_menu_open: i32,
     #[cfg(test)]
     pub(in crate::game) trace: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
 }
@@ -224,6 +229,7 @@ impl OpenTransactions {
             level.block_entities.entry(pos).or_insert_with(|| Kept {
                 entity: Some(BlockEntity::Mod(Box::new(loan.entity.clone()))),
                 client_update_fields: loan.entity.snapshot_client_update_fields(),
+                taken: None,
                 generation: Some(loan.identity.generation),
                 attachments: loan.attachments.cloned(),
                 hopper,
@@ -264,6 +270,15 @@ impl OpenTransactions {
     /// The journaled-write epoch of players' own state.
     pub(in crate::game) fn player_writes(&self) -> u64 {
         self.player_writes
+    }
+    /// Allocates a negative staged-open identity that never overlaps live protocol window
+    /// ids (`0` for inventory, `1..=100` for `ServerPlayer.nextContainerCounter`).
+    pub(in crate::game) fn next_staged_menu_open(&mut self) -> i32 {
+        self.staged_menu_open = match self.staged_menu_open.checked_sub(1) {
+            Some(next) if next < 0 => next,
+            _ => -1,
+        };
+        self.staged_menu_open
     }
 }
 
@@ -321,6 +336,7 @@ pub(super) struct StrictBlockStep {
     pub(super) to: BlockStateId,
     // Before the first replacement on this cell; swapped for the new row at commit.
     pub(super) row: Option<Option<RemovedRow>>,
+    /// A strict replacement ends the old block's connection-group lifetime.
     pub(super) clear_connection_group: bool,
 }
 
@@ -405,6 +421,9 @@ pub(super) struct Level {
     /// Saved player extra NBT (`level.player_extra` / `guest.saved`), shared by player and
     /// persistent-data writes, including dead players.
     player_extra: HashMap<JournaledPlayer, Option<sunrise_core::nbt::Tag>>,
+    /// Each affected custom book's saved flags (or absence), in first-write order.
+    player_books:
+        indexmap::IndexMap<(JournaledPlayer, RecipeBookTypeKey), (PlayerRef, Option<BookFlags>)>,
     /// Synced player health and its unpublished update events before set_health, by player body.
     player_health: HashMap<PlayerBodyKey, KeptPlayerHealth>,
     /// Mob health and synchronization dirtiness before set_health, keyed by level.
@@ -453,6 +472,8 @@ pub(super) struct Level {
     /// admission gate (`passes_settled`) refuses a save while a map may hold tentative
     /// values, which only the root commit makes saveable.
     save_gate: Option<sunrise_client::join_seq::visibility::PassLease>,
+    /// Strict edits and saved pots hold the save gate with their owning level's journal.
+    level_save_gate: Option<sunrise_client::join_seq::visibility::PassLease>,
     /// Each chunk's unsaved mark and save queue entry before this transaction first reached an
     /// attachment map in it: an abort puts them back, so a chunk only a tentative write marked
     /// is clean again.
@@ -521,6 +542,7 @@ struct Kept {
     entity: Option<BlockEntity>,
     /// The pre-write batch, stored apart from the entity clone's fresh identity.
     client_update_fields: Option<sunrise_core::nbt::Compound>,
+    taken: Option<sunrise_client::block_entities::TakenLeaseSnapshot>,
     generation: Option<u64>,
     /// None where it had no map: an abort removes one a write made.
     attachments: Option<Attachments>,
@@ -541,6 +563,7 @@ impl Kept {
         let entity = world.block_entities.get(&pos);
         Self {
             entity: entity.cloned(),
+            taken: world.block_entities.taken_lease_snapshot(&pos),
             client_update_fields: match entity {
                 Some(BlockEntity::Mod(entity)) => entity.snapshot_client_update_fields(),
                 _ => None,
@@ -587,7 +610,7 @@ struct KeptMobEffects {
 /// Storage identity, not a public player handle. Fake players in different levels
 /// can share a UUID; their hub connections still distinguish their records.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum JournaledPlayer {
+pub(super) enum JournaledPlayer {
     Local(u128),
     Guest(u32),
 }
@@ -635,12 +658,11 @@ struct KeptMenus {
 pub(super) enum After {
     /// Reserved raw bytes publish only when their connection incarnation is still live.
     Payload(super::payload_transport::Deferred),
-    /// A mod's validated vanilla packet, bound to its physical protocol incarnation.
-    Packet(
-        sunrise_client::net::PreparedPacket,
-        mod_api::ServerboundPlayPacket,
-    ),
+    /// A mod's validated vanilla packet, bound to its physical protocol incarnation,
+    /// and the submitting identity for publication errors.
+    Packet(sunrise_client::net::PreparedPacket, Option<&'static str>),
     Composter(super::composter::Effects),
+    DispenseEvent(i32, Pos, i32),
     /// A mod's world pickup or placement of fluid, its block already set: what is left of it
     /// (`Game::commit_fluid_write`).
     FluidWrite(Box<super::world_fluids::WrittenFluid>),
@@ -683,6 +705,7 @@ pub(super) enum After {
         equips: bool,
     },
     MenuClick(Box<super::lan_menus::MenuClickReply>),
+    MenuOpen(u32, i32, Box<super::native_menus::PendingMenuOpen>),
     MenuPlacesNotice(u32, u128, i32),
     FurnaceMenu(Box<super::lan_crafting::FurnaceMenuEffects>),
     StoreCartItems(Pos),
@@ -710,9 +733,10 @@ pub(super) enum After {
     BlockGameEvent(
         &'static str,
         [i32; 3],
-        sunrise_client::mobs::Who,
+        Option<sunrise_client::mobs::Who>,
         BlockStateId,
     ),
+    BlockDropSpawns(Vec<super::spill::Spawn>, Vec<([f64; 3], u32, i32)>),
     /// Save, remesh and resend a changed biome column.
     Biome((i32, i32)),
     /// Deferred interaction effects, replayed in the same root-commit order.
@@ -746,6 +770,13 @@ pub(super) enum After {
         eye: [f64; 3],
     },
     PlayerEquip(u128, String, Option<ItemStack>),
+    /// The journal's original flags, for one publication of the current committed pair.
+    RecipeBookSettings(
+        JournaledPlayer,
+        PlayerRef,
+        RecipeBookTypeKey,
+        Option<BookFlags>,
+    ),
     /// An item split off an item entity, dropped where it is (`Block.popResource`'s delay).
     Spawn([f64; 3], ItemStack),
     /// The item entity with this id was emptied: removed, unless it holds items again.
@@ -770,6 +801,7 @@ impl After {
             Self::Block(_)
                 | Self::BulkBlocks(..)
                 | Self::ConnectionGroup(..)
+                | Self::DispenseEvent(..)
                 | Self::Changed(_)
                 | Self::ChangedWithoutHook(_)
                 | Self::ChangedHolder { .. }
@@ -780,6 +812,7 @@ impl After {
                 | Self::DispenserDrop { .. }
                 | Self::DispenserFeedback { .. }
                 | Self::BlockGameEvent(..)
+                | Self::BlockDropSpawns(..)
                 | Self::Biome(_)
                 | Self::Drop(..)
                 | Self::Spawn(..)
@@ -833,6 +866,8 @@ impl Level {
     }
 
     pub(super) fn keep_bulk_block(&mut self, pos: Pos, state: u32) {
+        self.level_save_gate
+            .get_or_insert_with(sunrise_client::join_seq::visibility::PassLease::enter);
         self.blocks
             .entry(pos)
             .and_modify(|kept| kept.strict = true)
@@ -848,6 +883,7 @@ impl Level {
     }
 
     fn merge_level_writes(&mut self, child: &mut Self) {
+        self.level_save_gate = self.level_save_gate.take().or(child.level_save_gate.take());
         for (pos, biome) in std::mem::take(&mut child.biomes) {
             self.biomes.entry(pos).or_insert(biome);
         }
@@ -1012,28 +1048,30 @@ impl<'g> Game<'g> {
 
     /// Opens a transaction and gives back its frame identity.
     pub(in crate::game) fn open_storage_transaction(&mut self) -> TransactionFrame {
-        let frame = self.transactions.next_frame();
-        if !self.world.block_entities.defers_retirement() {
-            self.world.block_entities.defer_retirement();
-        }
-        let lifetimes = self.entity_journal_open();
-        let parent_attachment_query_scope = self.transactions.attachment_query_scopes.enter();
-        self.transactions.push(Level {
-            frame: Some(frame),
-            parent_attachment_query_scope,
-            dimension: Some(self.dim),
-            packets: sunrise_client::lan::conn::transaction_packets::Scope::nested(),
-            lifetimes,
-            ..Level::default()
-        });
-        for slot in &self.transactions.retained_original_attachments {
-            slot.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .open_frame(frame);
-        }
-        #[cfg(test)]
-        self.trace_storage_attempt("open".into());
-        frame
+        mod_api::__private::game::CallbackOwner::call_host(|| {
+            let frame = self.transactions.next_frame();
+            if !self.world.block_entities.defers_retirement() {
+                self.world.block_entities.defer_retirement();
+            }
+            let lifetimes = self.entity_journal_open();
+            let parent_attachment_query_scope = self.transactions.attachment_query_scopes.enter();
+            self.transactions.push(Level {
+                frame: Some(frame),
+                parent_attachment_query_scope,
+                dimension: Some(self.dim),
+                packets: sunrise_client::lan::conn::transaction_packets::Scope::nested(),
+                lifetimes,
+                ..Level::default()
+            });
+            for slot in &self.transactions.retained_original_attachments {
+                slot.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .open_frame(frame);
+            }
+            #[cfg(test)]
+            self.trace_storage_attempt("open".into());
+            frame
+        })
     }
     /// Closes `frame`, first aborting every transaction opened inside it and left open, so a
     /// scope closing its own is never stranded behind an abandoned child.
@@ -1042,17 +1080,19 @@ impl<'g> Game<'g> {
         frame: TransactionFrame,
         commit: bool,
     ) -> Option<StorageSettlement> {
-        let at = self
-            .transactions
-            .iter()
-            .rposition(|level| level.frame == Some(frame))?;
-        if self.transactions.len() > at + 1 {
-            log::warn!("Sunrise: aborted a transaction left open inside the one being closed");
-        }
-        while self.transactions.len() > at + 1 {
-            let _ = self.close_storage_transaction(false);
-        }
-        self.close_storage_transaction(commit)
+        mod_api::__private::game::CallbackOwner::close_host_transaction(commit, |commit| {
+            let at = self
+                .transactions
+                .iter()
+                .rposition(|level| level.frame == Some(frame))?;
+            if self.transactions.len() > at + 1 {
+                log::warn!("Sunrise: aborted a transaction left open inside the one being closed");
+            }
+            while self.transactions.len() > at + 1 {
+                let _ = self.close_storage_transaction(false);
+            }
+            self.close_storage_transaction(commit)
+        })
     }
     /// An engine batch opens a frame only when it has a callback to journal.
     pub(super) fn storage_scope_guard(&mut self, open: bool) -> StorageScope<'_, 'g> {
@@ -1361,6 +1401,7 @@ impl<'g> Game<'g> {
                     item_entities: std::mem::take(&mut level.item_entities),
                     general_entities: std::mem::take(&mut level.general_entities),
                     chunk_marks: std::mem::take(&mut level.chunk_marks),
+                    level_save_gate: level.level_save_gate.take(),
                     biomes: std::mem::take(&mut level.biomes),
                     after: level
                         .after
@@ -1451,6 +1492,9 @@ impl<'g> Game<'g> {
                 }
                 for (owner, kept) in level.player_extra {
                     outer.player_extra.entry(owner).or_insert(kept);
+                }
+                for (owner, kept) in level.player_books {
+                    outer.player_books.entry(owner).or_insert(kept);
                 }
                 for (conn, kept) in level.menus {
                     outer.menus.entry(conn).or_insert(kept);
@@ -1605,15 +1649,15 @@ impl<'g> Game<'g> {
                 .entry(pos)
                 .or_insert_with(|| super::spill::saved_entity(&self.world, [pos.0, pos.1, pos.2]));
             level
-                .save_gate
+                .level_save_gate
                 .get_or_insert_with(sunrise_client::join_seq::visibility::PassLease::enter);
         }
     }
 
-    /// An unseeded pot loot table may draw from either the level or a named stream.
+    /// Block or container loot may draw from either the level or a named stream.
     pub(super) fn journal_block_loot_random(&mut self) {
         self.journal_level_random();
-        if let Some(level) = self.transactions.last_mut() {
+        if let Some(level) = entities::open_in(&mut self.transactions, self.dim) {
             level
                 .loot_sequences
                 .get_or_insert_with(|| self.rand_sequences.clone());
@@ -1901,6 +1945,25 @@ impl<'g> Game<'g> {
             .player_extra
             .entry(JournaledPlayer::Guest(guest.conn))
             .or_insert_with(|| guest.saved.clone());
+    }
+    /// Keep the original setting of the acting player; return whether publication is deferred.
+    pub(super) fn journal_player_book(
+        &mut self,
+        player: PlayerRef,
+        book: &RecipeBookTypeKey,
+    ) -> bool {
+        let Some(level) = self.transactions.last_mut() else {
+            return false;
+        };
+        let owner = self.lan_acting.map_or(
+            JournaledPlayer::Local(player.uuid()),
+            JournaledPlayer::Guest,
+        );
+        level
+            .player_books
+            .entry((owner, book.clone()))
+            .or_insert_with(|| (player, self.level.recipe_book.custom.stored(book.as_str())));
+        true
     }
     /// Called with the target player's body swapped in, before set_health changes it.
     pub(super) fn journal_player_health(&mut self) {
@@ -2223,6 +2286,7 @@ impl<'g> Game<'g> {
         }));
         true
     }
+
     /// Hide a replaced block entity from staged reads, without dropping its
     /// contents until the real write. Fluid pickup/pour instead rolls its own
     /// drops against the old entity before journalling the removal.
@@ -2413,8 +2477,23 @@ impl<'g> Game<'g> {
             After::PlayerRespawn(conn) => self.commit_player_respawn(conn),
             After::Trade(effect) => self.commit_merchant_effect(*effect),
             After::Payload(payload) => payload.publish(),
-            After::Packet(packet, body) => self.publish_mod_held(packet, body),
+            After::Packet(packet, owner) => self.publish_mod_packet(packet, owner),
+            After::RecipeBookSettings(owner, player, book, before) => {
+                let id = book.as_str();
+                let flags = match self.player_storage_home(owner) {
+                    Some(PlayerStorageHome::Game) => self.level.recipe_book.custom.get(id),
+                    Some(PlayerStorageHome::Guest(index)) => {
+                        let host = self.lan.as_ref().expect("resolved guest");
+                        host.hub.guests[index].recipe_book.custom.get(id)
+                    }
+                    None => return,
+                };
+                if flags != before.unwrap_or_default() {
+                    self.publish_player_book_settings(player, book, flags);
+                }
+            }
             After::Composter(effects) => self.commit_composter_effects(effects),
+            After::DispenseEvent(id, pos, data) => self.dispenser_event(id, pos, data),
             After::FluidWrite(written) => self.commit_fluid_write(*written),
             After::FluidEffects(effects) => self.commit_fluid_effects(*effects),
             After::DispenserDrop {
@@ -2430,8 +2509,9 @@ impl<'g> Game<'g> {
             }
             After::LevelWrite(write) => self.commit_level_write(*write),
             After::BlockGameEvent(id, pos, who, state) => {
-                self.post_block_game_event(id, pos, Some(who), Some(state));
+                self.post_block_game_event(id, pos, who, Some(state));
             }
+            After::BlockDropSpawns(items, orbs) => self.publish_block_spawns(items, orbs),
             After::Changed(pos) => self.container_changed(pos),
             After::ChangedWithoutHook(pos) => self.container_changed_without_hook(pos),
             After::ChangedHolder { holder, silent } => {
@@ -2471,6 +2551,7 @@ impl<'g> Game<'g> {
                 });
             }
             After::MenuClick(reply) => self.publish_menu_click(*reply),
+            After::MenuOpen(conn, identity, open) => self.publish_menu_open(conn, identity, open),
             After::MenuPlacesNotice(conn, uuid, window) => {
                 self.queue_menu_places_notice(conn, uuid, window);
             }
@@ -2508,7 +2589,7 @@ impl<'g> Game<'g> {
                     at,
                     volume,
                     pitch,
-                } => self.audio.play(sound, Some(at), volume, pitch),
+                } => self.play_audio(sound, Some(at), volume, pitch),
                 DeferredEffect::RestoreStatistics(player, values) => {
                     self.restore_player_statistics(player, *values);
                 }
@@ -2682,6 +2763,13 @@ impl<'g> Game<'g> {
         patched.then_some(before)
     }
     fn root_commit(&mut self, mut level: Level) {
+        // Reserve every deferred open's place before block replay or an older Close can
+        // run a callback. The requests are made ready at their existing lifecycle points.
+        for after in &level.after {
+            if let After::MenuOpen(conn, identity, _) = after {
+                self.reserve_menu_publication(*conn, *identity);
+            }
+        }
         // Storage is final. Publish save marks before any callback can unwind or start a save.
         for (dim, chunk, _) in level.save_chunks {
             let world = if dim == self.dim {
@@ -2788,8 +2876,14 @@ impl<'g> Game<'g> {
         let mut told_holders = FxHashSet::default();
         let mut explicit_group_since_block = std::collections::HashSet::new();
         let mut biome_columns = std::collections::HashSet::new();
+        let mut menu_lifecycle = Vec::new();
         for after in level.after {
             match after {
+                // A writable open veto can replace a cell whose old block entity is still
+                // waiting to be replayed and spilled. Publish it only after block replay,
+                // keeping opens and closes in request order.
+                After::MenuOpen(..) => menu_lifecycle.push(after),
+                After::MenuClick(ref reply) if reply.closes_menu() => menu_lifecycle.push(after),
                 // Each storage tells the world once, after every write.
                 After::Changed(pos) if !told.insert(Ok(pos)) => {}
                 After::ChangedWithoutHook(pos) if !told_silent.insert(pos) => {}
@@ -2815,9 +2909,6 @@ impl<'g> Game<'g> {
                 }
                 After::BulkBlocks(publication, tracked, removed, steps) => {
                     for (pos, step) in steps {
-                        if step.clear_connection_group {
-                            self.world.invalidate_replaced_group(pos);
-                        }
                         if rewound.contains(&pos) {
                             let (x, y, z) = pos;
                             self.world.set_stored(x, y, z, step.to);
@@ -2827,6 +2918,10 @@ impl<'g> Game<'g> {
                                     self.restore_removed_block_entity(pos, *row, generation);
                                 }
                             }
+                        }
+                        if step.clear_connection_group {
+                            explicit_group_since_block.remove(&pos);
+                            self.world.invalidate_replaced_group(pos);
                         }
                     }
                     self.publish_bulk_edit(publication, tracked, removed);
@@ -2900,6 +2995,9 @@ impl<'g> Game<'g> {
                 log.remove(&pos);
             }
         }
+        for ((owner, book), (player, before)) in level.player_books {
+            self.run_after(After::RecipeBookSettings(owner, player, book, before));
+        }
         // A crafting grid the transaction changed has its result made again, once for each
         // player however many writes it took (`InventoryMenu.slotsChanged`).
         for (conn, kept) in &level.menus {
@@ -2958,6 +3056,9 @@ impl<'g> Game<'g> {
             if now.is_some() {
                 self.jukebox_inserted(pos);
             }
+        }
+        for after in menu_lifecycle {
+            self.run_after(after);
         }
     }
     fn roll_back(&mut self, mut level: Level) {
@@ -3053,6 +3154,11 @@ impl<'g> Game<'g> {
                     if replaced || level.removed_block_entities.contains_key(&pos) =>
                 {
                     self.restore_removed_block_entity(pos, entity, kept.generation.unwrap());
+                }
+                (None, None) if replaced && let Some(taken) = kept.taken => {
+                    let entities = &mut self.world.block_entities;
+                    entities.restore_taken_lease(pos, taken);
+                    entities.reattach_retired(pos, kept.generation.unwrap());
                 }
                 _ => {}
             }
@@ -3360,6 +3466,19 @@ impl<'g> Game<'g> {
                 None => {}
             }
         }
+        for ((owner, book), (_, kept)) in level.player_books {
+            let id = book.as_str().to_owned();
+            match self.player_storage_home(owner) {
+                Some(PlayerStorageHome::Game) => self.level.recipe_book.custom.restore(id, kept),
+                Some(PlayerStorageHome::Guest(index)) => {
+                    let host = self.lan.as_mut().expect("resolved guest");
+                    host.hub
+                        .guests
+                        .update(index, |g| g.recipe_book.custom.restore(id, kept));
+                }
+                None => {}
+            }
+        }
         for (owner, kept) in level.players {
             match self.player_storage_home(owner) {
                 Some(PlayerStorageHome::Game) => {
@@ -3402,24 +3521,14 @@ impl<'g> Game<'g> {
     }
 
     /// Resolves which player body `attachment_slot(Holder::Player(uuid), _)` addresses now:
-    /// the acting body when its UUID matches, else the exact guest `conn` resolved in `self.dim`
-    /// (online real player across dimensions, or the per-level fake player in `self.dim`).
+    /// the acting body when its UUID matches, else the exact parked player, including the
+    /// replacement before placement.
     fn attachment_player_body(&self, uuid: u128) -> Option<PlayerBodyKey> {
         if self.lan_acting_uuid == Some(uuid) {
             return Some(self.acting_player_body());
         }
-        let conn = self
-            .cloning_guest(uuid)
-            .or_else(|| {
-                let host = self.lan.as_ref()?;
-                if self.entity_initialization.active == Some(Holder::Player(uuid)) {
-                    host.hub.guests.iter().find(|guest| guest.uuid == uuid)
-                } else {
-                    host.hub.holder_guest(uuid, self.dim.id())
-                }
-            })
-            .map(|guest| guest.conn)?;
-        (!self.lan_guest_swaps.contains(&conn)).then_some(PlayerBodyKey::Guest(conn))
+        self.attachment_player_connection(uuid)
+            .map(PlayerBodyKey::Guest)
     }
 
     /// Restore a player body's attachment map directly wherever that exact body's state lives
@@ -4149,7 +4258,7 @@ mod tests {
             .chunks
             .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
         game.native_lifecycle
-            .begin_open(Authority::IntegratedServer);
+            .begin_open(Some(Authority::IntegratedServer));
         super::super::native_entity_refs::tests::resolve_parts(&game).unwrap();
         // Pins the opaque backend: a real game always hands one out, so a None
         // from Host::backend is a bug, never a fallback.
@@ -4309,15 +4418,20 @@ mod tests {
 
         // An attachment map a write made inside an aborted transaction is gone with it.
         let chest_holder = mod_api::Holder::BlockEntity([0, 64, 0]);
+        let chest_key = sunrise_mod_runtime::attachments::AttachmentType {
+            namespace: "transaction_test",
+            name: "chest",
+            default: || 0u32,
+            codec: None,
+            copy_on_death: false,
+            sync_codec: None,
+        };
         // So is the unsaved mark it put on a clean chunk, through a committed child too.
         assert!(game.world.block_entities.attachments((0, 64, 0)).is_none());
         game.world.modified.clear();
         game.open_storage_transaction();
         game.open_storage_transaction();
-        assert!(
-            game.attachment_map_quiet(chest_holder, mod_api::AttachmentAccess::Existing)
-                .is_ok()
-        );
+        chest_key.set(&mut game, chest_holder, 31).unwrap();
         assert!(game.world.modified.contains(&(0, 0)));
         game.close_storage_transaction(true);
         assert!(game.world.block_entities.attachments((0, 64, 0)).is_some());
@@ -4326,10 +4440,7 @@ mod tests {
         assert!(!game.world.modified.contains(&(0, 0)), "clean again");
         // A committed one keeps it.
         game.open_storage_transaction();
-        assert!(
-            game.attachment_map_quiet(chest_holder, mod_api::AttachmentAccess::Existing)
-                .is_ok()
-        );
+        chest_key.set(&mut game, chest_holder, 31).unwrap();
         game.close_storage_transaction(true);
         assert!(game.world.modified.contains(&(0, 0)));
         game.world.block_entities.set_attachments((0, 64, 0), None);
@@ -4468,18 +4579,16 @@ mod tests {
             ("minecraft:donkey", chested),
         ];
         // An aborted write leaves a chested donkey's item list as long as it was.
+        let level = game.level("minecraft:overworld").unwrap();
         let id = game
-            .summon(
-                "minecraft:overworld",
-                "minecraft:donkey",
-                [8.5, 70.0, 8.5],
-                {
-                    let mut chested = sunrise_core::nbt::Compound::new();
-                    chested.insert("ChestedHorse".into(), sunrise_core::nbt::Tag::Byte(1));
-                    chested
-                },
-            )
-            .unwrap();
+            .level_summon(level, "minecraft:donkey", [8.5, 70.0, 8.5], {
+                let mut chested = sunrise_core::nbt::Compound::new();
+                chested.insert("ChestedHorse".into(), sunrise_core::nbt::Tag::Byte(1));
+                chested
+            })
+            .unwrap()
+            .unwrap()
+            .id();
         let len = |game: &Game<'_>| {
             game.mobs
                 .iter()
@@ -4529,8 +4638,10 @@ mod tests {
 
         for (kind, nbt) in vehicles {
             let id = game
-                .summon("minecraft:overworld", kind, [8.5, 70.0, 8.5], nbt)
-                .unwrap_or_else(|| panic!("{kind} not summoned"));
+                .level_summon(level, kind, [8.5, 70.0, 8.5], nbt)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{kind} not summoned"))
+                .id();
             let place = |slot| mod_api::ItemPlace::EntitySlot { entity: id, slot };
             let host: &mut dyn ServerHost = &mut game;
             let went = host.transaction(|host, tx| place(0).insert(host, tx, &stick, 5));
@@ -4736,133 +4847,153 @@ mod mod_capability_tests {
     #[test]
     #[ignore = "daily"]
     fn entity_and_player_attachments_stay_on_commit_and_go_back_on_abort() {
-        use mod_api::{AttachmentType, Holder};
+        use mod_api::{AttachmentDescriptor, AttachmentKey, Holder, Hooks, ModEntry, Registrar};
+        use std::sync::Mutex;
         use sunrise_client::entities::ArmorStand;
         use sunrise_core::geometry::Vec3;
-        const ENERGY: AttachmentType<i32> = AttachmentType {
-            namespace: "robot",
-            name: "energy",
-            default: || 0,
-            codec: None,
-            copy_on_death: false,
-            sync: false,
-        };
-        with_game(|game| {
-            game.options.dedicated = Some(Vec::new());
-            game.world
-                .chunks
-                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
-            game.armor_stands.push(ArmorStand::new(13, Vec3::ZERO, 0.0));
-            game.armor_stands.push(ArmorStand::new(14, Vec3::ZERO, 0.0));
-            let guest = 0x5eed_u128;
-            let config = sunrise_client::lan::hub::HubConfig {
-                default_game_mode: 0,
-                guest_commands: false,
-                force_game_mode: false,
-                hardcore: false,
-                view_distance: 10,
-                simulation_distance: 10,
-                dimension: "minecraft:overworld".into(),
-                allow_flight: false,
-                seed: 0,
-                max_players: 20,
-                integrated: false,
-                levels: Default::default(),
-                level_seeds: Default::default(),
-            };
-            game.lan_host(
-                super::super::lan::LanSettings {
-                    port: 0,
+        struct EnergyMod(Arc<Mutex<Option<AttachmentKey<i32>>>>);
+        #[mod_api::__subscriptions]
+        impl Hooks for EnergyMod {
+            fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+                let key = r
+                    .register_attachment_type(AttachmentDescriptor::new("robot:energy", || 0i32))
+                    .unwrap();
+                *self.0.lock().unwrap() = Some(key);
+            }
+        }
+        let energy_slot = Arc::new(Mutex::new(None));
+        let mods: mod_api::Mods = vec![ModEntry::new(
+            "robot",
+            Box::new(EnergyMod(energy_slot.clone())),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                let energy_key = energy_slot
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("EnergyMod registered");
+                game.options.dedicated = Some(Vec::new());
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                game.armor_stands.push(ArmorStand::new(13, Vec3::ZERO, 0.0));
+                game.armor_stands.push(ArmorStand::new(14, Vec3::ZERO, 0.0));
+                let guest = 0x5eed_u128;
+                let config = sunrise_client::lan::hub::HubConfig {
+                    default_game_mode: 0,
                     guest_commands: false,
                     force_game_mode: false,
-                },
-                sunrise_client::lan::NetConfig {
-                    announce: false,
-                    ..sunrise_client::lan::NetConfig::lan(0, "test".into(), 2)
-                },
-                config,
-            )
-            .unwrap();
-            let level = game.level(game.dim.id()).unwrap();
-            let player_ref = game.fake_player(level, guest, "test").unwrap();
-            let conn = game
-                .lan
-                .as_ref()
-                .unwrap()
-                .hub
-                .guests
-                .iter()
-                .find(|g| g.entity_id as u32 == player_ref.entity().id())
-                .unwrap()
-                .conn;
-            let (stand, fresh, player) = (
-                Holder::Entity(13),
-                Holder::Entity(14),
-                Holder::Player(guest),
-            );
-            let energy =
-                |host: &mut dyn ServerHost, holder| ENERGY.get_existing(host, holder).unwrap();
-
-            let host: &mut dyn ServerHost = game;
-            let done = host.transaction(|host, _| {
-                ENERGY.set(host, stand, 100)?;
-                ENERGY.set(host, player, 40)
-            });
-            assert_eq!(done, Ok(()));
-            assert_eq!(
-                (energy(host, stand), energy(host, player)),
-                (Some(100), Some(40))
-            );
-
-            // Aborted, with a committed child inside: both maps as they were, and the entity
-            // that had no value has none.
-            let aborted: Result<(), _> = host.transaction(|host, _| {
-                ENERGY.set(host, stand, 250)?;
-                ENERGY.set(host, player, 90)?;
-                ENERGY.set(host, fresh, 7)?;
-                host.transaction(|host, _| ENERGY.set(host, stand, 300))
-                    .unwrap();
-                assert_eq!(energy(host, stand), Some(300));
-                Err(mod_api::AttachmentError::MissingHolder)
-            });
-            assert!(aborted.is_err());
-            assert_eq!(
-                (energy(host, stand), energy(host, player)),
-                (Some(100), Some(40))
-            );
-            assert_eq!(energy(host, fresh), None);
-
-            // Written while the guest's state is swapped in for their turn, aborted after it
-            // is swapped back out: the guest's own map is put back.
-            game.open_storage_transaction();
-            game.lan_acting_uuid = Some(guest);
-            std::mem::swap(
-                &mut game.player_state.attachments,
-                game.lan
-                    .as_mut()
+                    hardcore: false,
+                    view_distance: 10,
+                    simulation_distance: 10,
+                    dimension: "minecraft:overworld".into(),
+                    allow_flight: false,
+                    seed: 0,
+                    max_players: 20,
+                    integrated: false,
+                    levels: Default::default(),
+                    level_seeds: Default::default(),
+                };
+                game.lan_host(
+                    super::super::lan::LanSettings {
+                        port: 0,
+                        guest_commands: false,
+                        force_game_mode: false,
+                    },
+                    sunrise_client::lan::NetConfig {
+                        announce: false,
+                        ..sunrise_client::lan::NetConfig::lan(0, "test".into(), 2)
+                    },
+                    config,
+                )
+                .unwrap();
+                let level = game.level(game.dim.id()).unwrap();
+                let player_ref = game.fake_player(level, guest, "test").unwrap();
+                let conn = game
+                    .lan
+                    .as_ref()
                     .unwrap()
                     .hub
                     .guests
-                    .attachments_mut(conn)
-                    .unwrap(),
-            );
-            let host: &mut dyn ServerHost = game;
-            ENERGY.set(host, player, 70).unwrap();
-            std::mem::swap(
-                &mut game.player_state.attachments,
-                game.lan
-                    .as_mut()
+                    .iter()
+                    .find(|g| g.entity_id as u32 == player_ref.entity().id())
                     .unwrap()
-                    .hub
-                    .guests
-                    .attachments_mut(conn)
-                    .unwrap(),
-            );
-            game.lan_acting_uuid = None;
-            game.close_storage_transaction(false);
-            let host: &mut dyn ServerHost = game;
-            assert_eq!(energy(host, player), Some(40));
-            assert!(game.transactions.is_empty());
+                    .conn;
+                let (stand, fresh, player) = (
+                    Holder::Entity(13),
+                    Holder::Entity(14),
+                    Holder::Player(guest),
+                );
+                let energy = |host: &mut dyn ServerHost, holder| {
+                    energy_key
+                        .get_existing(host, holder, |value| value.cloned())
+                        .unwrap()
+                };
+
+                let host: &mut dyn ServerHost = game;
+                let done = host.transaction(|host, _| {
+                    energy_key.set(host, stand, 100)?;
+                    energy_key.set(host, player, 40)
+                });
+                assert_eq!(done, Ok(()));
+                assert_eq!(
+                    (energy(host, stand), energy(host, player)),
+                    (Some(100), Some(40))
+                );
+
+                // Aborted, with a committed child inside: both maps as they were, and the entity
+                // that had no value has none.
+                let aborted: Result<(), _> = host.transaction(|host, _| {
+                    energy_key.set(host, stand, 250)?;
+                    energy_key.set(host, player, 90)?;
+                    energy_key.set(host, fresh, 7)?;
+                    host.transaction(|host, _| energy_key.set(host, stand, 300))
+                        .unwrap();
+                    assert_eq!(energy(host, stand), Some(300));
+                    Err(mod_api::AttachmentError::MissingHolder)
+                });
+                assert!(aborted.is_err());
+                assert_eq!(
+                    (energy(host, stand), energy(host, player)),
+                    (Some(100), Some(40))
+                );
+                assert_eq!(energy(host, fresh), None);
+
+                // Written while the guest's state is swapped in for their turn, aborted after it
+                // is swapped back out: the guest's own map is put back.
+                game.storage_scope(|game, _| {
+                    game.lan_acting_uuid = Some(guest);
+                    std::mem::swap(
+                        &mut game.player_state.attachments,
+                        game.lan
+                            .as_mut()
+                            .unwrap()
+                            .hub
+                            .guests
+                            .attachments_mut(conn)
+                            .unwrap(),
+                    );
+                    let host: &mut dyn ServerHost = game;
+                    energy_key.set(host, player, 70).unwrap();
+                    std::mem::swap(
+                        &mut game.player_state.attachments,
+                        game.lan
+                            .as_mut()
+                            .unwrap()
+                            .hub
+                            .guests
+                            .attachments_mut(conn)
+                            .unwrap(),
+                    );
+                    game.lan_acting_uuid = None;
+                    ((), false)
+                });
+                let host: &mut dyn ServerHost = game;
+                assert_eq!(energy(host, player), Some(40));
+                assert!(game.transactions.is_empty());
+            });
         });
     }
 }

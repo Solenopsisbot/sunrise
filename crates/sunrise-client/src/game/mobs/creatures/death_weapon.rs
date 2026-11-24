@@ -23,18 +23,17 @@ impl Game<'_> {
         let mut attack = match shot.owner {
             Some(Who::Player) => self
                 .player_entity_id_by_connection(shot.guest)
+                .or(self.combat.enchantment_projectile_attacker)
                 .map_or_else(Attack::default, |entity| self.attack_of(entity)),
             Some(Who::Mob(entity)) => self.attack_of(entity as i32),
             None => Attack::default(),
         };
-        Self::set_projectile_attack(&mut attack, shot);
+        self.set_projectile_attack(&mut attack, shot);
         attack
     }
     /// The actual direct projectile's family and saved weapon, also for explicit damage sources.
-    pub(in crate::game) fn set_projectile_attack(attack: &mut Attack, shot: &Projectile) {
-        attack.projectile = Some(shot.id as i32);
-        attack.projectile_kind = Self::projectile_direct_entity(&shot.kind);
-        attack.projectile_type = Some(shot.entity_type());
+    pub(in crate::game) fn set_projectile_attack(&self, attack: &mut Attack, shot: &Projectile) {
+        Self::set_projectile_source(attack, shot);
         let weapon = shot.arrow.as_ref().and_then(|arrow| {
             if matches!(shot.kind, ProjectileKind::Trident) {
                 Some(&arrow.pickup_item)
@@ -42,7 +41,18 @@ impl Game<'_> {
                 arrow.fired_from_weapon.as_ref()
             }
         });
-        Self::set_projectile_weapon(attack, weapon);
+        self.set_projectile_weapon(attack, weapon);
+    }
+    /// Classify the actual direct entity independently of the world's weapon rules.
+    pub(in crate::game) fn set_projectile_source(attack: &mut Attack, shot: &Projectile) {
+        attack.projectile = Some(shot.id as i32);
+        attack.enchantment_direct = Some(sunrise_client::health::EnchantmentActor {
+            id: shot.id as i32,
+            kind: shot.entity_type().into(),
+            motion: None,
+        });
+        attack.projectile_kind = Self::projectile_direct_entity(&shot.kind);
+        attack.projectile_type = Some(shot.entity_type());
     }
     /// Classify a projectile's vanilla `DamageSource.getDirectEntity()` family.
     pub(in crate::game) fn projectile_direct_entity(
@@ -58,11 +68,20 @@ impl Game<'_> {
             _ => sunrise_client::health::DirectEntity::Projectile,
         }
     }
-    /// Only listeners need a saved weapon copy; physical family classification never does.
-    pub(in crate::game) fn set_projectile_weapon(attack: &mut Attack, weapon: Option<&ItemStack>) {
+    /// Preserve a projectile weapon for armor effectiveness and the hooks that expose it.
+    pub(in crate::game) fn set_projectile_weapon(
+        &self,
+        attack: &mut Attack,
+        weapon: Option<&ItemStack>,
+    ) {
         if mod_api::__private::listened(mod_api::HookId::LivingIncomingDamage)
             || mod_api::__private::listened(mod_api::HookId::LivingDeath)
             || mod_api::__private::listened(mod_api::HookId::LootDrops)
+            || weapon.is_some_and(|stack| {
+                world_stations!(self)
+                    .enchantments
+                    .has_component(stack, "minecraft:armor_effectiveness")
+            })
         {
             attack.projectile_weapon = weapon.cloned();
         }
@@ -91,9 +110,14 @@ impl Game<'_> {
             return false;
         };
         let plan = self.prepare_knockback_credit(id as i32, source.attacker, self.combat.attack());
+        // The projectile's shooter, the hit's causing entity.
+        let shooter = self.combat.attack().attacker;
+        let decision = crate::game::entity::causer_decision!(self, shooter);
         let mut credit = plan.lend(&mut self.last_hurt_by_player);
-        let hurt = self.mobs[index].damage_projectile(
-            crate::game::entity::damage_level_of!(self, self.combat.attack(), &mut credit, None),
+        let (victim, lend) =
+            crate::game::entity::victim_and_causer!(self, index, shooter, decision);
+        let hurt = victim.damage_projectile(
+            crate::game::entity::damage_level_of!(self, self.combat.attack(), &mut credit, lend),
             amount,
             source,
             aim,
@@ -128,41 +152,23 @@ impl Game<'_> {
         let Some(weapon) = weapon else {
             return base_f64;
         };
-        let attacker_kind = match shot.owner {
-            Some(Who::Player) => Some("minecraft:player".to_owned()),
-            Some(Who::Mob(id)) => self
-                .mobs
-                .iter()
-                .find(|m| m.id == id)
-                .map(|m| m.kind.id.clone()),
-            None => None,
-        };
-        let ctx = sunrise_client::enchant::EffectContext {
-            this: victim,
-            attacker: attacker_kind.as_deref(),
-            direct_attacker: Some(if trident {
-                "minecraft:trident"
-            } else if shot.is_spectral_arrow() {
-                "minecraft:spectral_arrow"
-            } else {
-                "minecraft:arrow"
-            }),
-            damage_type: Some(if trident {
-                "minecraft:trident"
-            } else {
-                "minecraft:arrow"
-            }),
-            ..Default::default()
-        };
         let player = self.own_entity_id() as u32;
-        let attacker = shot.owner.map(|owner| match owner {
-            Who::Player => self
-                .combat
-                .enchantment_projectile_attacker
-                .or_else(|| self.player_attacker(shot.guest).map(|s| s.0))
-                .unwrap_or(player),
-            Who::Mob(id) => id,
-        });
+        let attack = self.projectile_attack(shot);
+        let causing = if attack.attacker != 0 {
+            attack.attacker
+        } else {
+            shot.id as i32
+        };
+        let source = attack.player_source(
+            if trident {
+                "minecraft:trident"
+            } else {
+                "minecraft:arrow"
+            },
+            causing,
+        );
+        let mut ctx = attack.enchantment_context(source, victim.unwrap_or(""));
+        ctx.this = victim;
         let victim = match who {
             Who::Player => player,
             Who::Mob(id) => id,
@@ -172,12 +178,7 @@ impl Game<'_> {
         } else {
             victim
         };
-        f64::from(self.evaluate_weapon_damage(
-            weapon,
-            attacker.map(|id| (id, victim)),
-            ctx,
-            base_f64 as f32,
-        ))
+        f64::from(self.evaluate_weapon_damage(weapon, Some(victim), ctx, base_f64 as f32))
     }
     /// What an arrow or a thrown trident hits an entity of type `victim`
     /// for (`AbstractArrow.onHitEntity`, `ThrownTrident.onHitEntity`): a
@@ -220,6 +221,83 @@ impl Game<'_> {
         }
     }
 
+    /// `EnchantmentHelper.processMobExperience`: the killer's equipment, the killed mob's random.
+    pub(super) fn mob_kill_experience(&mut self, killed: &mut Mob, amount: i32) -> i32 {
+        let killer = self.mob_damage_source(killed).1;
+        let ctx = sunrise_items::enchant::EffectContext {
+            this: Some(&killed.kind.id),
+            this_motion: Some((killed.fall_distance, killed.extra.fall_flying)),
+            ..Default::default()
+        };
+        self.kill_experience(killer, ctx, &mut killed.random, amount)
+    }
+
+    pub(in crate::game) fn kill_experience(
+        &mut self,
+        killer: u32,
+        ctx: sunrise_items::enchant::EffectContext<'_>,
+        killed_random: &mut sunrise_core::random::LegacyRandom,
+        amount: i32,
+    ) -> i32 {
+        use crate::game::{commands::Target, lan_actions::CombatPlayer};
+        use sunrise_client::mobs::finalize::EquipmentRead;
+
+        if killer == 0 {
+            return amount;
+        }
+        let (target, displaced) = match self.combat_player(killer) {
+            Some(CombatPlayer::InPlace) => (Some(Target::Player), None),
+            Some(CombatPlayer::Parked(guest)) => (Some(Target::Guest(guest.conn)), None),
+            Some(CombatPlayer::Displaced(depth, _)) => (None, Some(depth)),
+            None => (self.level_entity(killer as i32), None),
+        };
+        if target.is_none() && displaced.is_none() {
+            return amount;
+        }
+        const COMPONENT: &str = "minecraft:mob_experience";
+        let enchantments = self.stations().enchantments.clone();
+        let mut value = amount as f32;
+        for slot in mod_api::EquipmentSlot::ALL {
+            let stack = if let Some(depth) = displaced {
+                let frame = &self.lan_displaced_players[depth];
+                self.command_guest(frame.record_conn).and_then(|guest| {
+                    crate::game::native_living_refs::player_slot(
+                        &guest.inventory,
+                        frame.selected,
+                        &guest.armor,
+                        &guest.offhand,
+                        &guest.equipment,
+                        slot,
+                    )
+                    .map(EquipmentRead::resident)
+                })
+            } else {
+                target.and_then(|target| self.equipment_stack_for(target, slot))
+            };
+            let Some(stack) = stack else { continue };
+            let stack = stack.project();
+            let slot = sunrise_items::equipment::SLOT_NAMES[slot as usize];
+            let mut levels = stack.all_enchantments().into_owned();
+            levels.retain(|(id, _)| {
+                enchantments.get(id).is_some_and(|enchantment| {
+                    enchantment.effects.get(COMPONENT).is_some() && enchantment.matches_slot(slot)
+                })
+            });
+            if levels.is_empty() {
+                continue;
+            }
+            value = enchantments.modify_entity_value(
+                &levels,
+                COMPONENT,
+                &ctx,
+                &mut self.world.random,
+                killed_random,
+                value,
+            );
+        }
+        value as i32
+    }
+
     /// `LivingEntity.dropExperience` for a dying mob: the reward (drawn from
     /// the mob's random after its loot rolls), heard by the mods
     /// (`living_experience_drop`). The orbs to spawn; none when the mob drops
@@ -238,6 +316,7 @@ impl Game<'_> {
         let experience =
             sunrise_client::mobs::drops::experience_reward(m, player_killed, mob_drops);
         let reward = experience.filter(|_| !consumed)?;
+        let reward = self.mob_kill_experience(m, reward);
         let kind = crate::game::native_hooks::mob_kind(m);
         Some(self.living_experience_drop(m.id, &kind, player_uuid, reward))
     }
@@ -292,29 +371,25 @@ impl Game<'_> {
                     }),
                 None => None,
             };
-            let direct = match d.kind {
-                DamageKind::Arrow => Some(LootEntity {
-                    kind: "minecraft:arrow".into(),
+            let projectile = match d.kind {
+                DamageKind::Arrow => Some("minecraft:arrow"),
+                DamageKind::Fireball => Some("minecraft:fireball"),
+                DamageKind::WitherSkull => Some("minecraft:wither_skull"),
+                DamageKind::Fireworks => Some("minecraft:firework_rocket"),
+                _ => None,
+            };
+            let direct = match projectile {
+                Some(kind) => Some(LootEntity {
+                    kind: kind.into(),
                     ..LootEntity::default()
                 }),
-                DamageKind::Fireball => Some(LootEntity {
-                    kind: "minecraft:fireball".into(),
-                    ..LootEntity::default()
-                }),
-                DamageKind::WitherSkull => Some(LootEntity {
-                    kind: "minecraft:wither_skull".into(),
-                    ..LootEntity::default()
-                }),
-                DamageKind::Fireworks => Some(LootEntity {
-                    kind: "minecraft:firework_rocket".into(),
-                    ..LootEntity::default()
-                }),
-                _ => source.clone(),
+                None => source.clone(),
             };
             LootDamage {
                 kind: source_damage_type(d).into(),
                 source,
                 direct,
+                is_direct: projectile.is_none(),
             }
         });
         let vehicle = m

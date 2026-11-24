@@ -100,10 +100,11 @@ impl Game<'_> {
         Ok(PayloadAccepted::Queued)
     }
     /// Use the receiving endpoint, not a sender resolved from a later guest incarnation.
-    pub(super) fn run_payload(&mut self, endpoint: Endpoint, incoming: Incoming) {
+    pub(super) fn run_payload(&mut self, endpoint: Endpoint, mut incoming: Incoming) {
         if !incoming.epoch.active() {
             return;
         }
+        let body = incoming.take_body();
         let (failure, reason) = self.storage_scope(|game, _| {
             let mut context = MainContext {
                 game,
@@ -113,14 +114,14 @@ impl Game<'_> {
                 disconnect: None,
                 failure: None,
             };
-            let result = match incoming.body {
+            let result = match body {
                 Body::Payload(bytes) if incoming.receiver.thread == HandlerThread::Main => {
                     incoming.receiver.handle(bytes, &mut context)
                 }
                 Body::Payload(_) => Err(CallbackFailure::Refused(
                     "payload was not dispatched on its declared network executor".into(),
                 )),
-                Body::Work(work) => incoming.receiver.run_work(work.as_ref(), &mut context),
+                Body::Work(work) => incoming.receiver.run_work(work, &mut context),
             };
             let failure = match result {
                 Err(error @ (CallbackFailure::Panicked | CallbackFailure::Poisoned)) => Some(error),
@@ -276,10 +277,13 @@ impl IPayloadContext for MainContext<'_, '_> {
         work: Arc<dyn PayloadWork>,
     ) -> Result<PayloadWorkStatus, PayloadContextError> {
         if !self.epoch.active() || self.disconnect.is_some() {
+            if let Err(error) = self.receiver.dispose_work(work) {
+                self.failure = Some(error);
+            }
             return Err(PayloadContextError::Disconnected);
         }
-        let receiver = self.receiver;
-        if let Err(error) = receiver.run_work(work.as_ref(), self) {
+        let receiver = self.receiver.clone();
+        if let Err(error) = receiver.run_work(work, self) {
             // Preserve the first panic even if the caller catches or overwrites its
             // error by attempting more work on the now-disabled callback.
             if !matches!(

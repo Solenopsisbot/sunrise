@@ -43,6 +43,3 @@ pub use crate::load_state::{
     with_test_dependencies, with_test_package_inventory, with_test_packages,
     with_test_registration_data,
 };
-
-#[doc(hidden)]
-pub use crate::parts::attachment_declarations;

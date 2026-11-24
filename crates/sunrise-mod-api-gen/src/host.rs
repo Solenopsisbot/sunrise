@@ -35,15 +35,16 @@ pub(super) const GOAL_VIEW_READS: &[&str] = &[
     "entity_dismount_location",
     "entity_root_vehicle",
     "entity_is_passenger_of_same_vehicle",
-    "entity_passengers",
+    "entity_visit_passengers",
     "entity_is_vehicle",
-    "entity_indirect_passengers",
+    "entity_visit_indirect_passengers",
     "entity_controlling_passenger",
     "entity_on_block",
     "entity_entities_team_damage_allowed",
     "living_can_use_portal",
     "entity_tags",
     "entity_name",
+    "entity_custom_name",
     "entity_added_to_level",
     "entity_portal_cooldown",
     "entity_invulnerable_to_damage",
@@ -63,8 +64,8 @@ pub(super) const GOAL_VIEW_READS: &[&str] = &[
     "entity_pick",
     "living_attribute_value",
     "living_attribute_base",
-    "living_attributes",
-    "living_attribute_modifiers",
+    "living_visit_attributes",
+    "living_visit_attribute_modifiers",
     "living_used_item_hand",
     "mob_can_use_portal",
     "mob_target",
@@ -92,16 +93,17 @@ pub(super) const GOAL_VIEW_READS: &[&str] = &[
     "entity_tick_count",
     "entity_is_invisible",
     "entity_is_multipart",
-    "entity_parts",
+    "entity_visit_parts",
     "entity_dimensions",
     "living_effect",
-    "living_effects",
+    "living_visit_effects",
     "living_potion_affected",
     "living_gliding_ticks",
     "living_is_gliding",
     "living_is_sleeping",
     "living_sleeping_pos",
     "living_is_jumping",
+    "living_no_jump_delay",
     "living_baby",
     "living_equipment",
     "living_hand_item",
@@ -144,6 +146,7 @@ const GOAL_VIEW_ENTITY_ARGS: &[&str] = &[
     "MobRef",
     "PlayerRef",
     "ItemEntityRef",
+    "ExperienceOrbRef",
     "MerchantRef",
 ];
 
@@ -292,6 +295,10 @@ fn area_tiers(camel: &str, file: syn::File) -> Result<BTreeMap<Tier, Vec<Entry>>
                         | "BlockEntityDrawContext"
                         | "WorldDrawContext"
                         | "CameraDrawContext"
+                        | "WorldPassDrawContext"
+                        | "WorldOitPassDrawContext"
+                        | "RenderLevelStageContext"
+                        | "PrepareRenderBuffersContext"
                 ) | (
                     "Services",
                     "ClientSession"
@@ -353,11 +360,11 @@ fn table_backends(camel: &str, file: &syn::File) -> Result<BTreeMap<Tier, String
     Ok(tables)
 }
 
-/// The area files, `base` first and then by name, as the catalog's are.
+/// The area files, sorted by name, as the catalog's are.
 pub(crate) fn load(root: &Path) -> Result<Vec<Area>, String> {
     let dir = root.join(DIRECTORY);
     let mut areas = Vec::new();
-    for stem in catalog::Catalog::modules(&dir)? {
+    for stem in sunrise_game_discovery::module_files(&dir)? {
         let path = dir.join(format!("{stem}.rs"));
         crate::rerun_if_changed(&path.display());
         let source = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -433,7 +440,7 @@ pub(super) fn areas_source(root: &Path) -> Result<String, String> {
                 } else {
                     format!("self, {args}")
                 };
-                let value = refusal(&entry.sig, name)?;
+                let value = refusal(entry)?;
                 let refused = if args.is_empty() {
                     format!("{sig} {{ {value} }}")
                 } else {
@@ -584,7 +591,8 @@ pub(super) fn game_forwarders(root: &Path) -> Result<String, String> {
                         format!("self, {args}")
                     };
                     let sig = entry.sig.to_token_stream();
-                    let call = if entry.attrs.iter().any(|a| a.path().is_ident("service")) {
+                    let is_service = entry.attrs.iter().any(|a| a.path().is_ident("service"));
+                    let call = if is_service {
                         "self".into()
                     } else if via_game {
                         let table = table.unwrap_or_default();
@@ -630,7 +638,7 @@ pub(super) fn game_forwarders(root: &Path) -> Result<String, String> {
                             call
                         }
                     } else if checked_write {
-                        if crosses_output
+                        if converted_output.is_some_and(|ty| contains_value(ty, &["BlockState"]))
                             && result_error(&entry.sig.output)
                                 .is_some_and(|error| outer_type(error, "LevelWriteError"))
                         {
@@ -661,6 +669,15 @@ pub(super) fn game_forwarders(root: &Path) -> Result<String, String> {
                     } else {
                         call
                     };
+                    let call = match name.as_str() {
+                        // The scheduler splits delegation at the sites where it takes or gives
+                        // back ownership of a task's captures.
+                        "schedule_task" | "cancel_task" => call,
+                        _ if is_service || borrows_caller_callback(&entry.sig) => call,
+                        _ => format!(
+                            "mod_api::__private::game::CallbackOwner::call_host(move || {{ {call} }})"
+                        ),
+                    };
                     code.push_str(&format!("{sig} {{ {setup} {call} }}\n"));
                 }
                 code.push_str("}\n");
@@ -673,10 +690,51 @@ pub(super) fn game_forwarders(root: &Path) -> Result<String, String> {
     Ok(prettyplease::unparse(&parsed))
 }
 
+/// Whether `sig` takes a borrowed callable the engine invokes synchronously on the caller's
+/// behalf. Those methods stay inside the caller's retained panic scope so a panic in the
+/// caller's closure still blames that caller.
+fn borrows_caller_callback(sig: &syn::Signature) -> bool {
+    sig.inputs.iter().any(|input| {
+        let FnArg::Typed(arg) = input else {
+            return false;
+        };
+        is_borrowed_callable(&arg.ty)
+    })
+}
+
+fn is_borrowed_callable(mut ty: &Type) -> bool {
+    while let Type::Paren(paren) = ty {
+        ty = &paren.elem;
+    }
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    let mut elem = &*reference.elem;
+    while let Type::Paren(paren) = elem {
+        elem = &paren.elem;
+    }
+    matches!(
+        elem,
+        Type::TraitObject(object)
+            if object.bounds.iter().any(|bound| {
+                matches!(
+                    bound,
+                    syn::TypeParamBound::Trait(trait_bound)
+                        if trait_bound.path.segments.last().is_some_and(|segment| {
+                            matches!(
+                                segment.ident.to_string().as_str(),
+                                "Fn" | "FnMut" | "FnOnce"
+                            )
+                        })
+                )
+            })
+    )
+}
+
 /// API records whose game representation is owned by another crate. Conversions are
 /// implemented once by the game; this rule only selects the boundary, never its behaviour.
 fn text_value(ty: &Type) -> bool {
-    contains_value(ty, &["Text", "GuiDraw"])
+    contains_value(ty, &["Text"])
 }
 
 fn boundary_value(ty: &Type) -> bool {
@@ -890,8 +948,17 @@ fn signature_args(sig: &syn::Signature, name: &str) -> Result<String, String> {
 }
 
 /// A backend read's typed answer where there is no backend to ask.
-fn refusal(sig: &syn::Signature, name: &str) -> Result<&'static str, String> {
-    let syn::ReturnType::Type(_, ty) = &sig.output else {
+fn refusal(entry: &Entry) -> Result<&'static str, String> {
+    let name = &entry.name;
+    let syn::ReturnType::Type(_, ty) = &entry.sig.output else {
+        if entry
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("decline_unavailable"))
+        {
+            // The caller's callback is not invoked; the refusal body returns implicit `()`.
+            return Ok("");
+        }
         return Err(format!("{name}: a backend read returns a value"));
     };
     let syn::Type::Path(path) = &**ty else {
@@ -901,6 +968,7 @@ fn refusal(sig: &syn::Signature, name: &str) -> Result<&'static str, String> {
     match last.as_deref() {
         Some("Option") => Ok("None"),
         Some("bool") => Ok("false"),
+        Some("EntityResidency") => Ok("EntityResidency::Gone"),
         Some("Result") => Ok("Err(NoBackend::no_backend())"),
         Some("u64" | "u32" | "i32" | "u16" | "u8" | "usize") => Ok("0"),
         _ => Err(format!("{name}: cannot refuse its backend return type")),
@@ -1016,8 +1084,8 @@ fn handle_method(
         format!("{backend}(host)?.{call}")
     } else if returns("bool") {
         format!("{backend}(host).map(|backend| backend.{call}).unwrap_or(false)")
-    } else if returns("CommandResult") {
-        // An unresolved command source has neither a successful run nor feedback.
+    } else if returns("CommandResult") || returns("EntityResidency") {
+        // Without a backend, a command fails with no feedback and an entity is gone.
         format!("{backend}(host).map(|backend| backend.{call}).unwrap_or_default()")
     } else if returns("Result") {
         format!(
@@ -1025,7 +1093,7 @@ fn handle_method(
         )
     } else {
         return Err(format!(
-            "{name}: a {receiver} helper returns Option, bool, CommandResult or Result, the value a host without a backend refuses"
+            "{name}: a {receiver} helper returns Option, bool, CommandResult, EntityResidency or Result, the value a host without a backend refuses"
         ));
     };
     Ok(Some((
@@ -1162,24 +1230,26 @@ fn goal_view(
             entry.name.as_str(),
             signature_args(&entry.sig, &entry.name)?,
         );
-        let refusal = refusal(&entry.sig, name)?;
+        let refusal = refusal(entry)?;
         let mut sig = entry.sig.clone();
         sig.ident = syn::parse_str(name).map_err(|e| format!("{name}: {e}"))?;
-        // Entity data answers the tick's view; everything else forwards to the real backend the
-        // view carries.
-        let entity_data = matches!(
-            entry.sig.inputs.iter().skip(1).find_map(|arg| match arg {
-                FnArg::Typed(arg) => Some(&*arg.ty),
-                FnArg::Receiver(_) => None,
-            }),
-            Some(syn::Type::Path(ty))
-                if ty.path.segments.len() == 1
-                    && GOAL_VIEW_ENTITY_ARGS
-                        .contains(&ty.path.segments[0].ident.to_string().as_str())
-        );
+        // Entity data answers the tick's view; residency and non-entity reads forward to the real
+        // backend the view carries (a lent mob is `EntityResidency::Busy`, not `Gone`).
+        let entity_data = name != "entity_residency"
+            && matches!(
+                entry.sig.inputs.iter().skip(1).find_map(|arg| match arg {
+                    FnArg::Typed(arg) => Some(&*arg.ty),
+                    FnArg::Receiver(_) => None,
+                }),
+                Some(syn::Type::Path(ty))
+                    if ty.path.segments.len() == 1
+                        && GOAL_VIEW_ENTITY_ARGS
+                            .contains(&ty.path.segments[0].ident.to_string().as_str())
+            );
         // How a forwarded read answers a host without a backend: its typed refusal.
         let forwarded = match refusal {
             "None" => ".flatten()".to_string(),
+            "" => ".unwrap_or_default()".to_string(),
             // A `Result` read's no-backend answer is its error type's own `NoBackend` value,
             // wrapped back in the `Err`.
             refusal if refusal.starts_with("Err(") => {
@@ -1224,9 +1294,8 @@ fn goal_view(
                 let name = pat.ident.to_string();
                 match ty.as_str() {
                     "EntityRef" => Some(name),
-                    "LivingRef" | "PlayerRef" | "MobRef" | "ItemEntityRef" | "MerchantRef" => {
-                        Some(format!("{name}.entity()"))
-                    }
+                    "LivingRef" | "PlayerRef" | "MobRef" | "ItemEntityRef" | "ExperienceOrbRef"
+                    | "MerchantRef" => Some(format!("{name}.entity()")),
                     _ => None,
                 }
             })
@@ -1413,6 +1482,16 @@ mod tests {
         assert!(code.contains(
             "backend_mut_of(host).map(|backend| backend.entity_run_command_with_output(self, line, level, suppress_output)).unwrap_or_default()"
         ));
+        // A residency read defaults to `EntityResidency::Gone` without a backend.
+        let residency = entry("fn entity_residency(&self, entity: EntityRef) -> EntityResidency;");
+        let (handle, code) = handle_method(&residency, Tier::Backend, &handles)
+            .unwrap()
+            .unwrap();
+        assert_eq!(handle, "EntityRef");
+        assert!(code.contains("pub fn residency (self , host : & dyn Host) -> EntityResidency"));
+        assert!(code.contains(
+            "backend_of(host).map(|backend| backend.entity_residency(self)).unwrap_or_default()"
+        ));
         // A `Result` method refuses with its error's `NoBackend` value on a host without a game.
         let tried = entry("fn level_attempt(&mut self, level: LevelRef) -> Result<u8, Refused>;");
         let (_, code) = handle_method(&tried, Tier::BackendMut, &handles)
@@ -1476,7 +1555,7 @@ mod tests {
             (
                 "fn entity_x(&self, entity: EntityRef);",
                 Tier::Backend,
-                "returns Option, bool, CommandResult or Result",
+                "returns Option, bool, CommandResult, EntityResidency or Result",
             ),
             (
                 "fn entity_x(&mut self, entity: EntityRef) -> bool;",
@@ -1687,6 +1766,22 @@ mod tests {
     }
 
     #[test]
+    fn goal_view_forwards_entity_residency_to_the_host_backend() {
+        let method = entry("fn entity_residency(&self, entity: EntityRef) -> EntityResidency;");
+        let area = Area {
+            stem: "entities".into(),
+            camel: "Entities".into(),
+            tiers: BTreeMap::new(),
+            tables: BTreeMap::new(),
+        };
+        let code = goal_view(&[], &[(&area, Tier::Backend, &method)], &[]).unwrap();
+        assert!(code.contains(
+            "mod_api::__private::backend_read(self.host, |backend| backend.entity_residency(entity)).unwrap_or(EntityResidency::Gone)"
+        ));
+        assert!(!code.contains("is_game_entity"));
+    }
+
+    #[test]
     fn every_area_file_of_the_checkout_loads() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let areas = load(&root).unwrap();
@@ -1697,5 +1792,21 @@ mod tests {
                 .filter(|area| area.tiers.is_empty())
                 .all(|area| matches!(area.stem.as_str(), "draw" | "services"))
         );
+    }
+
+    #[test]
+    fn only_synchronous_borrowed_callbacks_stay_in_caller_scope() {
+        assert!(!borrows_caller_callback(
+            &entry("fn living_heal(&mut self, living: LivingRef, amount: f32) -> bool;").sig
+        ));
+        assert!(!borrows_caller_callback(
+            &entry("fn schedule_task(&mut self, delay: u32, task: Box<dyn FnOnce(&mut dyn ServerHost)>) -> Result<TaskId, ScheduleError>;").sig
+        ));
+        assert!(borrows_caller_callback(
+            &entry("fn level_visit_all_entities(&self, level: LevelRef, visit: &mut dyn FnMut(EntityRef) -> core::ops::ControlFlow<()>) -> Result<core::ops::ControlFlow<()>, LevelReadError>;").sig
+        ));
+        assert!(borrows_caller_callback(
+            &entry("fn player_read_inventory(&self, player: PlayerRef, read: &mut dyn for<'a> FnMut(InventoryView<'a>)) -> Option<()>;").sig
+        ));
     }
 }

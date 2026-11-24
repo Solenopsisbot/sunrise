@@ -57,48 +57,68 @@ pub struct ContentMod {
     pub jars: Vec<JarRef>,
 }
 
-/// Leaves out a mod with an item whose `crafting_remainder` names an item the mod does not have:
-/// a file item that named a code-declared one the declaration check then refused. Left in, the
-/// overlay would fail on it and no content mod at all would load. Returns what was left out.
-pub fn drop_dangling_remainders(mods: &mut Vec<ContentMod>) -> Vec<String> {
+/// Refuse a package whose crafting remainder does not resolve to an admitted item.
+/// A refusal can invalidate a reference in another package, so repeat until no package is dropped.
+pub fn drop_dangling_remainders(
+    base: &Path,
+    mods: &mut Vec<ContentMod>,
+) -> Result<Vec<(String, String)>> {
+    if !mods
+        .iter()
+        .flat_map(|m| &m.content.items)
+        .any(|item| item.crafting_remainder.is_some())
+    {
+        return Ok(Vec::new());
+    }
+    let vanilla = builtin_item_keys(base)?;
     let mut dropped = Vec::new();
     loop {
-        let all_ids: BTreeSet<String> = mods
+        let admitted: BTreeSet<_> = mods
             .iter()
-            .flat_map(|m| {
-                m.content.items.iter().map(|i| i.id.clone()).chain(
-                    m.content
-                        .blocks
-                        .iter()
-                        .filter(|b| b.item)
-                        .map(|b| b.id.clone()),
-                )
-            })
+            .flat_map(declared_item_ids)
+            .map(str::to_owned)
             .collect();
         let before = mods.len();
-        mods.retain(|m| {
-            // Every item or item-bearing block admitted into the overlay; per-package ownership
-            // was already enforced by `Content::read_declaring` and `accept_declared`.
-            let dangling = m.content.items.iter().find(|i| {
-                i.crafting_remainder
-                    .as_deref()
-                    .is_some_and(|r| !r.starts_with("minecraft:") && !all_ids.contains(r))
+        mods.retain(|layer| {
+            let invalid = layer.content.items.iter().find_map(|item| {
+                let rest = item.crafting_remainder.as_deref()?;
+                (rest == "minecraft:air" || !(vanilla.contains(rest) || admitted.contains(rest)))
+                    .then(|| format!("{}: crafting_remainder {rest:?} is not an item", item.id))
             });
-            if let Some(item) = dangling {
-                dropped.push(format!(
-                    "mod {} content not loaded: {}: crafting_remainder {:?} is not one of its items",
-                    m.id,
-                    item.id,
-                    item.crafting_remainder.as_deref().unwrap_or_default()
-                ));
+            if let Some(error) = invalid {
+                dropped.push((layer.id.clone(), error));
+                false
+            } else {
+                true
             }
-            dangling.is_none()
         });
         if mods.len() == before {
-            break;
+            return Ok(dropped);
         }
     }
-    dropped
+}
+
+fn builtin_item_keys(base: &Path) -> Result<BTreeSet<String>> {
+    match read_json(&base.join("items.json"))? {
+        J::Obj(entries) => Ok(entries.into_iter().map(|(id, _)| id).collect()),
+        _ => Err("items.json is not an object".into()),
+    }
+}
+
+fn declared_item_ids(layer: &ContentMod) -> impl Iterator<Item = &str> {
+    layer
+        .content
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .chain(
+            layer
+                .content
+                .blocks
+                .iter()
+                .filter(|block| block.item)
+                .map(|block| block.id.as_str()),
+        )
 }
 
 /// The mods' mob effects in registry order: by id, as items are. Their
@@ -161,14 +181,15 @@ pub fn register_world_fluids(
 ) -> std::result::Result<Vec<String>, sunrise_world::fluid::ModFluidRegistrationError> {
     let mut names = Vec::new();
     for look in mods.iter().flat_map(|m| &m.content.fluids) {
-        let Some(world) = look.world else { continue };
+        let Some(world) = &look.world else { continue };
         let flowing_id = look.flowing_id();
         names.push(look.id.clone());
         names.push(flowing_id.clone());
         sunrise_world::fluid::register_mod_fluid(sunrise_world::fluid::ModFluidType {
             id: look.id.clone(),
             flowing_id,
-            bucket: look.bucket_id(),
+            // Only a bucket the game registers pours this fluid; one the mod names keeps its own.
+            bucket: look.bucket_id().filter(|_| world.bucket),
             rules: sunrise_world::fluid::ModFluidRules {
                 tick_delay: world.tick_delay,
                 drop_off: world.drop_off,
@@ -192,6 +213,15 @@ pub fn fluid_measures(id: &str) -> Option<sunrise_mod_package::content::FluidMea
         .unwrap_or_else(|e| e.into_inner())
         .get(id)
         .map(|look| look.measures)
+}
+
+/// The item a bucket of the mod fluid `id` is (`Fluid.getBucket`), a tank-only one's too.
+pub fn fluid_bucket(id: &str) -> Option<String> {
+    FLUID_LOOKS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)?
+        .bucket_id()
 }
 
 /// How the fluid `id` looks, when a mod declares it.
@@ -753,23 +783,6 @@ impl std::fmt::Display for UnknownBaseBlock {
 }
 impl std::error::Error for UnknownBaseBlock {}
 
-/// A native block entity declaration uses vanilla's reserved namespace.
-#[derive(Debug)]
-pub struct ReservedBlockEntityNamespace {
-    /// The refused type's registry ID.
-    pub kind: String,
-}
-impl fmt::Display for ReservedBlockEntityNamespace {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "block entity type {} cannot use the minecraft namespace",
-            self.kind
-        )
-    }
-}
-impl std::error::Error for ReservedBlockEntityNamespace {}
-
 /// A block ID resolved against the complete content and vanilla registry.
 struct KnownBlock<'a>(&'a str);
 
@@ -942,27 +955,7 @@ pub fn accept_declared(
             content.blocks.clone_from(&mods[i].content.blocks);
             content.items.clone_from(&mods[i].content.items);
         }
-        let served_item_ids: Vec<&str> = mods
-            .iter()
-            .filter(|m| {
-                m.id != id
-                    && manifests.iter().any(|manifest| {
-                        manifest.id == m.id && manifest.served_by.as_deref() == Some(id)
-                    })
-            })
-            .flat_map(|m| {
-                m.content.items.iter().map(|i| i.id.as_str()).chain(
-                    m.content
-                        .blocks
-                        .iter()
-                        .filter(|b| b.item)
-                        .map(|b| b.id.as_str()),
-                )
-            })
-            .collect();
-        if let Err(refusals) =
-            content.declare_validated(&batch.blocks, &batch.items, &served_item_ids)
-        {
+        if let Err(refusals) = content.declare_validated(&batch.blocks, &batch.items) {
             errors.extend(
                 refusals
                     .into_iter()
@@ -1060,7 +1053,12 @@ pub fn accept_declared(
         // A file's fluid look still says how the code-declared fluid looks.
         for fluid in &batch.fluids {
             match target.fluids.iter_mut().find(|f| f.id == fluid.id) {
-                Some(look) => look.world = fluid.world,
+                Some(look) => {
+                    look.world.clone_from(&fluid.world);
+                    if fluid.bucket_item.is_some() {
+                        look.bucket_item.clone_from(&fluid.bucket_item);
+                    }
+                }
                 None => target.fluids.push(fluid.clone()),
             }
         }
@@ -1196,13 +1194,7 @@ use entity_sounds::mod_entity_row;
 
 impl<'a> Plan<'a> {
     fn new(base: &Path, mods: &'a [ContentMod]) -> Result<Self> {
-        let vanilla_items = match base.join("items.json").exists() {
-            true => match read_json(&base.join("items.json"))? {
-                J::Obj(entries) => entries.into_iter().map(|(id, _)| id).collect(),
-                _ => return Err("items.json is not an object".into()),
-            },
-            false => BTreeSet::new(),
-        };
+        let vanilla_items = builtin_item_keys(base)?;
         // Class chains are most-derived first. Fluid-dependent overrides must
         // use the resolved state's fluid, not the template's cached dry answer.
         let mut skylight_rules = BTreeMap::new();
@@ -1326,10 +1318,21 @@ impl<'a> Plan<'a> {
             (names[start + len..].iter().all(|n| n != name))
                 .then_some(start as u32..(start + len) as u32)
         };
-        let declared_ids: BTreeSet<&str> = mods
-            .iter()
-            .flat_map(|m| m.content.blocks.iter().map(|b| b.id.as_str()))
-            .collect();
+        // Native declarations can share a namespace with another package, not a registry key.
+        let mut declared_ids = BTreeSet::new();
+        let mut item_ids = BTreeSet::new();
+        for m in mods {
+            for block in &m.content.blocks {
+                if defaults.contains_key(&block.id) || !declared_ids.insert(block.id.as_str()) {
+                    return Err(format!("{}: {} is already a block", m.id, block.id).into());
+                }
+            }
+            for id in declared_item_ids(m) {
+                if vanilla_items.contains(id) || !item_ids.insert(id) {
+                    return Err(format!("{}: {id} is already an item", m.id).into());
+                }
+            }
+        }
         let mut block_entity_types: Vec<(&str, &BlockEntityType)> = mods
             .iter()
             .flat_map(|m| {
@@ -1351,17 +1354,11 @@ impl<'a> Plan<'a> {
             };
             let mut ids: BTreeSet<&str> = entries.iter().map(|(id, _)| id.as_str()).collect();
             for (mod_id, kind) in &block_entity_types {
-                if kind.id.starts_with("minecraft:") {
-                    return Err(ReservedBlockEntityNamespace {
-                        kind: kind.id.clone(),
-                    }
-                    .into());
-                }
                 if !ids.insert(&kind.id) {
                     return Err(format!("block entity type {} is already declared", kind.id).into());
                 }
                 for block in &kind.blocks {
-                    if block.starts_with("minecraft:") {
+                    if defaults.contains_key(block.as_str()) {
                         return Err(format!(
                             "mod {mod_id}: block entity type {} cannot own vanilla block {block}",
                             kind.id
@@ -1455,9 +1452,6 @@ impl<'a> Plan<'a> {
                     }
                     None => None,
                 };
-                if defaults.contains_key(&decl.id) {
-                    return Err(format!("{}: {} is already a block", m.id, decl.id).into());
-                }
                 if decl.shapes_from_block_entity
                     && !block_entity_factories.contains_key(decl.id.as_str())
                 {
@@ -2247,7 +2241,7 @@ impl<'a> Plan<'a> {
             }
             for i in &self.items {
                 if let Some(rest) = &i.crafting_remainder
-                    && map.get(rest).is_none()
+                    && (rest == "minecraft:air" || map.get(rest).is_none())
                 {
                     return Err(format!(
                         "{}: crafting_remainder {rest:?} is not an item",
@@ -3135,6 +3129,7 @@ fn place_in_biomes(
     base: &Path,
     overlay: &Overlay<'_>,
     modifiers: &[biomes::Modifier],
+    modifier_sources: Vec<[String; 3]>,
     enabled_mods: Vec<String>,
     biome_tags: Option<J>,
     placed: Option<J>,
@@ -3175,7 +3170,7 @@ fn place_in_biomes(
         carver_ids,
         carver_tags: modifier_tags(base, overlay, tags, "worldgen/carver")?,
         enabled_mods,
-        modifiers: modifiers.iter().map(|m| m.source.clone()).collect(),
+        modifiers: modifier_sources,
         unmodified: BTreeMap::new(),
         feature_tags,
         entity_categories,
@@ -3346,7 +3341,9 @@ pub fn biome_modifiers_over_packs(
     };
     let mut warnings = Vec::new();
     let mut modifiers = Vec::new();
-    for [m, file, text] in saved.modifiers.iter().chain(declared) {
+    let sources = || saved.modifiers.iter().chain(declared);
+    biomes::check_registry(sources().map(|[owner, file, _]| (owner.as_str(), file.as_str())))?;
+    for [m, file, text] in sources() {
         modifiers.extend(biomes::Modifier::read(
             m,
             file,
@@ -3359,8 +3356,11 @@ pub fn biome_modifiers_over_packs(
     let packed = packs.apply("biomes", read(BIOMES)?);
     let mut start = packed.clone();
     for (id, text) in &saved.unmodified {
-        if packs.entries("biomes").all(|(p, _)| p != id) {
-            start.insert(id.clone(), text.clone());
+        if packs.entries("biomes").all(|(p, _)| p != id)
+            && let Some(value) = start.get_mut(id)
+        {
+            // Restore the pre-modifier value, not a holder refused by the world load.
+            value.clone_from(text);
         }
     }
     let mut doc = J::Obj(start.into_iter().map(|(id, t)| (id, J::Str(t))).collect());
@@ -3973,8 +3973,7 @@ pub fn resolved_resources(
 /// The root to load: `base` itself with no content, else the mods' overlay
 /// over it, built in `cache/mod-content/<stamp>`: one folder per mod set, so
 /// a running game keeps reading the root it was given while a switch builds
-/// another (docs/design/mod-hotload.md). Roots of other sets unused for a day
-/// are removed.
+/// another. Roots of other sets unused for a day are removed.
 ///
 /// The root is built once and kept: later starts with the same build, base
 /// and mod files reuse it. With ATM10's carried mods a build takes about
@@ -4017,10 +4016,10 @@ fn real_base(base: &Path) -> Result<PathBuf> {
     Ok(fs::canonicalize(base).map_err(|e| format!("{}: {e}", base.display()))?)
 }
 
-/// Whether turning a content mod on or off can apply in a running game
-/// (docs/design/mod-hotload.md): its assets and data can, through the
-/// resource reload and the server's data reload. What a world numbers or
-/// generates from cannot yet: then the translation key of why.
+/// Whether turning a content mod on or off can apply in a running game:
+/// its assets and data can, through the resource reload and the server's data
+/// reload. What a world numbers or generates from cannot yet: then the
+/// translation key of why.
 pub fn live_switch(content: &Content) -> std::result::Result<(), &'static str> {
     if !content.blocks.is_empty()
         || !content.items.is_empty()

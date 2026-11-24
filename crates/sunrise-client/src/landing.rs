@@ -811,6 +811,7 @@ impl LivingFallWorld for FallCall<'_, '_, '_, '_> {
                 self.world.block_registries,
                 self.world.damage_hooks,
             )
+            .with_player_equipment(self.world.side.player_equipment())
             .with_reads(self.world.side.hit_reads()),
             resources,
             rules,

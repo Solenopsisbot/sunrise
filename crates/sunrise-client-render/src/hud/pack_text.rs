@@ -5,7 +5,7 @@
 use crate::resource_source::ResourceSource;
 use std::sync::Arc;
 
-use crate::core_shader::{CoreProgram, Glue};
+use sunrise_glsl::{Glue, Translated};
 
 use super::{HudBatch, HudVertex};
 use crate::gfx::hud_coverage::Pipeline;
@@ -42,7 +42,7 @@ pub(super) fn load_pair(
     defines: &[&str],
     glue: &Glue,
     provided: &dyn Fn(&str) -> bool,
-) -> Option<Arc<CoreProgram>> {
+) -> Option<Arc<Translated>> {
     let name = names.1;
     match translate_pair(root, defaults, names, defines, glue, provided)? {
         Ok(program) => {
@@ -60,7 +60,7 @@ pub(super) fn load_pair(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     /// A stage or include over the translator's budget for a whole shader
-    /// (`core_shader::MAX_EXPANDED`).
+    /// (`sunrise_glsl::MAX_EXPANDED`).
     OverBudget { path: String },
     /// A stage or include that isn't UTF-8 text.
     NotText { path: String },
@@ -82,7 +82,7 @@ impl std::fmt::Display for Refusal {
             Self::OverBudget { path } => write!(
                 f,
                 "{path} is over the {} bytes a shader may have",
-                crate::core_shader::MAX_EXPANDED
+                sunrise_glsl::MAX_EXPANDED
             ),
             Self::NotText { path } => write!(f, "{path} is not UTF-8 text"),
             Self::Unreadable { path, error } => write!(f, "{path}: {error}"),
@@ -111,7 +111,7 @@ fn translate_pair(
     defines: &[&str],
     glue: &Glue,
     provided: &dyn Fn(&str) -> bool,
-) -> Option<Result<CoreProgram, Refusal>> {
+) -> Option<Result<Translated, Refusal>> {
     let stages = match selected_stages(root, defaults, (vertex_name, name), &[defines])? {
         Ok(stages) => stages,
         Err(e) => return Some(Err(e)),
@@ -168,14 +168,14 @@ fn translate_selected(
     defines: &[&str],
     glue: &Glue,
     provided: &dyn Fn(&str) -> bool,
-) -> Result<CoreProgram, Refusal> {
+) -> Result<Translated, Refusal> {
     let unavailable = std::cell::RefCell::new(None);
     let include = |id: &str| {
         let (refusal, text) = include_of(root, id);
         *unavailable.borrow_mut() = refusal;
         text
     };
-    let stages = crate::core_shader::Stages {
+    let stages = sunrise_glsl::Stages {
         dir: "minecraft:shaders/core/",
         vertex,
         fragment,
@@ -215,15 +215,15 @@ fn include_of(
 /// `translate`'s result, or its panic as a refusal: a pack's GLSL is untrusted, and a fault the
 /// translator or naga meets in it must not end the game.
 fn contained(
-    translate: impl FnOnce() -> Result<CoreProgram, String>,
-) -> Result<CoreProgram, Refusal> {
+    translate: impl FnOnce() -> Result<Translated, String>,
+) -> Result<Translated, Refusal> {
     crate::crash::contain(translate)
         .map_err(Refusal::Panicked)
         .and_then(|translated| translated.map_err(Refusal::Translation))
 }
 
 /// A shader file (a stage or an include) of `base`, read only up to the translator's budget
-/// for a whole shader (`core_shader::MAX_EXPANDED`, 1 MiB): none when `base` hasn't it, the
+/// for a whole shader (`sunrise_glsl::MAX_EXPANDED`, 1 MiB): none when `base` hasn't it, the
 /// refusal naming its path when it is over the budget or isn't text.
 pub(crate) fn read_shader_file(
     base: &ResourceSource,
@@ -232,7 +232,7 @@ pub(crate) fn read_shader_file(
     if !base.contains(path) {
         return Ok(None);
     }
-    let max = crate::core_shader::MAX_EXPANDED as u64;
+    let max = sunrise_glsl::MAX_EXPANDED as u64;
     let path = path.to_owned();
     // `read_limited` refuses a resource over `max` as invalid data.
     let bytes = base.read_limited(&path, max).map_err(|e| match e.kind() {
@@ -255,7 +255,7 @@ fn load_lightmap(
     defaults: &ResourceSource,
     modifiers: &crate::polytone_post::ShaderModifiers,
 ) -> Option<(
-    Arc<CoreProgram>,
+    Arc<Translated>,
     Vec<crate::polytone_post::ExpressionUniform>,
 )> {
     let shaders = crate::gfx::core_lightmap::SHADERS;
@@ -284,21 +284,21 @@ trait UnzipOrDefault {
     fn unzip_or_default(
         self,
     ) -> (
-        Option<Arc<CoreProgram>>,
+        Option<Arc<Translated>>,
         Vec<crate::polytone_post::ExpressionUniform>,
     );
 }
 
 impl UnzipOrDefault
     for Option<(
-        Arc<CoreProgram>,
+        Arc<Translated>,
         Vec<crate::polytone_post::ExpressionUniform>,
     )>
 {
     fn unzip_or_default(
         self,
     ) -> (
-        Option<Arc<CoreProgram>>,
+        Option<Arc<Translated>>,
         Vec<crate::polytone_post::ExpressionUniform>,
     ) {
         match self {
@@ -322,7 +322,7 @@ fn load_with_expressions(
     (label, defines): (&str, &[&str]),
     glue: &Glue,
 ) -> Option<(
-    Arc<CoreProgram>,
+    Arc<Translated>,
     Vec<crate::polytone_post::ExpressionUniform>,
 )> {
     let name = id.strip_prefix("minecraft:core/")?;
@@ -480,7 +480,7 @@ impl PackText {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         atlas: &wgpu::TextureView,
-        (program, expressions): (&CoreProgram, &[crate::polytone_post::ExpressionUniform]),
+        (program, expressions): (&Translated, &[crate::polytone_post::ExpressionUniform]),
         coverage: bool,
     ) -> Option<Self> {
         // A pack's shader is untrusted: the backend failing to compile it is an internal error.
@@ -757,7 +757,7 @@ mod tests {
         (source(pack), source(vanilla.to_vec()))
     }
 
-    fn lightmap(own: &[(&str, &str)]) -> Option<Arc<CoreProgram>> {
+    fn lightmap(own: &[(&str, &str)]) -> Option<Arc<Translated>> {
         lightmap_with_expressions(own).map(|(program, _)| program)
     }
 
@@ -765,7 +765,7 @@ mod tests {
     fn lightmap_with_expressions(
         own: &[(&str, &str)],
     ) -> Option<(
-        Arc<CoreProgram>,
+        Arc<Translated>,
         Vec<crate::polytone_post::ExpressionUniform>,
     )> {
         let (root, defaults) = lightmap_packs(own);
@@ -908,7 +908,7 @@ mod tests {
     }
 
     /// [`lightmap`]'s translation, with why it is refused.
-    fn lightmap_translation(own: &[(&str, &str)]) -> Option<Result<CoreProgram, Refusal>> {
+    fn lightmap_translation(own: &[(&str, &str)]) -> Option<Result<Translated, Refusal>> {
         let (root, defaults) = lightmap_packs(own);
         translate_pair(
             &root,

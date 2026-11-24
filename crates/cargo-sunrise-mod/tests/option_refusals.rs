@@ -32,6 +32,19 @@ fn update_lock_is_refused_for_a_content_mod() {
 
 #[test]
 #[ignore = "daily"]
+fn pin_in_a_content_mod_is_refused_before_any_build_is_resolved() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(tool(root.path(), &["new", "ruby"]).status.success());
+    let content = root.path().join("ruby");
+    // A base with no SDK: resolving the Nightly would fail there, so only the project's own
+    // manifest can answer, and it says a content mod pins no build.
+    let output = tool(&content, &["pin"]);
+    assert_eq!(output.status.code(), Some(1));
+    refused_before_any_work(&content, &output, "pins no game build");
+}
+
+#[test]
+#[ignore = "daily"]
 fn check_fit_refuses_project_options_before_fetching_an_sdk() {
     let root = tempfile::tempdir().unwrap();
     for args in [&["--uses"][..], &["--with", "library"][..]] {

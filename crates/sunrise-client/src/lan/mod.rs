@@ -49,6 +49,7 @@ mod sound_order;
 pub mod tracking;
 pub mod viewed_levels;
 pub mod waypoints;
+mod weather;
 
 pub use body::Body;
 pub use conn::{Holding, PlayerSender, flush_all};

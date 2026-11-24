@@ -10,7 +10,7 @@
 //! What a call costs is the handler's. A bulk store keyed by kind answers a question about one
 //! kind, and a move of one kind, in constant time whatever it holds. The game's own adapter
 //! answers each question in one pass over the slots the side reaches (O(slots), with no work per
-//! item moved); a mod's `ITEMS` handler wrapped by kind is asked slot by slot. [`transfer`] is
+//! item moved); the adapter for a mod's `ITEMS` can skip empty gaps in sparse handlers. [`transfer`] is
 //! four handler calls whatever it moves. [`ItemStorage::visit_entries`] reads entries in
 //! provider order and stops as soon as the visitor breaks.
 //!
@@ -19,6 +19,8 @@
 //! measurements behind this API, 256 pipes moving 8 items a tick each cost 2.8 ms a tick that
 //! way against 3.7 ms through `STORAGE`. `STORAGE` pays off for bulk stores, large moves, and
 //! networks that sleep while idle.
+use crate::content::resource::{advance_transfer_index, insert_candidate};
+use crate::resource_util::visit_slots;
 use crate::{
     BlockSide, Capability, CapabilityKey, HostTransaction as _, ITEMS, ItemResource,
     ResourceHandler, ServerHost, TransactionContext, TransactionError,
@@ -160,7 +162,7 @@ pub const STORAGE: CapabilityKey<dyn ItemStorage> = CapabilityKey {
     name: "sunrise:storage",
     default: Some(crate::BlockCapabilityDefault::Server(|host, at| {
         let slots = at.level.capability(host, STORAGE_SOURCE, at.pos, at.side)?;
-        // The game's own slots are asked in one pass each; a mod's ITEMS, slot by slot.
+        // The game's own slots have a direct path; use handler traversal for mod ITEMS.
         Some(match slots.owner {
             None => Box::new(GameStorage(at)) as Box<dyn ItemStorage>,
             Some(_) => Box::new(Slots(slots)),
@@ -292,7 +294,7 @@ impl ItemStorage for GameStorage {
     }
 }
 
-/// [`STORAGE`] over a mod's own [`ITEMS`] handler, asked slot by slot. It inserts as
+/// [`STORAGE`] over a mod's own [`ITEMS`] handler. It inserts as
 /// `SimpleContainer.addItem` orders it: the slots that hold the kind first, then the empty ones.
 struct Slots(Capability<dyn ResourceHandler<ItemResource>>);
 
@@ -300,30 +302,6 @@ impl Slots {
     /// What slot `index` holds when it holds `resource`.
     fn holds(&self, host: &mut dyn ServerHost, index: usize, resource: &ItemResource) -> bool {
         self.0.resource(host, index).as_ref() == Some(resource)
-    }
-    /// Up to `left` into the slots `pick` chooses, as one slot takes at most `u32::MAX`.
-    fn fill(
-        &self,
-        host: &mut dyn ServerHost,
-        tx: &TransactionContext,
-        resource: &ItemResource,
-        left: &mut u64,
-        pick: impl Fn(&mut dyn ServerHost, usize) -> bool,
-    ) -> Result<(), StorageError> {
-        for index in 0..self.0.size(host) {
-            if *left == 0 {
-                return Ok(());
-            }
-            if pick(host, index) {
-                let ask = (*left).min(u32::MAX as u64) as u32;
-                let moved = self
-                    .0
-                    .insert_at(host, tx, index, resource, ask)
-                    .map_err(storage_error_from_tx)?;
-                *left -= moved.min(ask) as u64;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -334,7 +312,8 @@ impl ItemStorage for Slots {
         resource: &ItemResource,
     ) -> Result<u64, StorageError> {
         let mut held = 0u64;
-        for index in 0..self.0.size(host) {
+        let mut indices = 0..self.0.size(host);
+        while let Some(index) = advance_transfer_index(&self.0, host, &mut indices, None) {
             if self.holds(host, index, resource) {
                 held = held
                     .checked_add(self.0.amount(host, index) as u64)
@@ -349,8 +328,9 @@ impl ItemStorage for Slots {
         resource: &ItemResource,
     ) -> Result<u64, StorageError> {
         let mut room = 0u64;
-        for index in 0..self.0.size(host) {
-            let here = match self.0.resource(host, index) {
+        visit_slots(host, &self.0, |host, slots, held| {
+            let index = slots.start;
+            let here = match held {
                 Some(held) if held == *resource => self
                     .0
                     .capacity(host, index, Some(resource))
@@ -361,10 +341,12 @@ impl ItemStorage for Slots {
                 }
                 None => 0,
             };
-            room = room
-                .checked_add(here as u64)
+            let space = u64::from(here)
+                .checked_mul(slots.len() as u64)
                 .ok_or(StorageError::Overflow)?;
-        }
+            room = room.checked_add(space).ok_or(StorageError::Overflow)?;
+            Ok::<_, StorageError>(())
+        })?;
         Ok(room)
     }
     fn insert(
@@ -378,12 +360,26 @@ impl ItemStorage for Slots {
             return Err(StorageError::InvalidContext);
         }
         let mut left = amount;
-        self.fill(host, tx, resource, &mut left, |host, index| {
-            self.holds(host, index, resource)
-        })?;
-        self.fill(host, tx, resource, &mut left, |host, index| {
-            self.0.resource(host, index).is_none()
-        })?;
+        for (inserting, held) in [(None, Some(resource)), (Some(resource), None)] {
+            if left == 0 {
+                break;
+            }
+            let mut indices = 0..self.0.size(host);
+            while left > 0 {
+                let Some(index) = advance_transfer_index(&self.0, host, &mut indices, inserting)
+                else {
+                    break;
+                };
+                if self.0.resource(host, index).as_ref() == held {
+                    let ask = left.min(u64::from(u32::MAX)) as u32;
+                    let (wrote, next) =
+                        insert_candidate(&self.0, host, tx, index..indices.end, resource, ask)
+                            .map_err(storage_error_from_tx)?;
+                    indices.start = next;
+                    left -= u64::from(wrote.min(ask));
+                }
+            }
+        }
         Ok(amount - left)
     }
     fn extract(
@@ -397,10 +393,11 @@ impl ItemStorage for Slots {
             return Err(StorageError::InvalidContext);
         }
         let mut left = amount;
-        for index in 0..self.0.size(host) {
-            if left == 0 {
+        let mut indices = 0..self.0.size(host);
+        while left > 0 {
+            let Some(index) = advance_transfer_index(&self.0, host, &mut indices, None) else {
                 break;
-            }
+            };
             if self.holds(host, index, resource) {
                 let ask = left.min(u32::MAX as u64) as u32;
                 let moved = self
@@ -417,7 +414,8 @@ impl ItemStorage for Slots {
         host: &mut dyn ServerHost,
         visitor: &mut dyn FnMut(&ItemResource, u64) -> ControlFlow<()>,
     ) -> Result<(), StorageError> {
-        for index in 0..self.0.size(host) {
+        let mut indices = 0..self.0.size(host);
+        while let Some(index) = advance_transfer_index(&self.0, host, &mut indices, None) {
             if let Some(resource) = self.0.resource(host, index) {
                 let amount = u64::from(self.0.amount(host, index));
                 if visitor(&resource, amount).is_break() {

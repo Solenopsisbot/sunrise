@@ -26,9 +26,10 @@ pub(super) struct GameCpuResources {
     pub(super) creative_screen: Creative,
 }
 
-/// Baked layers of entities that may first show up deep into a session. They come from the
-/// document parsed once at startup: parsing entity-models.json (2.4 MB) when the first one
-/// appeared stalled that frame by 40 ms of CPU and the file read.
+/// Baked layers of entities that may first show up deep into a session, plus every
+/// layer from `entity-models.json` indexed for `bake_layer`. They come from the
+/// document parsed once at startup and pack reload: parsing entity-models.json (2.4 MB)
+/// when the first one appeared stalled that frame by 40 ms of CPU and the file read.
 #[derive(Default)]
 pub(super) struct EntityModels {
     /// LeashKnotModel.
@@ -43,11 +44,25 @@ pub(super) struct EntityModels {
     pub(super) evoker_fangs: Option<Arc<sunrise_client::mobs::Part>>,
     /// BannerModel's pole and flag (a raid captain's banner).
     pub(super) banner: Option<(sunrise_client::mobs::Part, sunrise_client::mobs::Part)>,
+    /// All layers indexed from `entity-models.json` at client resource load and reload
+    /// (matching vanilla `EntityModelSet.bakeLayer`).
+    pub(super) layers: sunrise_client::fast_hash::FxHashMap<String, mod_api::ModelPart>,
 }
 
 impl EntityModels {
     pub(super) fn load(document: Option<&sunrise_client::mobs::EntityModelDocument>) -> Self {
         let model = |key| document.and_then(|document| document.model(key));
+        let mut layers = sunrise_client::fast_hash::FxHashMap::default();
+        if let Some(document) = document {
+            for key in document.keys() {
+                if let Some(part) = document.model(key) {
+                    layers.insert(
+                        key.to_owned(),
+                        sunrise_client::mobs::model_layers::from_part(&part),
+                    );
+                }
+            }
+        }
         Self {
             leash_knot: model("minecraft:leash_knot#main"),
             wind_charge: model("minecraft:wind_charge#main"),
@@ -56,6 +71,7 @@ impl EntityModels {
             evoker_fangs: model("minecraft:evoker_fangs#main").map(Arc::new),
             banner: model("minecraft:standing_banner#main")
                 .zip(model("minecraft:standing_banner#flag")),
+            layers,
         }
     }
 }
@@ -199,7 +215,11 @@ pub(super) struct Loaded {
 /// What the background loader publishes: the menu bundle as soon as it is
 /// ready, then the core bundle with a handle to the rest worker.
 pub(super) enum LoaderMsg {
-    Ui(UiResources, PathBuf),
+    Ui(
+        UiResources,
+        PathBuf,
+        sunrise_assets::resource_source::ResourceSource,
+    ),
     /// Clear the failed revision on the thread that owns settings, then acknowledge.
     ClearPackSelection {
         revision: u64,
@@ -303,6 +323,7 @@ pub(super) fn run_loading(
 ) -> Result<()> {
     let progress = Progress::new();
     let menu = startup_menu::StartupMenu::new(&options, pack_error.as_deref())?;
+    let max_atlas_size = Arc::new(AtomicU32::new(sunrise_client::hud::MAX_ATLAS_SIZE));
     let (receiver, loader) = startup_menu::spawn_loader(
         &options,
         &settings,
@@ -311,10 +332,12 @@ pub(super) fn run_loading(
         &vanilla_root,
         started,
         &progress,
+        &max_atlas_size,
     )?;
     let loading = Loading {
         window: None,
         renderer: None,
+        max_atlas_size,
         boot: sunrise_client::hud::HudAtlas::boot(),
         gui: None,
         settings,
@@ -359,4 +382,85 @@ pub(super) fn run_loading(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entity_models_indexes_non_mob_layers_without_keeping_disk_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        std::fs::write(
+            path.join("entity-models.json"),
+            r#"{
+                "minecraft:chest#main": {
+                    "pose": [1.0, 2.0, 3.0, 0.25, -0.5, 0.75, 1.0, 2.0, 0.5],
+                    "polygons": [
+                        [
+                            [0.0, 0.0, 0.0, 0.0, 0.0],
+                            [14.0, 0.0, 0.0, 0.25, 0.0],
+                            [14.0, 10.0, 0.0, 0.25, 0.5],
+                            [0.0, 10.0, 0.0, 0.0, 0.5]
+                        ]
+                    ],
+                    "normals": [[0.0, 0.0, 1.0]],
+                    "children": {
+                        "lid": { "pose": [1.0, 9.0, 1.0] },
+                        "lock": { "pose": [7.0, 7.0, 15.0] }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let document = sunrise_client::mobs::EntityModelDocument::load(&path).unwrap();
+        let entity_models = EntityModels::load(Some(&document));
+        drop(document);
+        drop(dir);
+        assert!(!path.exists());
+
+        let mut root_pose = mod_api::PartPose::offset_and_rotation(1.0, 2.0, 3.0, 0.25, -0.5, 0.75);
+        root_pose.x_scale = 1.0;
+        root_pose.y_scale = 2.0;
+        root_pose.z_scale = 0.5;
+        let expected = mod_api::ModelPart::new(
+            vec![mod_api::ModelPolygon::new(
+                [
+                    mod_api::ModelVertex::new([0.0, 0.0, 0.0], 0.0, 0.0),
+                    mod_api::ModelVertex::new([14.0, 0.0, 0.0], 0.25, 0.0),
+                    mod_api::ModelVertex::new([14.0, 10.0, 0.0], 0.25, 0.5),
+                    mod_api::ModelVertex::new([0.0, 10.0, 0.0], 0.0, 0.5),
+                ],
+                [0.0, 0.0, 1.0],
+            )],
+            vec![
+                (
+                    "lid".to_owned(),
+                    mod_api::ModelPart::new(
+                        Vec::new(),
+                        Vec::new(),
+                        mod_api::PartPose::offset(1.0, 9.0, 1.0),
+                    ),
+                ),
+                (
+                    "lock".to_owned(),
+                    mod_api::ModelPart::new(
+                        Vec::new(),
+                        Vec::new(),
+                        mod_api::PartPose::offset(7.0, 7.0, 15.0),
+                    ),
+                ),
+            ],
+            root_pose,
+        );
+
+        assert_eq!(
+            entity_models.layers.get("minecraft:chest#main"),
+            Some(&expected)
+        );
+        assert_eq!(entity_models.layers.get("minecraft:unknown#main"), None);
+        assert!(EntityModels::load(None).layers.is_empty());
+    }
 }

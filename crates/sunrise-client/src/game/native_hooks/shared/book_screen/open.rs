@@ -13,9 +13,6 @@ impl Game<'_> {
             .facts()
             .get(self.world.block(pos.0, pos.1, pos.2))
             .name;
-        if block.starts_with("minecraft:") {
-            return None;
-        }
         let container = mod_api::__private::parts_installation::block_container(block)?;
         let (opens, _) = mod_menu(container.menu.as_deref()?)?;
         (opens == menu).then_some(block.as_ref())

@@ -1,5 +1,4 @@
 //! The `dispense_item` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0075
 
 pub trait Hooks {
     /// `DispenserBlock.getDispenseMethod`: choose a behaviour for any item,
@@ -15,7 +14,8 @@ pub trait Hooks {
     /// published effects at the outermost commit and are discarded on abort.
     /// The remainder is detached until the dispenser writes its slot. An invalid remainder is
     /// reported without writing or notifying the slot, and no other behaviour runs. To drop one
-    /// normally, answer with `host.dispense_default`'s remainder and 1000.
+    /// normally, resolve `host.level(dimension)`, call `level.dispense_default(host, pos, facing, stack)`,
+    /// and answer `(remainder, 1000)` on `Ok(remainder)`.
     #[hook(
         target = "sunrise_client::game::native_hooks::base::Game<'_>::native_dispense_item",
         dispatch = "flat",

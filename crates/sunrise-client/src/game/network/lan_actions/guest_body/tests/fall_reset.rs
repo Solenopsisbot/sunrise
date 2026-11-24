@@ -313,3 +313,40 @@ fn a_totem_saves_the_guest_before_its_tracked_fall_ends() {
         },
     );
 }
+
+#[test]
+#[ignore = "daily"]
+fn lethal_landing_consumes_one_item_with_death_protection_from_the_selected_slot() {
+    crate::game::in_own_process(
+        "game::lan_actions::guest_body::tests::fall_reset::lethal_landing_consumes_one_item_with_death_protection_from_the_selected_slot",
+        || {
+            let mut resources = None;
+            let scratch = tempfile::tempdir().unwrap();
+            let mut g = scene(&mut resources, scratch.path());
+            tick_with_moves(&mut g, &[105.0], (5.0, None, [false; 3]));
+
+            let mut item = ItemStack::new("minecraft:stick", 2);
+            item.data_mut().set_other(
+                "minecraft:death_protection",
+                Some(sunrise_core::nbt::Tag::Compound(Default::default())),
+            );
+            g.as_guest(1, |game| {
+                game.player
+                    .as_mut()
+                    .unwrap()
+                    .set_health(0.5, false)
+                    .unwrap();
+                game.selected = 1;
+                game.inventory[1] = Some(item.clone());
+            })
+            .unwrap();
+
+            drain_moves(&mut g, [(100.0, 1)]);
+            let guest = &g.lan.as_ref().unwrap().hub.guests[0];
+            assert!(!guest.dead);
+            assert_eq!(guest.health, 1.0);
+            item.count = 1;
+            assert_eq!(guest.inventory[1].as_ref(), Some(&item));
+        },
+    );
+}

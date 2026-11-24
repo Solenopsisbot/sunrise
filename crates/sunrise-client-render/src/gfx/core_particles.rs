@@ -431,7 +431,7 @@ impl CoreParticles {
             });
         }
         for (i, o) in other.iter().enumerate() {
-            entries.push(buffer_entry(crate::core_shader::other_binding(i), o.size()));
+            entries.push(buffer_entry(program.other_binding(i), o.size()));
         }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Polytone GPU particle"),
@@ -474,7 +474,7 @@ impl CoreParticles {
         }
         for (i, o) in other.iter().enumerate() {
             resources.push(buffer(
-                crate::core_shader::other_binding(i),
+                program.other_binding(i),
                 OTHER_OFFSET + 256 * i as u64,
                 o.size(),
             ));

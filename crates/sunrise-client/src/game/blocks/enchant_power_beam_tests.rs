@@ -190,7 +190,7 @@ fn enchant_power_query_reads_the_named_server_level_and_refuses_cycles() {
                 "offers keep the tag default"
             );
             game.native_lifecycle
-                .begin_open(mod_api::Authority::IntegratedServer);
+                .begin_open(Some(mod_api::Authority::IntegratedServer));
             assert_eq!(
                 nether.get_enchant_power_bonus(game, PROVIDER, glass, UNRELATED_TABLE),
                 Err(LevelReadError::Stale)
@@ -209,8 +209,7 @@ fn enchant_power_query_reads_the_logged_in_client_level() {
         false,
         |game, calls| {
             let _server = crate::game::native_client_session::tests::logged_client(game);
-            game.native_lifecycle
-                .begin_open(mod_api::Authority::RemoteClient);
+            game.native_lifecycle.begin_open(None);
             game.world
                 .chunks
                 .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
@@ -399,8 +398,7 @@ fn enchant_particles_share_native_power_and_rebuild_only_on_parts_reload() {
         crate::game::execution_role::ExecutionRole::Client,
         |game| {
             let _server = logged_client(game);
-            game.native_lifecycle
-                .begin_open(mod_api::Authority::RemoteClient);
+            game.native_lifecycle.begin_open(None);
             game.resolve_parts().unwrap();
             game.world
                 .chunks

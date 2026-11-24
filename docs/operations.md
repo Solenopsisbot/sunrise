@@ -88,13 +88,15 @@ version file the game is pinned to. If its text says the jars are unchanged, a p
 from the issue into `research-lock.json` fixes it. New players can't prepare the game until a Nightly with that fix
 is out, so label that pull request `release-now` (or ask the council to) once it merged.
 
-## The mods registry (horizon-rust/horizon-mods)
+## The mods registry (sunrise-org/sunrise-mods)
 
 - **Submissions from the website** arrive as pull requests authored by `ludovic111` (the registry's account). A
-  Team member reviews the mod (what it does, its licence, no sign-in or token handling, no Mojang files; see
-  `MOD-POLICY.md` there), approves, and squash-merges once `check` passed. Publishing to the registry is hourly
+  Team member reviews every one of them, owner updates with a signed trailer included, for malware, dangerous
+  patterns and suspicious or obfuscated code only (never licences, provenance or copyright), approves, and
+  squash-merges once `check` passed. The trailer only proves who submitted it; it is never a reason to skip the review. Publishing to the registry is hourly
   (`publish.yml`).
-- **Fork pull requests:** approve their workflow run, and upload the mod's file to the `staging` release as
+- **Fork pull requests:** approve their workflow run, and upload the mod's file to the registry's
+  [`staging` release](https://github.com/sunrise-org/sunrise-mods/releases/tag/staging) as
   `<sha256>.<extension>` after checking its hash.
 - **Taking a mod down:** a pull request adding it to `revoked.toml`. That file is a code-owner path: today only
   Ludovic can approve it. For malware, two council members act at once as an emergency (GOVERNANCE.md 4.6), post

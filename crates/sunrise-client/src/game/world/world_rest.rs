@@ -127,14 +127,10 @@ pub(super) fn load_world_rest(
             catalog,
             mod_api::__private::entity_attribute_modifications(),
         );
-        // The types mods name to `entity_tick_each` hear their ticks one entity at a time
-        // (game/modding/native_ticks.rs): marked once here, so a tick reads a flag.
-        let each = mod_api::__private::entity_tick_each();
         let mob_types: HashMap<_, _> = types
             .types
             .into_iter()
             .map(|(k, mut v)| {
-                v.flags.tick_alone = each.is_some_and(|each| each.names(&v.id));
                 // The entity-type registry is complete before the rest loads
                 // (`register_iterated_registries`): the type keeps its key from it.
                 v.type_key = mod_api::__private::resolved_entity_type_key(&v.id);

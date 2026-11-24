@@ -34,7 +34,7 @@ pub(super) fn api_rotation(rotation: Rotation) -> StructureRotation {
     }
 }
 
-fn api_projection(projection: Projection) -> mod_api::Projection {
+pub(super) fn api_projection(projection: Projection) -> mod_api::Projection {
     match projection {
         Projection::Rigid => mod_api::Projection::Rigid,
         Projection::TerrainMatching => mod_api::Projection::TerrainMatching,
@@ -62,12 +62,17 @@ pub(super) fn element_ref(element: Arc<PoolElement>) -> PoolElementRef {
     let projection = api_projection(element.projection());
     let ground_level_delta = element.ground_level_delta();
     let empty = matches!(*element, PoolElement::Empty);
+    let template_location = match &*element {
+        PoolElement::Single { template, .. } => Identifier::parse(template.location()).ok(),
+        _ => None,
+    };
     mod_api::__private::pool_element_ref(
         element,
         mod_element,
         projection,
         ground_level_delta,
         empty,
+        template_location,
     )
 }
 
@@ -92,21 +97,20 @@ impl ProcessorRandom for ApiDraws<'_> {
     fn long(&mut self) -> i64 {
         self.0.next_long()
     }
-}
-impl PieceDraws for ApiDraws<'_> {
-    fn boolean(&mut self) -> bool {
-        self.0.next_boolean()
+    fn int_unbounded(&mut self) -> i32 {
+        self.0.next_int()
     }
     fn double(&mut self) -> f64 {
         self.0.next_double()
     }
-    fn int_unbounded(&mut self) -> i32 {
-        self.0.next_int()
+    fn boolean(&mut self) -> bool {
+        self.0.next_boolean()
     }
     fn gaussian(&mut self) -> f64 {
         self.0.next_gaussian()
     }
 }
+impl PieceDraws for ApiDraws<'_> {}
 
 /// An engine jigsaw as the API's. An id the API can't parse reads as
 /// `minecraft:empty`, the id vanilla's jigsaws default to.
@@ -135,7 +139,7 @@ fn api_jigsaw(jigsaw: Jigsaw<'_>) -> JigsawBlock {
 }
 
 /// An API jigsaw as the engine's.
-fn engine_jigsaw(jigsaw: JigsawBlock) -> Jigsaw<'static> {
+pub(super) fn engine_jigsaw(jigsaw: JigsawBlock) -> Jigsaw<'static> {
     Jigsaw {
         pos: jigsaw.pos,
         front: jigsaw.front,
@@ -202,15 +206,17 @@ impl ElementDecodeContext for Decoding<'_> {
     }
     fn element(&self, config: &sunrise_core::nbt::Tag) -> Result<PoolElementRef, StructureError> {
         let value = sunrise_core::json_nbt::tag_to_json(config)
-            .map_err(|error| StructureError(error.to_string()))?;
+            .map_err(|error| StructureError::new(std::io::Error::other(error.to_string())))?;
         let element = PoolElement::decode_element(&value, self.resources, self.bindings)
-            .map_err(|error| StructureError(error.to_string()))?;
+            .map_err(|error| StructureError::new(std::io::Error::other(error.to_string())))?;
         Ok(element_ref(Arc::new(element)))
     }
 }
 
 /// The engine's element type around a mod's.
 struct ElementType {
+    id: &'static str,
+    mod_id: &'static str,
     inner: Arc<dyn PoolElementType>,
 }
 impl ModPoolElementType for ElementType {
@@ -227,14 +233,23 @@ impl ModPoolElementType for ElementType {
             bindings,
             worker,
         };
-        let inner = self.inner.decode(&context, &config).map_err(|e| e.0)?;
-        Ok(Arc::new(ModElement { inner }))
+        let inner = self
+            .inner
+            .decode(&context, &config)
+            .map_err(|e| e.to_string())?;
+        Ok(Arc::new(ModElement {
+            id: self.id,
+            mod_id: self.mod_id,
+            inner,
+        }))
     }
 }
 
 /// The engine's element around a mod's.
 #[derive(Debug)]
 struct ModElement {
+    id: &'static str,
+    mod_id: &'static str,
     inner: Arc<dyn mod_api::PoolElement>,
 }
 impl ModPoolElement for ModElement {
@@ -288,10 +303,10 @@ impl ModPoolElement for ModElement {
             mod_api::LiquidSettings::IgnoreWaterlogging
         };
         placement.keep_jigsaws = at.keep_jigsaws;
-        let mut context = Placing::new(context)?;
+        let mut context = Placing::new(context, self.mod_id, self.id)?;
         self.inner
             .place(&mut context, &placement)
-            .map_err(|e| PlacementQueryError::Failed(e.0))
+            .map_err(|e| PlacementQueryError::Failed(e.to_string()))
     }
     fn projection(&self) -> Projection {
         engine_projection(self.inner.projection())
@@ -324,8 +339,13 @@ mod tests;
 pub(in crate::game) fn installed_pool_element_types() -> ModPoolElementTypes {
     mod_api::__private::pool_element_type_declarations()
         .into_iter()
-        .map(|(id, inner)| {
-            let ty: Arc<dyn ModPoolElementType> = Arc::new(ElementType { inner });
+        .map(|(id, mod_id, inner)| {
+            let static_id: &'static str = Box::leak(id.clone().into_boxed_str());
+            let ty: Arc<dyn ModPoolElementType> = Arc::new(ElementType {
+                id: static_id,
+                mod_id,
+                inner,
+            });
             (id, ty)
         })
         .collect()

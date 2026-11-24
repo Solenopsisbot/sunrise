@@ -116,13 +116,16 @@ impl PreparedFiles {
     }
     /// At most the first `max` bytes of `name`, as [`PreparedFiles::read`].
     pub fn read_head(&self, name: &str, max: u64) -> Option<io::Result<Vec<u8>>> {
+        let (offset, len) = self.range(name)?;
+        let mut bytes = vec![0; len.min(max) as usize];
+        Some(read_at(&self.file, &mut bytes, offset).map(|()| bytes))
+    }
+    fn range(&self, name: &str) -> Option<(u64, u64)> {
         let i = self
             .entries
             .binary_search_by(|e| self.name(e).cmp(name))
             .ok()?;
-        let (offset, len) = self.entries[i].data;
-        let mut bytes = vec![0; len.min(max) as usize];
-        Some(read_at(&self.file, &mut bytes, offset).map(|()| bytes))
+        Some(self.entries[i].data)
     }
     /// The files under `dir` (`/`-separated, from the root) and its
     /// subfolders, in name order, by their names from the root; `None` when
@@ -264,6 +267,54 @@ pub fn read(path: &Path) -> io::Result<Vec<u8>> {
             .read(&rel)
             .unwrap_or_else(|| Err(io::ErrorKind::NotFound.into())),
         _ => fs::read(path),
+    }
+}
+
+struct ResourceEntry {
+    files: Arc<PreparedFiles>,
+    offset: u64,
+    remaining: u64,
+}
+
+impl Read for ResourceEntry {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let count = self.remaining.min(out.len() as u64) as usize;
+        if count == 0 {
+            return Ok(0);
+        }
+        read_at(&self.files.file, &mut out[..count], self.offset)?;
+        self.offset += count as u64;
+        self.remaining -= count as u64;
+        Ok(count)
+    }
+}
+
+/// Open the resource at `path` from the same location as [`read`], without
+/// allocating its contents. An absent resource is separate from an I/O error.
+pub fn open_resource(path: &Path) -> io::Result<Option<Box<dyn Read>>> {
+    if let Some((files, rel)) = find(path)
+        && holds_file(&rel)
+    {
+        return Ok(files.range(&rel).map(|(offset, remaining)| {
+            Box::new(ResourceEntry {
+                files,
+                offset,
+                remaining,
+            }) as Box<dyn Read>
+        }));
+    }
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(Some(Box::new(File::open(path)?))),
+        Ok(_) => Ok(None),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }
 

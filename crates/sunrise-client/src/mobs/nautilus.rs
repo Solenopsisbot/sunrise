@@ -178,7 +178,11 @@ pub(super) fn travel(
     let speed = m.ai.speed;
     m.move_relative(speed, input);
     m.travel_move(w, level, events, pause, |m, _, _, _| {
-        m.velocity = Vec3::new(m.velocity.x * 0.9, m.velocity.y * 0.9, m.velocity.z * 0.9);
+        m.set_velocity(Vec3::new(
+            m.velocity.x * 0.9,
+            m.velocity.y * 0.9,
+            m.velocity.z * 0.9,
+        ));
     })
 }
 /// `tickRidden` and `getRiddenInput`: turn half way to the rider, swim along

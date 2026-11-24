@@ -303,7 +303,10 @@ impl Poses {
     }
     /// `skips` by the part's name.
     pub fn skips_named(&self, name: &str) -> bool {
-        !self.skipped.is_empty() && self.skipped.contains(&key(name))
+        !self.skipped.is_empty() && self.skips_key(key(name))
+    }
+    pub(super) fn skips_key(&self, key: u64) -> bool {
+        self.skipped.contains(&key)
     }
     pub fn has(&self, name: &str) -> bool {
         self.map.contains_key(&key(name))
@@ -336,11 +339,10 @@ impl Poses {
     }
     /// Base visibility for animation, without the draw-local overlay.
     pub fn is_hidden_named(&self, name: &str) -> bool {
-        self.base_hidden_count != 0
-            && self
-                .map
-                .get(&key(name))
-                .is_some_and(|entry| entry.base_hidden)
+        self.base_hidden_count != 0 && self.is_hidden_key(key(name))
+    }
+    pub(super) fn is_hidden_key(&self, key: u64) -> bool {
+        self.base_hidden_count != 0 && self.map.get(&key).is_some_and(|entry| entry.base_hidden)
     }
     /// Refill pooled visibility storage before calling Pre, so edits never grow it.
     pub(super) fn prepare_frame_visibility(&mut self, layout: Arc<BakedFrameModel>) {
@@ -416,8 +418,7 @@ impl Poses {
         self.base_hidden_count != 0 || self.frame_visibility_active()
     }
     pub(super) fn is_hidden_at(&self, index: usize, key: u64) -> bool {
-        (self.base_hidden_count != 0 && self.map.get(&key).is_some_and(|entry| entry.base_hidden))
-            || self.frame_visibility_active() && self.frame_hidden[index]
+        self.is_hidden_key(key) || self.frame_visibility_active() && self.frame_hidden[index]
     }
     fn frame_visibility_active(&self) -> bool {
         self.apply_frame_visibility && self.has_frame_edits

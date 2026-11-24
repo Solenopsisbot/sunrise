@@ -4,6 +4,7 @@
 use super::{Game, explosion_settings::BlastEffects, lan::LanHost, level_sounds::LevelSound};
 use mod_api::{SoundSource, client::particles::PositionSource};
 use sunrise_client::lan::{Body, containers::within_range, hub::Hub};
+use sunrise_client::particles::ParticleLevel;
 use sunrise_client::particles::{ExplosionParticle, ParticleOptions, ParticleType};
 use sunrise_core::{
     geometry::{Aabb, Vec3},
@@ -298,6 +299,7 @@ impl Game<'_> {
                     [0.0; 3],
                     speed,
                     count as u32,
+                    None,
                 );
             }
         }
@@ -508,9 +510,10 @@ impl Game<'_> {
         let Some(remote) = &mut self.remote else {
             return;
         };
+        let level = ParticleLevel::new(&self.world, self.res.facts(), self.collision);
         self.particles.handle_level_particles(
             &mut remote.particle_packet_random,
-            &self.world,
+            Some(&level),
             p,
             &options,
         );
@@ -530,11 +533,12 @@ impl Game<'_> {
             let sound = self
                 .remote_sound_name(&p.sound)
                 .unwrap_or_else(|| "minecraft:entity.generic.explode".to_owned());
-            self.audio.play(&sound, Some(p.center), 4.0, pitch);
+            self.play_audio(&sound, Some(p.center), 4.0, pitch);
         }
         if let Some(options) = self.received_particle(&p.particle, p.center) {
-            self.particles.add_with_world(
-                Some(&self.world),
+            let level = ParticleLevel::new(&self.world, self.res.facts(), self.collision);
+            self.particles.add_with(
+                Some(&level),
                 &options,
                 p.center,
                 [1.0, 0.0, 0.0],
@@ -629,25 +633,15 @@ impl Game<'_> {
         });
     }
 
-    /// Resolve a native sound through `play_level_sound_at_*` hooks in the sound's own level and
-    /// drop unknown `minecraft:` events. Sounds emitted from inside a level-sound listener
-    /// (`skip_hooks` or active `asking_level_sound`) skip re-dispatching the hooks and undergo
-    /// registry validation only. Returns the sound ready for pure packet delivery, or `None` if
-    /// canceled/dropped.
+    /// Resolve through the level-sound hooks in the sound's own level. Sounds emitted from
+    /// inside a listener skip re-dispatch, whether still in the listener or queued for a flush.
+    /// Preserve the original holder unless a listener replaces its event key.
     pub(super) fn resolve_native_sound(
         &mut self,
         mut sound: super::creatures::NativeSound,
     ) -> Option<super::creatures::NativeSound> {
-        let sound_known = |game: &Self, name: &str| {
-            !name.starts_with("minecraft:")
-                || game.lan.as_ref().is_some_and(|host| {
-                    host.hub
-                        .registry_id("minecraft:sound_event", name)
-                        .is_some()
-                })
-        };
         if sound.skip_hooks || self.creatures.asking_level_sound {
-            return sound_known(self, &sound.sound).then_some(sound);
+            return Some(sound);
         }
         let emitter = sound.entity.and_then(|id| u32::try_from(id).ok());
         let mut asked = LevelSound::new(&sound.sound, sound.at, sound.volume, sound.pitch)
@@ -659,9 +653,8 @@ impl Game<'_> {
             );
         asked.emitter = emitter;
         let dim = super::Dim::from_id(sound.dimension);
-        let heard = self
-            .with_effect_level(dim, |game| game.ask_level_sound(sound.dimension, asked))?
-            .filter(|heard| sound_known(self, &heard.name))?;
+        let heard =
+            self.with_effect_level(dim, |game| game.ask_level_sound(sound.dimension, asked))??;
         let (edited_name, source, volume, pitch) = (
             match heard.name {
                 std::borrow::Cow::Borrowed(_) => None,
@@ -671,8 +664,11 @@ impl Game<'_> {
             heard.volume,
             heard.pitch,
         );
-        if let Some(name) = edited_name {
+        if let Some(name) = edited_name
+            && name != sound.sound
+        {
             sound.sound = name;
+            sound.inline_range = None;
         }
         sound.source = source;
         sound.volume = volume;
@@ -684,7 +680,7 @@ impl Game<'_> {
     /// (runs no mod hooks and does not touch `self.creatures.lan_sounds`).
     pub(super) fn send_resolved_native_sound(&self, sound: &super::creatures::NativeSound) {
         let Some(host) = &self.lan else { return };
-        let packet = host.hub.sound_packet(
+        let mut packet = host.hub.sound_packet(
             &sound.sound,
             sound.at,
             sound.volume,
@@ -692,6 +688,11 @@ impl Game<'_> {
             sound.source,
             sound.seed,
         );
+        if let Some(range) = sound.inline_range
+            && let C::Sound(packet) = &mut packet
+        {
+            packet.sound = (-1, Some((sound.sound.clone(), range)));
+        }
         // `Level.playSound(except, entity, ...)`: the same sound and
         // seed, bound to the entity.
         let packet = match (packet, sound.entity) {
@@ -706,7 +707,10 @@ impl Game<'_> {
             (packet, _) => packet,
         }
         .encode();
-        let range = f64::from(sound.volume.max(1.0)) * 16.0;
+        let range = sound
+            .inline_range
+            .flatten()
+            .map_or_else(|| f64::from(sound.volume.max(1.0)) * 16.0, f64::from);
         // Wrapped for the level's viewers too: one bound to an entity for those tracking it.
         host.hub
             .send_viewed_sound(sound.dimension, sound.at, range, sound.entity, || {
@@ -722,11 +726,8 @@ impl Game<'_> {
         );
     }
 
-    /// Native sounds wait until the server host is available. An unknown
-    /// `minecraft:` event is dropped; a mod's goes by name (`sound_packet`).
-    /// Each is asked of the mods first (`play_level_sound_at_entity` when
-    /// bound to an entity, `_at_position` otherwise). One at a position also
-    /// goes wrapped to its level's viewers (`Hub::send_viewed_sound`).
+    /// Resolve tick-queued sounds and send them to their level's players and viewers.
+    /// The packet uses the registry ID when present or carries the event inline by name.
     pub(super) fn flush_native_sounds(&mut self) {
         if self.lan.is_none() {
             return;
@@ -1275,7 +1276,6 @@ pub(in crate::game) mod tests {
         assert!(decode_mod_particle(name, &[1, 1, 0, 0, 0]).is_none());
         let decoded = decode_mod_particle(name, bytes).unwrap();
         assert_eq!(decoded.typed_particle, options.typed_particle);
-        let world = sunrise_client::world::World::new(BlockStateId(0), 1);
         let mut engine = sunrise_client::particles::ParticleEngine::new(
             &Default::default(),
             &Default::default(),
@@ -1283,7 +1283,7 @@ pub(in crate::game) mod tests {
         );
         engine.created_requests = Some(Vec::new());
         let mut random = LegacyRandom::new(23);
-        engine.handle_level_particles(&mut random, &world, &packet, &decoded);
+        engine.handle_level_particles(&mut random, None, &packet, &decoded);
         let created = engine.created_requests.as_mut().unwrap();
         assert_eq!(created.len(), 2);
         for request in created.drain(..) {
@@ -1292,7 +1292,7 @@ pub(in crate::game) mod tests {
         packet.count = 0;
         packet.dist = [0.1, -0.2, 0.7];
         packet.max_speed = [0.3, 0.4, 0.9];
-        engine.handle_level_particles(&mut random, &world, &packet, &decoded);
+        engine.handle_level_particles(&mut random, None, &packet, &decoded);
         let created = engine.created_requests.take().unwrap();
         assert_eq!(created.len(), 1);
         assert_eq!(created[0].1, at);

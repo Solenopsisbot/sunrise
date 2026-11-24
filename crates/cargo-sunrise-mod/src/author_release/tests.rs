@@ -632,6 +632,67 @@ mod git_fixtures {
 
     #[test]
     #[ignore = "daily"]
+    fn release_pushes_the_branch_before_the_tag() {
+        let repo = Repo::new();
+        repo.put(MANIFEST, MOD);
+        repo.commit();
+        repo.git(["push", "-u", "origin", "main"]);
+        let old = repo.git(["rev-parse", "HEAD"]);
+        // The hook logs each push with the refs it carries, and refuses the tag.
+        let pushes = repo.bare.join("pushes");
+        let hook = repo.bare.join("hooks/pre-receive");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nline=push\nwhile read -r _ _ ref; do line=\"$line $ref\"; done\necho \"$line\" >> '{}'\ncase \"$line\" in *' refs/tags/v1.4.3') exit 1;; esac\n",
+                pushes.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = repo.release(".", &["patch"], |_, _| Ok(())).unwrap_err();
+        assert!(
+            error.contains("The release commit is on origin and only v1.4.3 remains local"),
+            "{error}"
+        );
+        assert!(
+            error.contains("then push it with `git push origin refs/tags/v1.4.3`"),
+            "{error}"
+        );
+        // Two pushes, the branch alone first.
+        assert_eq!(
+            fs::read_to_string(&pushes).unwrap(),
+            "push refs/heads/main\npush refs/tags/v1.4.3\n"
+        );
+        let commit = repo.git(["rev-parse", "HEAD"]);
+        assert_eq!(repo.git(["rev-parse", "HEAD~1"]), old);
+        assert_eq!(
+            repo.git
+                .text(&repo.bare, ["rev-parse", "refs/heads/main"])
+                .unwrap(),
+            commit
+        );
+        assert!(
+            repo.git
+                .text(&repo.bare, ["rev-parse", "--verify", "refs/tags/v1.4.3"])
+                .is_err()
+        );
+        assert_eq!(repo.git(["rev-parse", "refs/tags/v1.4.3"]), commit);
+
+        // Finishing as the message says publishes the tag on its own.
+        fs::remove_file(&hook).unwrap();
+        repo.git(["push", "origin", "refs/tags/v1.4.3"]);
+        assert_eq!(
+            repo.git
+                .text(&repo.bare, ["rev-parse", "refs/tags/v1.4.3"])
+                .unwrap(),
+            commit
+        );
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn pull_request_release_pushes_a_release_branch_and_leaves_a_protected_default_branch() {
         let repo = Repo::new();
         repo.put(MANIFEST, MOD);

@@ -672,6 +672,12 @@ const FACE: &str = "    vec3 hz_p0 = uintBitsToFloat(hz_cp0);\n    \
         }\n    \
     }\n";
 
+/// GLSL: the face normal and tangent of a terrain vertex from the normal stream
+/// ([`TerrainDraws::Normals`]), which holds `FACE`'s, constants included, in signed normalized
+/// bytes: made unit length again.
+const NORMALS: &str = "    hz_Normal = normalize(hz_v_normal.xyz);\n    \
+    hz_tangent = vec4(normalize(hz_v_tangent.xyz), hz_v_tangent.w);\n";
+
 /// GLSL: a flat-drawn vertex's quad's middle in its sprite (`mc_midTexCoord`), from its four
 /// corners' UVs, after `FACE`.
 const MID: &str = "    uint hz_w3 = hz_uv3;\n    \
@@ -767,8 +773,9 @@ pub fn game_inputs(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerrainDraws {
     /// Per-section draws: each vertex as its attributes alone, its quad's other corners out of
-    /// reach, so its normal and tangent are the constant ones. Where vertex shaders read no
-    /// storage.
+    /// reach, so its normal and tangent are the constant ones. Where the pack's programs fit
+    /// the vertex stage neither with the pages ([`TerrainBindings::pages_fit`]) nor with the
+    /// normal stream ([`TerrainBindings::normals_fit`]).
     Attributes,
     /// Per-section draws whose program also reads its quad's corners from the arena page (set
     /// 3's `hz_vertices`, `PULL_CORNERS`): the face normal and tangent as flat draws give them
@@ -776,6 +783,10 @@ pub enum TerrainDraws {
     Pages,
     /// Flat draws: each vertex pulled from the arena page (`PULL_CORNERS`, `PULL_FLAT`).
     Flat,
+    /// Per-section draws whose vertices also carry their quad's normal and tangent, in a vertex
+    /// buffer of their own beside the arena's vertices ([`NORMAL_ATTRIBUTES`], `NORMALS`): worked
+    /// out at upload as `FACE` works them out. Where per-section draws read no pages.
+    Normals,
 }
 
 impl TerrainDraws {
@@ -786,9 +797,20 @@ impl TerrainDraws {
 
     /// The program binds the arena page at set 3 (`pack_post`'s `Geometry::pages`).
     pub fn reads_pages(self) -> bool {
-        self != Self::Attributes
+        matches!(self, Self::Pages | Self::Flat)
     }
 }
+
+/// Bytes a vertex has in the normal stream ([`TerrainDraws::Normals`]): its normal and its
+/// tangent as [`NORMAL_ATTRIBUTES`] read them.
+pub const NORMAL_BYTES: u64 = 8;
+
+/// The normal stream's vertex attributes ([`TerrainDraws::Normals`]), the third vertex buffer of
+/// a per-section terrain draw: the normal (w 0) and the tangent (w its handedness, -1 or 1), each
+/// as four signed normalized bytes, the format of vanilla 26.3's own vertex normals
+/// (`DefaultVertexFormat`'s `Normal` element is `GpuFormat.RGBA8_SNORM`).
+pub const NORMAL_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+    wgpu::vertex_attr_array![6 => Snorm8x4, 7 => Snorm8x4];
 
 /// Storage buffers a terrain program reading its page binds in its vertex stage for it: set 3's
 /// three (`pack_post::block_ids`'s layout), of which the program reads `hz_vertices`.
@@ -799,25 +821,25 @@ const TERRAIN_UNIFORMS: u32 = 2;
 /// Vertex buffers of a per-section terrain draw: its vertices and its section's origin (the
 /// renderer's `TERRAIN_ATTRIBUTES` and instance layouts).
 const TERRAIN_VERTEX_BUFFERS: u32 = 2;
+/// Bind groups wgpu-core counts for a terrain program's pipeline: the six entries of the layout
+/// `pack_post::construction` gives every gbuffers program, sets 0 to 5, the empty ones among
+/// them (its textures and uniforms, flat draws' tables, the draw uniform, set 3, the pack's
+/// buffer objects and a geometry stage's indices).
+const TERRAIN_GROUPS: u32 = 6;
 
-/// What a pack's terrain programs bind in their vertex stage besides the game's own: its
-/// storage buffers (`bufferObject.<n>`, set 4) and a geometry stage's index buffer (set 5).
+/// What a pack's per-section terrain programs bind in their vertex stage besides the game's
+/// own: its storage buffers (`bufferObject.<n>`, set 4). A geometry stage's index buffer (set 5)
+/// is not among them: only flat draws give terrain a geometry stage (`game_inputs`'s
+/// `terrain_geometry`), so a `.gsh` binds nothing in a per-section terrain pipeline.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TerrainBindings {
     /// Its `bufferObject.<n>` entries: set 4 holds every one of them.
     pub buffer_objects: u32,
-    /// A program of its root or dimension folder has a geometry stage (`.gsh`).
-    pub geometry: bool,
 }
 
 impl TerrainBindings {
-    /// The bindings of `pack` (its `properties`, and the programs of its root folder and of the
-    /// dimension's `folder`).
-    pub fn of(
-        pack: &sunrise_shaders::Pack,
-        properties: &sunrise_shaders::Properties,
-        folder: &str,
-    ) -> Self {
+    /// The bindings of a pack of `properties`.
+    pub fn of(properties: &sunrise_shaders::Properties) -> Self {
         let buffer_objects = properties
             .entries
             .iter()
@@ -827,13 +849,7 @@ impl TerrainBindings {
                     .is_some_and(|n| n.parse::<u32>().is_ok())
             })
             .count() as u32;
-        let geometry = ["", folder]
-            .iter()
-            .any(|dir| pack.list(dir).iter().any(|f| f.ends_with(".gsh")));
-        Self {
-            buffer_objects,
-            geometry,
-        }
+        Self { buffer_objects }
     }
 
     /// Whether terrain programs that read their page in per-section draws
@@ -843,13 +859,14 @@ impl TerrainBindings {
     /// and with the uniform and vertex buffers under
     /// `max_buffers_and_acceleration_structures_per_shader_stage` (wgpu-core checks both when it
     /// makes the pipeline). Where they don't fit, per-section draws take
-    /// [`TerrainDraws::Attributes`], whose pipelines need three storage buffers fewer.
+    /// [`TerrainDraws::Normals`] where [`Self::normals_fit`] holds, whose pipelines bind no set 3
+    /// and one vertex buffer more, and [`TerrainDraws::Attributes`] otherwise.
     pub fn pages_fit(self, limits: &wgpu::Limits, gpu: crate::pack_post::Gpu) -> bool {
         if !gpu.vertex_reads {
             return false;
         }
         let own = if gpu.vertex_storage {
-            self.buffer_objects.saturating_add(u32::from(self.geometry))
+            self.buffer_objects
         } else {
             0
         };
@@ -857,6 +874,33 @@ impl TerrainBindings {
         storage <= limits.max_storage_buffers_per_shader_stage
             && storage.saturating_add(TERRAIN_UNIFORMS + TERRAIN_VERTEX_BUFFERS)
                 <= limits.max_buffers_and_acceleration_structures_per_shader_stage
+    }
+
+    /// Whether terrain programs drawn per section with the normal stream
+    /// ([`TerrainDraws::Normals`]) fit the vertex stage of a device of `limits` and `gpu`: one
+    /// vertex buffer more than [`TerrainDraws::Attributes`] takes, on top of the pack's own
+    /// storage buffers (seen in the vertex stage where it writes storage), its uniform buffers and
+    /// the other two vertex buffers, under
+    /// `max_buffers_and_acceleration_structures_per_shader_stage`; with every bind group, under
+    /// `max_bind_groups_plus_vertex_buffers`; and under `max_vertex_buffers` (wgpu-core checks
+    /// each when it makes the pipeline). wgpu-core also checks the attributes against
+    /// `max_vertex_attributes`: 8 here (5 of the vertices, 1 of the origin, 2 of the stream),
+    /// under the 16 of every wgpu limits tier (`Limits::downlevel_webgl2_defaults` too), so that
+    /// check can't fail. Where they don't fit, per-section draws take
+    /// [`TerrainDraws::Attributes`], as a pack whose programs load without the stream must not
+    /// be refused for it.
+    pub fn normals_fit(self, limits: &wgpu::Limits, gpu: crate::pack_post::Gpu) -> bool {
+        // Summed in u64: a count past `u32::MAX` must not pass a limit of `u32::MAX`.
+        let own = if gpu.vertex_storage {
+            u64::from(self.buffer_objects)
+        } else {
+            0
+        };
+        let vertex_buffers = TERRAIN_VERTEX_BUFFERS + 1;
+        own + u64::from(TERRAIN_UNIFORMS + vertex_buffers)
+            <= u64::from(limits.max_buffers_and_acceleration_structures_per_shader_stage)
+            && TERRAIN_GROUPS + vertex_buffers <= limits.max_bind_groups_plus_vertex_buffers
+            && vertex_buffers <= limits.max_vertex_buffers
     }
 }
 
@@ -925,6 +969,11 @@ impl PackAtlas {
                 );
                 declarations.push_str(CORNER_FN);
             }
+            if draws == TerrainDraws::Normals {
+                declarations.push_str(
+                    "layout(location = 6) in vec4 hz_v_normal;\nlayout(location = 7) in vec4 hz_v_tangent;\n",
+                );
+            }
             "hz_v_origin"
         };
         let [width, height] = size;
@@ -979,6 +1028,9 @@ impl PackAtlas {
         if draws == TerrainDraws::Pages {
             body.insert_str(0, PULL_CORNERS);
             body.push_str(FACE);
+        }
+        if draws == TerrainDraws::Normals {
+            body.push_str(NORMALS);
         }
         if flat {
             body.insert_str(0, &format!("{PULL_CORNERS}{PULL_FLAT}"));
@@ -1460,14 +1512,11 @@ mod tests {
     }
 
     /// Per-section terrain reads its pages exactly while the vertex stage holds set 3's three
-    /// storage buffers on top of the pack's own (its 2 buffer objects and a geometry stage's
-    /// indices: 6), and, with its 2 uniform and 2 vertex buffers, 10 buffers in all.
+    /// storage buffers on top of the pack's own (its 3 buffer objects: 6), and, with its 2
+    /// uniform and 2 vertex buffers, 10 buffers in all.
     #[test]
     fn pages_fit_predicate_takes_pages_up_to_the_last_buffer() {
-        let bindings = TerrainBindings {
-            buffer_objects: 2,
-            geometry: true,
-        };
+        let bindings = TerrainBindings { buffer_objects: 3 };
         let limits = |storage: u32, buffers: u32| wgpu::Limits {
             max_storage_buffers_per_shader_stage: storage,
             max_buffers_and_acceleration_structures_per_shader_stage: buffers,
@@ -1487,37 +1536,105 @@ mod tests {
         assert!(!bindings.pages_fit(&limits(100, 100), without));
     }
 
-    /// A pack's bindings: each `bufferObject.<n>` entry, and a geometry stage in its root or the
-    /// dimension's folder only.
+    /// The normal stream fits exactly while the vertex stage holds the pack's own storage
+    /// buffers (3 buffer objects, where vertex shaders write storage), 2 uniform buffers and 3
+    /// vertex buffers (8 in all), 6 bind groups and 3 vertex buffers (9), and 3 vertex buffers.
     #[test]
-    fn terrain_bindings_count_buffer_objects_and_geometry_stages() {
+    fn normals_fit_predicate_takes_the_stream_up_to_the_last_buffer() {
+        let bindings = TerrainBindings { buffer_objects: 3 };
+        let limits = |buffers: u32, groups_and_vertex: u32, vertex: u32| wgpu::Limits {
+            max_buffers_and_acceleration_structures_per_shader_stage: buffers,
+            max_bind_groups_plus_vertex_buffers: groups_and_vertex,
+            max_vertex_buffers: vertex,
+            ..Default::default()
+        };
+        assert!(bindings.normals_fit(&limits(8, 9, 3), gpu(true)));
+        assert!(!bindings.normals_fit(&limits(7, 9, 3), gpu(true)));
+        assert!(!bindings.normals_fit(&limits(8, 8, 3), gpu(true)));
+        assert!(!bindings.normals_fit(&limits(8, 9, 2), gpu(true)));
+        // Where vertex shaders write no storage the pack's own buffers stay out of the vertex
+        // stage: 2 uniform and 3 vertex buffers.
+        assert!(bindings.normals_fit(&limits(5, 9, 3), gpu(false)));
+        assert!(!bindings.normals_fit(&limits(4, 9, 3), gpu(false)));
+        // Reading no storage in vertex shaders keeps the stream
+        // (`SUNRISE_SHADER_PACK_WITHOUT=vertex-storage` too).
+        let mut without = gpu(false);
+        without.vertex_reads = false;
+        assert!(bindings.normals_fit(&limits(5, 9, 3), without));
+        // Past any device's buffers: no stream.
+        let crowded = TerrainBindings {
+            buffer_objects: u32::MAX,
+        };
+        assert!(!crowded.normals_fit(&limits(u32::MAX, u32::MAX, 8), gpu(true)));
+    }
+
+    /// Only the normal stream's programs read locations 6 and 7, and they take the stream's
+    /// normal and tangent where the others keep the constants or work them out from the page.
+    #[test]
+    fn normal_stream_inputs_read_the_stream() {
+        let inputs = |draws| PackAtlas::terrain_inputs_sized([64, 32], 4, 16, false, draws);
+        let normals = inputs(TerrainDraws::Normals);
+        assert!(
+            normals
+                .declarations
+                .contains("layout(location = 6) in vec4 hz_v_normal;")
+        );
+        assert!(
+            normals
+                .declarations
+                .contains("layout(location = 7) in vec4 hz_v_tangent;")
+        );
+        assert!(normals.body.ends_with(NORMALS));
+        assert!(!normals.declarations.contains("hz_vertices"));
+        assert!(!TerrainDraws::Normals.reads_pages());
+        for other in [
+            TerrainDraws::Attributes,
+            TerrainDraws::Pages,
+            TerrainDraws::Flat,
+        ] {
+            let inputs = inputs(other);
+            assert!(!inputs.declarations.contains("hz_v_normal"), "{other:?}");
+            assert!(!inputs.body.contains(NORMALS), "{other:?}");
+        }
+    }
+
+    /// A pack's bindings, read from a pack on disk: each `bufferObject.<n>` entry counts, and
+    /// `bufferObject.x` doesn't; a geometry stage (`.gsh`), in its root or a dimension's folder,
+    /// binds nothing in per-section terrain and counts for nothing. At the limits where 6
+    /// buffer objects just fit, set 3 (pages: 9 storage, 13 buffers) and then the stream (11
+    /// buffers) take the device exactly to its last buffer, the `.gsh` beside them.
+    #[test]
+    fn terrain_bindings_of_a_pack_with_buffer_objects_and_a_geometry_stage() {
         let root = tempfile::tempdir().unwrap();
         let shaders = root.path().join("shaders");
-        std::fs::create_dir_all(shaders.join("world0")).unwrap();
         std::fs::create_dir_all(shaders.join("world-1")).unwrap();
+        let mut properties = String::from("bufferObject.x=4\nscreen=A\n");
+        for n in [0, 1, 2, 5, 6, 9] {
+            properties.push_str(&format!("bufferObject.{n}=64\n"));
+        }
+        std::fs::write(shaders.join("shaders.properties"), properties).unwrap();
+        std::fs::write(shaders.join("shadow.gsh"), "#version 330\n").unwrap();
         std::fs::write(
-            shaders.join("shaders.properties"),
-            "bufferObject.0=64\nbufferObject.5=16\nbufferObject.x=4\nscreen=A\n",
+            shaders.join("world-1/gbuffers_terrain.gsh"),
+            "#version 330\n",
         )
         .unwrap();
-        std::fs::write(shaders.join("world-1/shadow.gsh"), "#version 330\n").unwrap();
         let pack = sunrise_shaders::Pack::open(root.path()).unwrap();
         let mut macros = sunrise_shaders::Macros::standard();
         let (properties, _) = sunrise_shaders::read_properties(&pack, &mut macros);
-        let of = |folder| TerrainBindings::of(&pack, &properties, folder);
-        assert_eq!(
-            of("world0"),
-            TerrainBindings {
-                buffer_objects: 2,
-                geometry: false
-            }
-        );
-        assert_eq!(
-            of("world-1"),
-            TerrainBindings {
-                buffer_objects: 2,
-                geometry: true
-            }
-        );
+        let bindings = TerrainBindings::of(&properties);
+        assert_eq!(bindings, TerrainBindings { buffer_objects: 6 });
+        let limits = |storage: u32, buffers: u32| wgpu::Limits {
+            max_storage_buffers_per_shader_stage: storage,
+            max_buffers_and_acceleration_structures_per_shader_stage: buffers,
+            ..Default::default()
+        };
+        // Pages: 6 + 3 storage buffers, and 2 uniform and 2 vertex buffers.
+        assert!(bindings.pages_fit(&limits(9, 13), gpu(true)));
+        assert!(!bindings.pages_fit(&limits(8, 13), gpu(true)));
+        assert!(!bindings.pages_fit(&limits(9, 12), gpu(true)));
+        // The stream: 6 storage, 2 uniform and 3 vertex buffers.
+        assert!(bindings.normals_fit(&limits(6, 11), gpu(true)));
+        assert!(!bindings.normals_fit(&limits(6, 10), gpu(true)));
     }
 }

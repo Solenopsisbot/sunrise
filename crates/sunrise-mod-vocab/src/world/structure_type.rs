@@ -14,9 +14,10 @@
 //! `terrain_adaptation`, and the pieces ride the one piece mechanism the game
 //! has, next to a fortress piece's.
 use super::pool_element::{
-    ElementContext, ElementPlacement, PoolElementRef, PoolPiece, TemplatePool,
+    ElementContext, ElementPlacement, JigsawBlock, JigsawSpace, PoolElementRef, PoolPiece,
+    TemplatePool,
 };
-use crate::{BlockKey, BlockMetadata, BlockState, RandomSource};
+use crate::{BiomeKey, BlockKey, BlockMetadata, BlockState, RandomSource};
 use std::sync::Arc;
 pub use sunrise_core::position::ChunkPos;
 use sunrise_core::{
@@ -24,21 +25,33 @@ use sunrise_core::{
     nbt::{Compound, Tag},
 };
 
-/// A piece's placement failed; the generation of that piece stops there, as a
-/// piece's own `Result` does in the engine.
+/// A structure piece load, placement or `after_place` callback failed. The game logs the
+/// registering mod, structure type and native cause chain each time and ends only that
+/// invocation, without undoing completed writes or random draws or disabling later pieces,
+/// `after_place` or later chunks.
+// no wire: retains the native source chain for this in-process callback.
 #[derive(Debug)]
-// exhaustive: mods build it themselves as a piece's error answer
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct StructureError(pub String);
-impl std::fmt::Display for StructureError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+// exhaustive: its field is private, so mods cannot build or destructure it
+pub struct StructureError {
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+impl StructureError {
+    /// Preserve the original error for [`std::error::Error::source`].
+    /// For a standalone message, use `std::io::Error::other(message)`.
+    pub fn new(cause: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Box::new(cause),
+        }
     }
 }
-impl std::error::Error for StructureError {}
-impl From<(crate::Identifier, String)> for StructureError {
-    fn from((source, reason): (crate::Identifier, String)) -> Self {
-        Self(format!("{source}: {reason}"))
+impl std::fmt::Display for StructureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, f)
+    }
+}
+impl std::error::Error for StructureError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
     }
 }
 
@@ -196,12 +209,18 @@ pub trait StructureType: Send + Sync + 'static {
     /// "no start in this chunk". The height and biome queries the context
     /// answers are the ones vanilla's own types ask of a
     /// `GenerationContext`; `context.config` lends its NBT config, converted once at load.
+    /// A panic is logged and queued for an error toast naming the mod, skips this start, and
+    /// disables only `find_generation_point` for this registration for the session.
     fn find_generation_point(&self, context: &mut dyn GenerationContext) -> Option<FoundStructure>;
     /// The `StructurePieceType` loader: rebuild a saved piece from its tag
     /// (`StructurePieceType.load`), exactly as it was saved. Required: every
     /// piece type has its loader, and a saved piece is never regenerated. Resolve saved block
     /// states once here, against the same retained metadata the worker contexts borrow.
     /// Invalid saved blocks, properties or piece data return a typed error, never a panic.
+    /// Returning `Err` logs the registering mod, structure type and cause chain each time and
+    /// omits only that piece without disabling later loads; a panic is logged and queued for an
+    /// error toast naming the mod and disables only `load_piece` for this registration for the
+    /// session.
     fn load_piece(
         &self,
         metadata: &dyn BlockMetadata,
@@ -209,7 +228,10 @@ pub trait StructureType: Send + Sync + 'static {
     ) -> Result<Arc<dyn StructurePiece>, StructureError>;
     /// `Structure.afterPlace`, run once per chunk after all pieces were
     /// placed, with every piece's current box. Optional: most types place
-    /// nothing here.
+    /// nothing here. Returning an error logs the registering mod, structure type, chunk and
+    /// cause chain and ends only this invocation without undoing completed writes or random
+    /// draws or disabling later chunks; a panic is logged and queued for an error toast naming
+    /// the mod and disables only `after_place` for this registration for the session.
     fn after_place(
         &self,
         _context: &mut dyn PieceContext,
@@ -265,20 +287,32 @@ impl PieceBeardifier {
 /// the engine's (`StructurePiece.createTag`: the type id, `BB`, `O`, `GD`)
 /// around [`add_additional_save_data`](StructurePiece::add_additional_save_data).
 pub trait StructurePiece: std::fmt::Debug + Send + Sync {
-    /// `StructurePiece.getBoundingBox`: the piece's box, in world blocks.
+    /// `StructurePiece.getBoundingBox`: the piece's immutable generation box, in world blocks.
+    /// Queried once at generation or load, never per chunk. A panic skips only that piece and
+    /// disables only `bounding_box` for this registration for the session with a log and error
+    /// toast.
     fn bounding_box(&self) -> BoundingBox;
     /// Override terrain shaping, even when the structure's adjustment is `None`.
     /// Queried once at generation or load, never per chunk. An answer whose adjustment
-    /// is `None` omits this piece; no answer preserves the structure's default.
+    /// is `None` omits this piece; no answer preserves the structure's default. Unordered
+    /// bounds are refused with a warning and add no terrain adjustment. A panic skips only that
+    /// piece and disables only `beardifier` for this registration for the session with a log and
+    /// error toast.
     fn beardifier(&self) -> Option<PieceBeardifier> {
         None
     }
     /// `StructurePiece.postProcess`: place the piece's blocks and entities
-    /// that fall in the chunk `context` clips to. Writes outside it are
-    /// dropped silently, as vanilla's `placeBlock` skips them.
+    /// that fall in the chunk `context` clips to. Writes outside `chunk_box` are
+    /// dropped silently, as vanilla's `placeBlock` skips them. Returning an
+    /// error logs the registering mod, structure type, chunk and cause chain and ends only this
+    /// piece's placement without undoing completed writes or random draws, so later pieces,
+    /// `after_place` and later chunks still run; a panic is logged and queued for an error toast
+    /// naming the mod and disables only `post_process` for this registration for the session.
     fn post_process(&self, context: &mut dyn PieceContext) -> Result<(), StructureError>;
     /// `StructurePiece.addAdditionalSaveData`: the piece's own fields, saved
-    /// beside `BB`/`O`/`GD` and read back by the type's `load_piece`.
+    /// beside `BB`/`O`/`GD` and read back by the type's `load_piece`. A panic discards the
+    /// partial tag for that piece and disables only `add_additional_save_data` for this
+    /// registration for the session with a log and error toast.
     fn add_additional_save_data(&self, tag: &mut Compound);
 }
 
@@ -397,8 +431,9 @@ pub trait GenerationContext {
     fn base_columns(&mut self, x: i32, z: i32, kinds: &[HeightmapType]) -> Vec<Vec<bool>>;
     /// `ChunkGenerator.getBaseColumn`'s blocks: the noise column at (x, z).
     fn noise_column(&mut self, x: i32, z: i32) -> NoiseColumn;
-    /// Noise biome at a quart position (the resolver's, no zoom).
-    fn noise_biome(&mut self, quart: [i32; 3]) -> BiomeId;
+    /// Noise biome at a quart position (no zoom), as the registered [`BiomeKey`] from the
+    /// same resolver used by the structure's valid-biome checks.
+    fn noise_biome(&mut self, quart: [i32; 3]) -> BiomeKey;
     /// `GenerationContext.validBiome` over inclusive block Y bounds of the
     /// column at (x, z): whether any biome the structure names occurs there.
     fn column_has_valid_biome(&mut self, x: i32, z: i32, min_y: i32, max_y: i32) -> bool;
@@ -427,9 +462,47 @@ pub trait GenerationContext {
     /// left out because an element failed to decode. Aliases are not applied:
     /// a type that uses `pool_aliases` looks the aliased name up itself.
     fn template_pool(&mut self, name: &crate::Identifier) -> Option<TemplatePool>;
-    /// Element reads for laying pieces out by hand: any element's jigsaws and
-    /// box.
-    fn elements(&self) -> &dyn ElementContext;
+    /// Element reads for laying pieces out by hand, any element's jigsaws and
+    /// box, beside [`random`](Self::random) to draw the jigsaws from, as
+    /// `JigsawPlacement.Placer` shuffles a piece's jigsaws with the random its
+    /// pools and placements draw from.
+    fn elements(&mut self) -> (&dyn ElementContext, &mut dyn RandomSource);
+    /// One candidate tried on one jigsaw of a piece already laid out: the
+    /// inner loops of `JigsawPlacement.Placer.tryPlacingChildren` for one
+    /// target element, drawing from [`random`](Self::random) as vanilla does.
+    ///
+    /// The candidate's rotations are tried in `Rotation.getShuffled` order,
+    /// and in each its jigsaws in shuffled order, against `jigsaw`, a jigsaw of
+    /// `source` ([`JigsawBlock::can_attach`]). A rigid child of a rigid source
+    /// takes its height from the jigsaws; any other child's comes from the
+    /// `WORLD_SURFACE_WG` height under `jigsaw`. With `use_expansion_hack`, a
+    /// box at most 16 high grows by the largest `max_size` of the pools (and
+    /// their fallbacks) its inward-facing jigsaws name, looked up by those
+    /// names without aliases, as [`template_pool`](Self::template_pool) does.
+    /// The first placement whose box [fits](JigsawSpace::fits) `space` wins:
+    /// its box leaves `space`, `source` gets the junction toward it, and the
+    /// child comes back with the junction toward `source` and `source`'s
+    /// liquid settings.
+    ///
+    /// `None`, with no draws, for the empty element, where vanilla's candidate
+    /// loop stops; `None`, after the draws, when no placement fits.
+    ///
+    /// Which candidates a jigsaw tries, in which space, and how deep the
+    /// layout goes are the caller's, as in `tryPlacingChildren`: the pool's
+    /// [`shuffled_templates`](TemplatePool::shuffled_templates) (none at the
+    /// last depth), then its fallback's, up to the first empty element; in a
+    /// new [`JigsawSpace`] over `source`'s box when the attached piece would
+    /// start inside it, otherwise in the space `source` was placed in. A type
+    /// with its own rules, such as a cap on how often a piece appears, skips
+    /// the candidates they refuse.
+    fn attach_jigsaw(
+        &mut self,
+        source: &mut PoolPiece,
+        jigsaw: &JigsawBlock,
+        candidate: &PoolElementRef,
+        space: &mut JigsawSpace,
+        use_expansion_hack: bool,
+    ) -> Option<PoolPiece>;
 }
 
 /// The placement context a piece's
@@ -455,8 +528,9 @@ pub trait PieceContext {
     /// The block at `pos`, or `None` outside the region.
     fn block(&mut self, pos: [i32; 3]) -> Option<BlockState>;
     /// `StructurePiece.placeBlock`: write `state` at `pos`, answering whether
-    /// it was written. A position outside `chunk_box` is skipped silently, as
-    /// vanilla's `placeBlock` skips it.
+    /// it was written. A position outside `chunk_box` returns `false` silently, as
+    /// vanilla's `placeBlock` skips it; an unregistered state or world write failure logs the
+    /// position and cause and returns `false` without failing the piece.
     fn set_block(&mut self, pos: [i32; 3], state: BlockState) -> bool;
     /// `WorldGenLevel.getHeight` of the heightmap kind at (x, z).
     fn height(&mut self, kind: HeightmapType, x: i32, z: i32) -> Option<i32>;
@@ -468,10 +542,12 @@ pub trait PieceContext {
     /// finishes as it does a structure mob's when the chunk joins the world
     /// (`Mob.finalizeSpawn` with `STRUCTURE`; keep the
     /// `"sunrise:finalize"` byte a structure template's entities carry to ask
-    /// for it).
+    /// for it). A world write failure logs the position (when present) and cause without failing
+    /// the piece.
     fn entity(&mut self, nbt: Compound);
     /// `WorldGenLevel.setBlockEntity` at `pos`: the block entity's saved NBT
-    /// (its `id` and fields).
+    /// (its `id` and fields). A world write failure logs the position and cause without failing
+    /// the piece.
     fn block_entity(&mut self, pos: [i32; 3], nbt: Compound);
     /// `ConfiguredFeature.place` of the data pack's configured feature
     /// `feature` at `pos`, drawing from [`random`](Self::random), with no
@@ -502,16 +578,17 @@ pub trait PieceContext {
 /// A registered API behaviour; the game builds its engine adapter at startup.
 pub(crate) struct StructureTypeInfo {
     pub(crate) id: Box<str>,
+    pub(crate) mod_id: &'static str,
     pub(crate) ty: Arc<dyn StructureType>,
 }
 
 /// Registered structure behaviours, for the hidden game integration boundary.
 // hidden: the game's startup adapter reads the registered behaviours; mods declare them through the registrar.
 #[doc(hidden)]
-pub fn structure_type_declarations() -> Vec<(String, Arc<dyn StructureType>)> {
+pub fn structure_type_declarations() -> Vec<(String, &'static str, Arc<dyn StructureType>)> {
     crate::parts::installed_structure_type_list()
         .iter()
-        .map(|info| (info.id.to_string(), info.ty.clone()))
+        .map(|info| (info.id.to_string(), info.mod_id, info.ty.clone()))
         .collect()
 }
 

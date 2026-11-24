@@ -1,5 +1,4 @@
 //! The `screen_mouse_dragged_pre` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0127
 
 pub trait Hooks {
     /// Before a real held-button movement reaches screen drag handlers.

@@ -204,7 +204,7 @@ impl Game<'_> {
         let social_screen::Click::Action(action) = kind else {
             return false;
         };
-        self.audio.play_button_click();
+        self.play_audio_button_click();
         match action {
             Action::Page(page) => {
                 self.social.page = page;

@@ -28,13 +28,22 @@ impl Game<'_> {
         window: Arc<Window>,
         pack: &PackResources,
         gui: &UiResources,
+        opened: Option<sunrise_client::gfx::Opened>,
     ) -> Result<Renderer> {
         build_renderer(
             window,
             self.options.offscreen,
             pack,
             gui,
-            self.renderer.as_ref(),
+            opened.map_or_else(
+                || {
+                    self.renderer.as_ref().map_or(
+                        sunrise_client::gfx::RendererDevice::New,
+                        sunrise_client::gfx::RendererDevice::Reuse,
+                    )
+                },
+                |device| sunrise_client::gfx::RendererDevice::Opened(Box::new(device)),
+            ),
             None,
             self.settings.sunrise.api,
             self.settings.sunrise.translucent_batching,
@@ -52,10 +61,10 @@ impl Game<'_> {
             Ok(renderer)
         })
     }
-    /// Under `SUNRISE_HDR_FRAME=float` the frame follows what draws the picture
-    /// (docs/design/hdr-linear-light.md, "When it changes"): when HDR, Smooth Gradients or the
-    /// pick (unless refused) call for another frame than the renderer's, it is made again before
-    /// this frame draws. Without the switch a frame stays until the next start, as before.
+    /// Under `SUNRISE_HDR_FRAME=float` the frame follows what draws the picture: when HDR,
+    /// Smooth Gradients or the pick (unless refused) call for another frame than the renderer's,
+    /// it is made again before this frame draws. Without the switch a frame stays until the next
+    /// start, as before.
     pub(super) fn follow_frame(&mut self) {
         if !native_shaders::linear_frame_switch() {
             return;
@@ -108,7 +117,7 @@ impl Game<'_> {
         if let Some(renderer) = &mut self.renderer {
             renderer.release_surface();
         }
-        let mut renderer = match self.renderer_for(window, &self.pack, &self.gui) {
+        let mut renderer = match self.renderer_for(window, &self.pack, &self.gui, None) {
             Ok(renderer) => renderer,
             Err(error) => {
                 if let Some(renderer) = &mut self.renderer {
@@ -246,7 +255,7 @@ impl Game<'_> {
     }
 
     pub(super) fn new_renderer(&self, window: Arc<Window>) -> Result<Renderer> {
-        self.renderer_for(window, &self.pack, &self.gui)
+        self.renderer_for(window, &self.pack, &self.gui, None)
     }
 
     /// A renderer made again from the resources loaded takes over: what named the old one's

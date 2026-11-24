@@ -224,7 +224,7 @@ fn reload_command_prepares_world_before_applying_listeners_and_preserves_tables_
                     game.items()
                         .block_in_tag("sunrise:class/fence", "minecraft:oak_fence")
                 );
-                assert_eq!(game.block_in_tag(fence, "sunrise:class/fence"), Some(true));
+                assert_eq!(fence.is_in_tag(&*game, class), Some(true));
                 state.store(0, Ordering::SeqCst);
                 assert!(game.run_command("reload"));
                 assert_eq!(state.load(Ordering::SeqCst), 1);
@@ -235,7 +235,6 @@ fn reload_command_prepares_world_before_applying_listeners_and_preserves_tables_
                 );
                 assert!(matches!(mod_api::Tags::blocks(game, class),
                     mod_api::TagMembers::Members(blocks) if blocks.contains(&fence)));
-                let old_bound = crate::game::native_world_read::installed_block_tag_snapshot();
                 let old_order = game.items().block_tag_order.clone();
                 let old_sets = game.items().block_tags.clone();
                 let old = game.world_tables.as_ref().map(|tables| tables as *const _);
@@ -254,12 +253,17 @@ fn reload_command_prepares_world_before_applying_listeners_and_preserves_tables_
                     game.items().block_tags["reload_order:derived"]
                         .contains("minecraft:diamond_block")
                 );
-                assert_eq!(
-                    crate::game::native_world_read::installed_block_tag_snapshot(),
-                    old_bound
+                // The second install replaced the installed parts and their keys, so ask by name:
+                // the world's tags are the ones the refused reload left in place.
+                assert!(
+                    game.items()
+                        .block_in_tag("sunrise:class/fence", "minecraft:oak_fence")
                 );
-                assert_eq!(game.items().block_tag_order, old_order);
-                assert_eq!(game.items().block_tags, old_sets);
+                let selected = game
+                    .native_tag_items()
+                    .expect("selected world tag snapshot");
+                assert_eq!(selected.block_tag_order, old_order);
+                assert_eq!(selected.block_tags, old_sets);
                 let _ = std::fs::remove_dir_all(root);
             });
         },
@@ -276,8 +280,8 @@ fn reload_command_runs_listeners_on_both_sides_of_function_library() {
         || {
             use mod_api::{
                 Command, CommandArgumentError, CommandArgumentKind, CommandArgumentType,
-                CommandSender, CommandSuggestion, RegisterCommandsEvent, Registrar,
-                RegistrationContext, ServerHost, VanillaServerListeners,
+                RegisterCommandsEvent, Registrar, RegistrationContext, ServerHost, Suggestion,
+                SuggestionRequest, VanillaServerListeners,
             };
 
             struct Listener {
@@ -307,7 +311,7 @@ fn reload_command_runs_listeners_on_both_sides_of_function_library() {
                     self.0.lock().unwrap().push(format!("parse {input}"));
                     Ok(input.into())
                 }
-                fn suggest(&self, _: Option<&CommandSender>, _: &str) -> Vec<CommandSuggestion> {
+                fn suggest(&self, _: &SuggestionRequest) -> Vec<Suggestion> {
                     Vec::new()
                 }
             }

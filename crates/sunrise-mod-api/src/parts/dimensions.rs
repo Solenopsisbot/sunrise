@@ -43,7 +43,7 @@ const VANILLA_CLOCKS: [&str; 2] = ["minecraft:overworld", "minecraft:the_end"];
 
 impl DimensionsRegistrar for PartRegistrar {
     fn add_world_clock(&mut self, name: &str) {
-        let id = match self.owned_declaration_id(name) {
+        let id = match self.declaration_id(name) {
             Ok(id) => id,
             Err(reason) => {
                 self.refused.push(reason);
@@ -72,7 +72,7 @@ impl DimensionsRegistrar for PartRegistrar {
     }
 
     fn add_dimension(&mut self, name: &str, settings: crate::DimensionSettings) {
-        let id = match self.owned_declaration_id(name) {
+        let id = match self.declaration_id(name) {
             Ok(id) => id,
             Err(reason) => {
                 self.refused.push(reason);
@@ -120,7 +120,7 @@ impl DimensionsRegistrar for PartRegistrar {
         });
     }
     fn add_chunk_generator(&mut self, name: &str, generator: Arc<dyn crate::ChunkGenerator>) {
-        let id = match self.owned_declaration_id(name) {
+        let id = match self.declaration_id(name) {
             Ok(id) => id,
             Err(reason) => {
                 self.refused.push(reason);
@@ -133,7 +133,9 @@ impl DimensionsRegistrar for PartRegistrar {
                  digits and _ . - with / between segments, none empty, `.` or `..`",
                 self.mod_id
             ))
-        } else if id == mod_vocab::__private::NOISE_GENERATOR {
+        } else if VANILLA_CHUNK_GENERATORS.contains(&id.as_str())
+            || self.has_builtin_entry("minecraft:worldgen/chunk_generator", &id)
+        {
             Some(format!(
                 "{} registered chunk generator {id}, which is the game's own",
                 self.mod_id
@@ -156,7 +158,7 @@ impl DimensionsRegistrar for PartRegistrar {
         });
     }
     fn add_biome_source(&mut self, name: &str, source: Arc<dyn crate::BiomeSource>) {
-        let id = match self.owned_declaration_id(name) {
+        let id = match self.declaration_id(name) {
             Ok(id) => id,
             Err(reason) => {
                 self.refused.push(reason);
@@ -169,6 +171,13 @@ impl DimensionsRegistrar for PartRegistrar {
             Some(format!(
                 "{} registered biome source {id:?}, whose name must be lowercase letters, \
                  digits and _ . - with / between segments, none empty, `.` or `..`",
+                self.mod_id
+            ))
+        } else if VANILLA_BIOME_SOURCES.contains(&id.as_str())
+            || self.has_builtin_entry("minecraft:worldgen/biome_source", &id)
+        {
+            Some(format!(
+                "{} registered biome source {id}, which is the game's own",
                 self.mod_id
             ))
         } else if self.biome_sources.iter().any(|s| *s.id == *id) {
@@ -192,6 +201,7 @@ impl DimensionsRegistrar for PartRegistrar {
             id: id.into(),
             biomes,
             source,
+            owner: mod_vocab::__private::game::CallbackOwner::for_mod(self.mod_id),
         });
     }
 }
@@ -202,3 +212,125 @@ const VANILLA_DIMENSIONS: [&str; 3] = [
     "minecraft:the_nether",
     "minecraft:the_end",
 ];
+
+/// Built-in chunk generators (`BuiltInRegistries.CHUNK_GENERATOR`), which no mod can replace.
+const VANILLA_CHUNK_GENERATORS: [&str; 3] = [
+    mod_vocab::__private::NOISE_GENERATOR,
+    "minecraft:flat",
+    "minecraft:debug",
+];
+
+/// Built-in biome sources (`BuiltInRegistries.BIOME_SOURCE`), which no mod can replace.
+const VANILLA_BIOME_SOURCES: [&str; 4] = [
+    "minecraft:fixed",
+    "minecraft:multi_noise",
+    "minecraft:checkerboard",
+    "minecraft:the_end",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Void;
+    impl crate::ChunkGenerator for Void {
+        fn build_terrain(&self, _: &mut dyn crate::ChunkAccess) {}
+    }
+
+    struct Plains;
+    impl crate::BiomeSource for Plains {
+        fn possible_biomes(&self) -> Vec<crate::BiomeKey> {
+            vec![crate::BiomeKey::parse("minecraft:plains").unwrap()]
+        }
+        fn noise_biome(&self, _: [i32; 3], _: i64) -> u16 {
+            0
+        }
+    }
+
+    #[test]
+    fn dimensions_generators_and_biome_sources_allow_explicit_namespaces_and_refuse_builtins() {
+        let data = mod_vocab::__private::RegistrationData::new(
+            [
+                (
+                    "minecraft:worldgen/chunk_generator".into(),
+                    vec!["minecraft:noise".into(), "minecraft:snapshot_gen".into()],
+                ),
+                (
+                    "minecraft:worldgen/biome_source".into(),
+                    vec!["minecraft:fixed".into(), "minecraft:snapshot_source".into()],
+                ),
+            ]
+            .into(),
+            Default::default(),
+            crate::InstanceDirectory::from_path(std::path::Path::new("unused")).unwrap(),
+            crate::RuntimeEnvironment::new(
+                crate::Dist::Client,
+                "26.3".into(),
+                "test".into(),
+                false,
+            ),
+        );
+        crate::load_state::with_test_registration_data(data, || {
+            let mut r = PartRegistrar::new("maker");
+            r.dimension_shape = |_| true;
+
+            r.add_dimension("pocket", crate::DimensionSettings::default());
+            r.add_dimension("other:pocket", crate::DimensionSettings::default());
+            r.add_dimension("minecraft:custom_dim", crate::DimensionSettings::default());
+            r.add_dimension("minecraft:overworld", crate::DimensionSettings::default());
+            r.add_dimension("other:pocket", crate::DimensionSettings::default());
+
+            r.add_chunk_generator("void", Arc::new(Void));
+            r.add_chunk_generator("other:void", Arc::new(Void));
+            r.add_chunk_generator("minecraft:custom_gen", Arc::new(Void));
+            for builtin in [
+                "minecraft:noise",
+                "minecraft:flat",
+                "minecraft:debug",
+                "minecraft:snapshot_gen",
+            ] {
+                r.add_chunk_generator(builtin, Arc::new(Void));
+            }
+            r.add_chunk_generator("other:void", Arc::new(Void));
+
+            r.add_biome_source("chaos", Arc::new(Plains));
+            r.add_biome_source("other:chaos", Arc::new(Plains));
+            r.add_biome_source("minecraft:custom_source", Arc::new(Plains));
+            for builtin in [
+                "minecraft:fixed",
+                "minecraft:multi_noise",
+                "minecraft:checkerboard",
+                "minecraft:the_end",
+                "minecraft:snapshot_source",
+            ] {
+                r.add_biome_source(builtin, Arc::new(Plains));
+            }
+            r.add_biome_source("other:chaos", Arc::new(Plains));
+
+            assert_eq!(
+                r.dimensions
+                    .iter()
+                    .map(|d| (d.mod_id, &*d.id))
+                    .collect::<Vec<_>>(),
+                [
+                    ("maker", "maker:pocket"),
+                    ("maker", "other:pocket"),
+                    ("maker", "minecraft:custom_dim"),
+                ]
+            );
+            assert_eq!(
+                r.chunk_generators
+                    .iter()
+                    .map(|g| &*g.id)
+                    .collect::<Vec<_>>(),
+                ["maker:void", "other:void", "minecraft:custom_gen"]
+            );
+            assert_eq!(
+                r.biome_sources.iter().map(|s| &*s.id).collect::<Vec<_>>(),
+                ["maker:chaos", "other:chaos", "minecraft:custom_source"]
+            );
+            assert_eq!(r.refused.len(), 13, "{:?}", r.refused);
+            assert!(r.refused.iter().all(|msg| msg.contains("maker")));
+        });
+    }
+}

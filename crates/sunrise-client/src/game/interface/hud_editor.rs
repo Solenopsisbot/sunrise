@@ -173,12 +173,12 @@ impl Game<'_> {
                 0..4 => STYLE[i].cycle(pvp, back),
                 4 => pvp.layout = Layout::default(),
                 _ => {
-                    self.audio.play_button_click();
+                    self.play_audio_button_click();
                     self.close_hud_editor();
                     return true;
                 }
             }
-            self.audio.play_button_click();
+            self.play_audio_button_click();
             self.settings.save(&Self::options_path());
             return true;
         }

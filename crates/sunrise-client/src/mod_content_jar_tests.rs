@@ -418,6 +418,22 @@ fn a_biome_modifier_declared_in_code_applies_to_the_root_biomes() {
     let file_mod = zinc_mod(&scratch.join("file-zinc"), &[("declared", &declared[0][2])]);
     let file_out = scratch.join("file-out");
     build_fixture(&base, &base.join("jars"), &[file_mod], &file_out).unwrap();
+    let duplicate = [[
+        "code_owner".into(),
+        declared[0][1].clone(),
+        declared[0][2].clone(),
+    ]];
+    let error = biome_modifiers_over_packs(&file_out, &packs, &duplicate)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("duplicate biome modifier zinc:declared"),
+        "{error}"
+    );
+    assert!(
+        error.contains("mod zinc") && error.contains("mod code_owner"),
+        "{error}"
+    );
     let original: BTreeMap<String, String> =
         serde_json::from_slice(&fs::read(out.join("worldgen/biomes.json")).unwrap()).unwrap();
     let expected: BTreeMap<String, String> =
@@ -450,7 +466,11 @@ fn a_biome_modifier_declared_in_code_applies_to_the_root_biomes() {
         },
     };
     let ordered = [
-        ["zinc".to_owned(), "remove.json".to_owned(), removal.json()],
+        [
+            "zinc".to_owned(),
+            "data/zinc/neoforge/biome_modifier/remove.json".to_owned(),
+            removal.json(),
+        ],
         declared[0].clone(),
     ];
     let removed = biome_modifiers_over_packs(&out, &packs, &ordered)
@@ -721,7 +741,11 @@ fn modify_biome_sets_ambient_particles_sounds_and_music() {
             music_volume: Some(0.25),
         },
     };
-    let declared = [["zinc".to_owned(), "declared:oasis".to_owned(), typed.json()]];
+    let declared = [[
+        "zinc".to_owned(),
+        "data/zinc/neoforge/biome_modifier/oasis.json".to_owned(),
+        typed.json(),
+    ]];
     let packs = sunrise_world::worldgen::overrides::WorldgenOverrides::default();
     let overridden = biome_modifiers_over_packs(&out, &packs, &declared)
         .unwrap()
@@ -882,4 +906,77 @@ fn modify_biome_with_an_invalid_effect_is_skipped_with_a_warning() {
         fs::read(base.join("worldgen/biomes.json")).unwrap()
     );
     fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
+fn biome_modifier_cross_alias_precedence_resolves_before_parsing_and_rejects_code_collision() {
+    let base = biome_base("biome-modifiers-cross-alias");
+    let scratch = base.parent().unwrap().to_owned();
+    let valid = mod_api::BiomeModifier {
+        biomes: vec!["minecraft:plains".to_owned()],
+        operation: mod_api::BiomeModifierOperation::AddFeatures {
+            features: vec!["zinc:ore_zinc".to_owned()],
+            step: "underground_ores".to_owned(),
+        },
+    }
+    .json();
+    let fixture = Fixture(scratch.clone());
+    // The lower Forge alias is intentionally malformed. The later NeoForge alias must
+    // replace it by registry key before the loader tries to parse either file.
+    let lower = fixture.jar(
+        "lower",
+        'a',
+        &[(
+            "data/shared/forge/biome_modifier/add.json",
+            "{not valid json",
+        )],
+    );
+    let mut late = folder_mod(
+        &scratch.join("late"),
+        &[
+            ("sunrise-mod.toml", &manifest("late", r#""zinc", "shared""#)),
+            (
+                "data/zinc/worldgen/feature/ore_zinc.json",
+                r#"{"type":"minecraft:ore","config":{}}"#,
+            ),
+            (
+                "data/zinc/worldgen/placed_feature/ore_zinc.json",
+                r#"{"feature":"zinc:ore_zinc","placement":[]}"#,
+            ),
+            ("data/shared/neoforge/biome_modifier/add.json", &valid),
+        ],
+    );
+    late.jars.push(lower);
+    let out = scratch.join("out");
+    build_fixture(&base, &scratch.join("jars"), &[late], &out).unwrap();
+    let features = biome_features(&out);
+    assert_eq!(
+        features["minecraft:plains"],
+        serde_json::json!([
+            [],
+            ["minecraft:lake"],
+            [],
+            [],
+            [],
+            [],
+            ["minecraft:ore_coal", "zinc:ore_zinc"]
+        ])
+    );
+    let packs = sunrise_world::worldgen::overrides::WorldgenOverrides::default();
+    let code_collision = [[
+        "code_owner".to_owned(),
+        "data/shared/forge/biome_modifier/add.json".to_owned(),
+        valid,
+    ]];
+    let error = biome_modifiers_over_packs(&out, &packs, &code_collision)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("duplicate biome modifier shared:add"),
+        "{error}"
+    );
+    assert!(
+        error.contains("mod late") && error.contains("mod code_owner"),
+        "{error}"
+    );
 }

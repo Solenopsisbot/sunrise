@@ -472,6 +472,7 @@ impl Game<'_> {
         menu.set_registry_id(menu_id);
         menu.set_block_pos(self.container.map(|(x, y, z)| [x, y, z]));
         menu.brewed_potion_hook = !mod_api::__private::mods().is_empty();
+        menu.item_smelted_hook = mod_api::__private::listened(mod_api::HookId::ItemSmelted);
         if matches!(kind, Kind::Mount(_)) {
             menu.mount = self.mount_menu_entity();
         }
@@ -677,11 +678,7 @@ impl Game<'_> {
         let after: Vec<Option<ItemStack>> = (0..total).map(|i| menu.slot(i).cloned()).collect();
         // `FurnaceResultSlot.checkTakeAchievements` pays out only on actual takes (`onTake` /
         // `onQuickCraft`), never on direct `Slot.set` edits.
-        let furnace_extracted = if matches!(kind, Kind::Furnace(_)) {
-            std::mem::take(&mut menu.furnace_extracted)
-        } else {
-            Vec::new()
-        };
+        let furnace_awarded = menu.furnace_awarded;
         let carried = menu.carried.take();
         let dropped = std::mem::take(&mut menu.dropped);
         let sounds = std::mem::take(&mut menu.sounds);
@@ -695,6 +692,7 @@ impl Game<'_> {
         let brewed_potion_takes = std::mem::take(&mut menu.brewed_potion_takes);
         let equipped = std::mem::take(&mut menu.equipped);
         let item_crafted = std::mem::take(&mut menu.item_crafted);
+        let item_smelted = std::mem::take(&mut menu.item_smelted);
         for (_, stack, _) in &item_crafted {
             if !predicting {
                 self.award_stat("crafted", &stack.item, stack.count as i32);
@@ -729,12 +727,13 @@ impl Game<'_> {
             for stack in &brewed {
                 self.trigger_brewed_potion(stack);
             }
-            if !furnace_extracted.is_empty()
+            if furnace_awarded
                 && self.remote.is_none()
                 && let (Some(pos), Some(p)) = (self.container, self.player.as_ref())
             {
                 let at = [p.position.x, p.position.y, p.position.z];
-                self.award_furnace_recipes(pos, at);
+                let recipes = self.award_furnace_recipes(pos, at);
+                self.award_recipes(&recipes);
             }
         } else if self.screen == Screen::Creative {
             // `Player.drop` swings even when the creative packet is suppressed. Creative-screen
@@ -818,6 +817,17 @@ impl Game<'_> {
         self.apply_equipment();
         if let Some(maps) = level_maps {
             self.register_made_maps(maps);
+        }
+        if !item_smelted.is_empty()
+            && mod_api::__private::listened(mod_api::HookId::ItemSmelted)
+            && let Some(player) = if predicting {
+                self.local_player()
+            } else {
+                let uuid = self.native_acting_id();
+                self.player(uuid)
+            }
+        {
+            self.dispatch_item_smelted(player, &item_smelted);
         }
         true
     }
@@ -1223,7 +1233,7 @@ impl Game<'_> {
             (0.8, 0.8 + self.world.random.next_float() * 0.4)
         };
         if self.is_logical_server() {
-            self.audio.play(sound, Some(at), volume, pitch);
+            self.play_audio(sound, Some(at), volume, pitch);
         } else {
             self.play_client_player_sound(sound, volume, pitch);
         }

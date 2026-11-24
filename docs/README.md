@@ -9,15 +9,13 @@ To play, use [the launcher](https://github.com/sunrise-org/sunrise-launcher/blob
 - [Release flow](release-flow.md): pull request checks, merging and the automatic Nightly releases that reach players.
 - [Operations](operations.md): running Sunrise by hand when no agent runs and the maintainer's machines are off: merging, releases, offline runners, the mods registry, Kira, the official server, security.
 - [Build from source](native-client.md#run-from-a-checkout): your own copy of the game, resource preparation, `cargo run`.
-- [Build times](build-times.md): `tools/build_times.py` measures cold and incremental builds per crate and the critical path, writes a JSON report and a table, and compares two reports; the first numbers, Windows and Linux.
+- [Build times](build-times.md): `tools/build_times.py` measures cold and incremental builds per crate and the critical path, writes a JSON report and a table, and compares two reports.
 - [Native client](native-client.md): options, controls, the dedicated server, `sunrise-ctl` scripting, packaging, architecture.
 - [Controllers](controllers.md): playing with PlayStation, Xbox and Nintendo Switch Pro controllers, Steam Deck built-in controls, analog movement, and the input layer.
 - [Host a server](hosting.md): install `sunrise-server`, prepare the game files, first run, `server.toml`, the commands, the web panel, backups, services and Docker; what works today and what doesn't yet.
 - [A server's levels](server-levels.md): how the dedicated server and single player's server thread tick, save and travel between dimensions.
 - [Nix and NixOS](nix.md): the flake's packages: server, engine, prepare, client and launcher, and the `services.sunrise-server` NixOS module.
 - [Hosting a server: design](server.md): `sunrise-server`, the design and the plan: install, `server.toml`, the CLI, the web panel, backups, services, Docker, and the bot benchmark against vanilla.
-- [The next server: design](server-next.md): Sunrise's dedicated server against vanilla and Pumpkin (measured), the targets, parallel ticking that keeps vanilla's order, the network front, the Sunrise fast path, the plugin API and the plan.
-- [Survival multiplayer](smp.md): the official server's `smp` native mod (economy, market, trades, games of chance, spawn, homes, teleport requests, warps, land claims) and the server hook points it needs; not part of Sunrise's own server.
 - [For server owners](owners.md): every `server.properties` key next to its `server.toml` field.
 - [Agent control](agent-control.md): what AI agents can drive in the launcher and the game, and the design of the control socket, `sunrise-ctl` and MCP.
 - [sunrise-ctl commands](sunrise-ctl-commands.md): every command `sunrise-ctl` takes, its CLI arguments, and the corresponding MCP tools for driving the game.
@@ -32,7 +30,7 @@ To play, use [the launcher](https://github.com/sunrise-org/sunrise-launcher/blob
 - [PvP & HUD](pvp.md): optional client settings for PvP players (custom crosshair, block outline, hit color, HUD widgets), fair-play boundaries, and why each is off by default.
 - [Narrator](narrator.md): vanilla's text-to-speech (Ctrl+B): the voices per platform, how screens record what they narrate, `sunrise-ctl narration`, and where it still differs from vanilla.
 - [Shader packs](shaders.md): Sunrise's own WGSL shader packs, how to make and check one (`sunrise-shader`).
-- [The modding book](modding/src/introduction.md): content mods (data) and native mods (Rust), how to make, install and publish them. [Native mods](modding/src/how-to/native-mods.md): how the launcher builds them. [Hook counterparts](https://sunrise-org.github.io/sunrise/reference/hook-notes.html#counterparts): the NeoForge and Fabric catalog conventions.
+- [The modding book](modding/src/introduction.md): content mods (data) and native mods (Rust), how to make, install and publish them. [Native mods](modding/src/how-to/native-mods.md): how they build. [API reference](modding/src/reference/api.md): rustdoc, hook notes and NeoForge counterparts.
 - [Upgrading a 26.2 data pack](datapack-upgrade.md): `sunrise-port-pack upgrade-datapack` rewrites a 26.2 worldgen pack in 26.3's formats, and how the rewrite is checked against vanilla.
 - [Modpacks](modpacks.md): porting whole packs (ATM10 and smaller): import, inventory, carry-over, an agent per mod with a harness against the Java original, coverage, and how "10x" is measured.
 - [Launcher](https://github.com/sunrise-org/sunrise-launcher/blob/main/README.md): installs, updates and starts builds; its CLI and MCP server; releasing it.
@@ -57,27 +55,20 @@ To play, use [the launcher](https://github.com/sunrise-org/sunrise-launcher/blob
 
 ## Parity
 
-- [Rust rewrite status](rust-parity.md): where the state of the port lives (harnesses, port ledger, known issues) and the rules every port keeps.
+- [Sunrise status](status.md): player-visible gap count and subsystem harness coverage against vanilla 26.3.
 - [Parity workflow](parity-workflow.md): `tools/parity.py`, the gate, other machines, merging.
 - [Paper event parity](paper-parity.md): local trace comparisons, scenarios and tolerances, and informational nightly/manual CI.
 - [CI runners](ci-runners.md): which jobs run on GitHub's runners and which on ours (the desktop, playsunrise, the Mac mini), the `SELF_HOSTED_CI` switch, and where a fork's pull request may run.
-- Area notes: [block behaviours and ticking](parity/blocks.md), [section meshing](parity/meshing.md), [redstone machines tick by tick](parity/redstone-diff.md), [the same seed in vanilla and Sunrise](parity/world-compare.md).
+- Area notes: [section meshing](parity/meshing.md), [redstone machines tick by tick](parity/redstone-diff.md), [the same seed in vanilla and Sunrise](parity/world-compare.md).
 - [Port ledger](port-ledger.md): `tools/port_ledger.py`, every vanilla method next to the Rust functions that port it, both ways, with the gaps where a port isn't wired like vanilla.
 - [Version ports](version-ports.md): how a new Minecraft release is detected, diffed against the pinned one and ported, and what stays manual.
 - [Reading vanilla](parity-workflow.md#reading-vanilla): the local decompiled sources and bytecode queries the harnesses build on.
-
 - [Translations](translations.md): language coverage and human review of machine-written strings.
 
 ## Design notes
 
 - [Design system](design-system.md): shared tokens and interface rules for the launcher, website and Sunrise-only game overlays.
 - [HUD kit](ui-kit.md): the pieces Sunrise's own HUD overlays share: `Room`, which keeps controller notices below the boss bars, and `Plate`, the box behind their text.
-- [Linear light for HDR and shader packs](design/hdr-linear-light.md): the proposed shader API 0.2 colour contract and frame format for HDR output.
-- [The shader API 0.2 frame](design/shader-api-frame.md): proposed: where a 0.2 pack's stages, post chain and tone curve run, who owns anti-aliasing and coverage, and room for clouds, mods, LabPBR and ray tracing.
-- [Live mod reloading](design/mod-hotload.md): loading, enabling and updating mods from inside the game without a restart.
-- [Mod registry v2](design/registry-v2.md): project kinds, metadata, installation locations and the registry rollout.
-- [Scoped whole-stack rollback](design/stack-snapshot.md): transaction-scoped, same-place savepoints for internals mods; the real transaction lifetime must be confirmed before implementation, and provider-owned places are initially refused.
-- [Modularizing gfx.rs](design/gfx-modularization.md): the move-only extractions out of the renderer's 13,837-line module, what each phase took, and the blocks still in `gfx.rs`.
 
 ## Architecture: world generation
 

@@ -8,10 +8,7 @@ use sunrise_core::{
     geometry::{Aabb, Axis, Direction, SweepCursor, Vec3},
     position::BlockPos,
 };
-use sunrise_world::{
-    level::{InsideWrite, LandingWrite},
-    registry::BlockStateId,
-};
+use sunrise_world::{level::LandingWrite, registry::BlockStateId};
 
 /// `getEntityInsideCollisionShape` as the shared walk sees it: the whole block, boxes
 /// to sweep the move against, or nothing. This is the one point #1011 adds the Part's
@@ -29,13 +26,12 @@ pub enum InsideShape {
     Fixed(&'static sunrise_core::geometry::VoxelShape),
 }
 
-/// `LavaCauldronBlock.FILLED_SHAPE`: `Shapes.or(AbstractCauldronBlock.SHAPE,
-/// Block.column(12, 4, 15))`, the cauldron's solid shape plus its lava. It is the
-/// block's `getEntityInsideCollisionShape` whatever the collision tables hold.
-pub(crate) fn lava_cauldron_filled_shape() -> &'static sunrise_core::geometry::VoxelShape {
+/// `AbstractCauldronBlock.SHAPE`: the cauldron's hollow shell, shared across
+/// lava, water, and powder-snow cauldrons.
+fn cauldron_shell_shape() -> &'static sunrise_core::geometry::VoxelShape {
     use sunrise_core::geometry::{ShapeOp, VoxelShape};
-    static SHAPE: std::sync::OnceLock<VoxelShape> = std::sync::OnceLock::new();
-    SHAPE.get_or_init(|| {
+    static SHELL: std::sync::OnceLock<VoxelShape> = std::sync::OnceLock::new();
+    SHELL.get_or_init(|| {
         let cuboid = |x0, y0, z0, x1, y1, z1| {
             VoxelShape::from_box(Aabb::new(
                 Vec3::new(x0 / 16.0, y0 / 16.0, z0 / 16.0),
@@ -57,9 +53,145 @@ pub(crate) fn lava_cauldron_filled_shape() -> &'static sunrise_core::geometry::V
                 .expect("valid cauldron cutout");
         }
         solid
-            .join(&cuboid(2.0, 4.0, 2.0, 14.0, 15.0, 14.0), ShapeOp::OR)
-            .expect("valid filled cauldron")
     })
+}
+
+fn cauldron_filled_shape_for_top(top: f64) -> sunrise_core::geometry::VoxelShape {
+    use sunrise_core::geometry::{ShapeOp, VoxelShape};
+    let fill = VoxelShape::from_box(Aabb::new(
+        Vec3::new(2.0 / 16.0, 4.0 / 16.0, 2.0 / 16.0),
+        Vec3::new(14.0 / 16.0, top / 16.0, 14.0 / 16.0),
+    ))
+    .expect("valid cauldron fill");
+    cauldron_shell_shape()
+        .join(&fill, ShapeOp::OR)
+        .expect("valid filled cauldron")
+}
+
+/// `LavaCauldronBlock.FILLED_SHAPE`: `Shapes.or(AbstractCauldronBlock.SHAPE,
+/// Block.column(12, 4, 15))`, the cauldron's solid shape plus its lava. It is the
+/// block's `getEntityInsideCollisionShape` whatever the collision tables hold.
+pub(crate) fn lava_cauldron_filled_shape() -> &'static sunrise_core::geometry::VoxelShape {
+    static SHAPE: std::sync::OnceLock<sunrise_core::geometry::VoxelShape> =
+        std::sync::OnceLock::new();
+    SHAPE.get_or_init(|| cauldron_filled_shape_for_top(15.0))
+}
+
+/// `LayeredCauldronBlock.FILLEDSLOT_SHAPES`: precomputed fixed shapes for levels 1..=3
+/// (`top = 6 + 3 * level`, i.e. 9, 12, 15), avoiding per-contact `Vec<Aabb>` allocation.
+fn layered_cauldron_filled_shape(level: u8) -> Option<&'static sunrise_core::geometry::VoxelShape> {
+    static SHAPES: std::sync::OnceLock<[sunrise_core::geometry::VoxelShape; 3]> =
+        std::sync::OnceLock::new();
+    let idx = usize::from(level.checked_sub(1)?);
+    SHAPES
+        .get_or_init(|| {
+            [
+                cauldron_filled_shape_for_top(9.0),
+                cauldron_filled_shape_for_top(12.0),
+                cauldron_filled_shape_for_top(15.0),
+            ]
+        })
+        .get(idx)
+}
+
+/// The filled inside-collision shape of a lava or layered cauldron: its shell
+/// and the contents up to that level's surface (vanilla `FILLED_SHAPE(S)`).
+pub fn cauldron_inside_shape(
+    collision: &sunrise_world::block_collision::BlockCollisionRegistry<'_>,
+    state: BlockStateId,
+    definition: &sunrise_world::chunk::BlockState,
+    pos: BlockPos,
+) -> InsideShape {
+    let top = match definition.name.as_str() {
+        // `LavaCauldronBlock.getEntityInsideCollisionShape`: its one fixed shape.
+        "minecraft:lava_cauldron" => return InsideShape::Fixed(lava_cauldron_filled_shape()),
+        "minecraft:water_cauldron" | "minecraft:powder_snow_cauldron" => {
+            let Some(level) = definition
+                .properties
+                .get("level")
+                .and_then(|value| value.parse::<u8>().ok())
+            else {
+                return InsideShape::Empty;
+            };
+            if let Some(fixed) = layered_cauldron_filled_shape(level) {
+                return InsideShape::Fixed(fixed);
+            }
+            6.0 + 3.0 * f64::from(level)
+        }
+        _ => return InsideShape::Full,
+    };
+    let offset = Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+    let shell = collision.static_shape(state).ok().flatten();
+    let mut boxes: Vec<_> = shell
+        .into_iter()
+        .flat_map(|shape| shape.boxes())
+        .map(|bounds| bounds.move_by(offset))
+        .collect();
+    boxes.push(Aabb::new(
+        Vec3::new(2.0 / 16.0, 4.0 / 16.0, 2.0 / 16.0).add_vector(offset),
+        Vec3::new(14.0 / 16.0, top / 16.0, 14.0 / 16.0).add_vector(offset),
+    ));
+    InsideShape::Boxes(boxes)
+}
+
+/// The fire, cauldron and powder snow effects that run in vanilla's ordered
+/// collector, rather than immediately inside `Block.entityInside`.
+pub fn queue_block_effects(
+    effects: &mut mod_api::InsideEffects,
+    block: &str,
+    state: BlockStateId,
+    pos: BlockPos,
+) {
+    use mod_api::{__private::BuiltinInsideAction as Action, InsideEffect as Effect};
+    match block {
+        "minecraft:fire" | "minecraft:soul_fire" => {
+            effects.apply(Effect::ClearFreeze);
+            effects.apply(Effect::FireIgnite);
+            let damage = if block == "minecraft:fire" { 1.0 } else { 2.0 };
+            effects.run_after_builtin(Effect::FireIgnite, Action::FireHurt(damage));
+        }
+        "minecraft:lava_cauldron" => {
+            queue_fluid_effects(effects, sunrise_world::fluid::FluidKind::Lava)
+        }
+        "minecraft:water_cauldron" | "minecraft:powder_snow_cauldron" => {
+            effects.run_before_builtin(
+                Effect::Extinguish,
+                Action::LayeredCauldronExtinguish {
+                    pos: [pos.x, pos.y, pos.z],
+                    state: state.0,
+                },
+            );
+            effects.apply(Effect::Extinguish);
+        }
+        "minecraft:powder_snow" => {
+            effects.run_before_builtin(
+                Effect::Extinguish,
+                Action::PowderSnowMelt([pos.x, pos.y, pos.z]),
+            );
+            effects.apply(Effect::Freeze);
+            effects.apply(Effect::Extinguish);
+        }
+        _ => {}
+    }
+}
+
+/// `LavaFluid.entityInside` and `WaterFluid.entityInside` at the fluid's
+/// position in the walk. Lava shares its slots with a filled lava cauldron.
+pub fn queue_fluid_effects(
+    effects: &mut mod_api::InsideEffects,
+    kind: sunrise_world::fluid::FluidKind,
+) {
+    use mod_api::{__private::BuiltinInsideAction as Action, InsideEffect as Effect};
+    use sunrise_world::fluid::FluidKind;
+    match kind {
+        FluidKind::Water | FluidKind::FlowingWater => effects.apply(Effect::Extinguish),
+        FluidKind::Lava | FluidKind::FlowingLava => {
+            effects.apply(Effect::ClearFreeze);
+            effects.apply(Effect::LavaIgnite);
+            effects.run_after_builtin(Effect::LavaIgnite, Action::LavaHurt);
+        }
+        _ => {}
+    }
 }
 
 /// The collector a walk queues its per-step effects into. `advanceStep` is the only
@@ -72,12 +204,6 @@ pub trait StepCollector {
 impl StepCollector for mod_api::InsideEffects {
     fn advance_step(&mut self, step: i32) {
         mod_api::InsideEffects::advance_step(self, step);
-    }
-}
-
-impl<W: From<mod_api::EntityWrite>> StepCollector for mod_api::__private::InsideCollector<W> {
-    fn advance_step(&mut self, step: i32) {
-        mod_api::__private::InsideCollector::advance_step(self, step);
     }
 }
 
@@ -496,9 +622,8 @@ pub struct Hooks {
     /// `Block.bounceOn`: change `movement`, the movement the bounce leaves the entity.
     pub bounce_on:
         fn(&str, &mut DamageLevel<'_>, Contact<'_>, f64, &mut sunrise_core::geometry::Vec3),
-    /// `Block.entityInside` told mid-walk: the part's own contact on the level
-    /// host, its whole callback staged into the fresh collector and write list,
-    /// so only an answering callback's writes reach the walk.
+    /// `Block.entityInside` told mid-walk: generated dispatch isolates each
+    /// part into a staged collector and absorbs it on return.
     pub inside_fire: fn(
         &mut DamageLevel<'_>,
         &'static str,
@@ -508,11 +633,24 @@ pub struct Hooks {
         BlockPos,
         bool,
         &mut mod_api::InsideEffects,
-        &mut Vec<InsideWrite>,
     ),
+    /// Convert an engine block state id to the mod API's `BlockState`.
+    pub state_to_api: fn(BlockStateId) -> Option<mod_api::BlockState>,
+    /// Convert a mod API `BlockState` to an engine block state id.
+    pub state_to_engine: fn(mod_api::BlockState) -> Option<BlockStateId>,
 }
 
 pub static HOOKS: OnceLock<Hooks> = OnceLock::new();
+
+/// Convert an engine block state id to a mod API `BlockState` through the installed hooks.
+pub fn state_to_api(id: BlockStateId) -> Option<mod_api::BlockState> {
+    HOOKS.get().and_then(|hooks| (hooks.state_to_api)(id))
+}
+
+/// Convert a mod API `BlockState` to an engine block state id through the installed hooks.
+pub fn state_to_engine(state: mod_api::BlockState) -> Option<BlockStateId> {
+    HOOKS.get().and_then(|hooks| (hooks.state_to_engine)(state))
+}
 
 /// Where `IBlockExtension.getBounceRestitution` is answered, on both sides: the game says
 /// which block states have a part for it and binds the part's answer.
@@ -525,24 +663,12 @@ pub struct RestitutionHooks {
 pub static RESTITUTION_HOOKS: OnceLock<RestitutionHooks> = OnceLock::new();
 
 /// What a contact asked to keep until the entity's batch ends, delivered in
-/// the order it happened: the parts' `entity_inside` contacts themselves fire
-/// mid-walk now, on the shared inside sweep, so what stays here is the level
-/// writes they and the landings asked for, and the minecart passes.
+/// the order it happened: landing writes (`Block.fallOn`) and minecart passes.
+/// `entity_inside` callbacks now apply their level writes directly at flush.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pending {
     Landed(Landed),
     MinecartPass(MinecartPass),
-    /// Level writes a mid-walk `entity_inside` part asked for, at the block it
-    /// touched: applied at the batch end, guarded on the touched state.
-    InsideWritten(InsideWritten),
-}
-
-/// The level writes an `entity_inside` part asked for at one block.
-#[derive(Clone, Debug, PartialEq)]
-pub struct InsideWritten {
-    pub state: BlockStateId,
-    pub position: BlockPos,
-    pub writes: Vec<InsideWrite>,
 }
 
 /// An entity that landed on a block whose Part asked for writes (`Block.fallOn`).
@@ -736,20 +862,6 @@ pub fn landed(state: BlockStateId, position: BlockPos, writes: Vec<LandingWrite>
     if !writes.is_empty() {
         PENDING.with_borrow_mut(|pending| {
             pending.push(Pending::Landed(Landed {
-                state,
-                position,
-                writes,
-            }));
-        });
-    }
-}
-
-/// Keep the level writes a mid-walk `entity_inside` contact asked for until the
-/// entity's batch ends; nothing is kept when none were asked.
-pub fn inside_written(state: BlockStateId, position: BlockPos, writes: Vec<InsideWrite>) {
-    if !writes.is_empty() {
-        PENDING.with_borrow_mut(|pending| {
-            pending.push(Pending::InsideWritten(InsideWritten {
                 state,
                 position,
                 writes,
@@ -1131,6 +1243,25 @@ mod tests {
                 .any(|&(_, p, _)| (16..20).contains(&p[0])),
             "nothing between the budget and the target is visited"
         );
+    }
+
+    #[test]
+    fn layered_cauldron_inside_shape_uses_static_fixed_shapes_for_levels_1_to_3() {
+        for level in 1u8..=3 {
+            let fixed = layered_cauldron_filled_shape(level).expect("cached shape for level");
+            assert!(
+                !fixed.boxes().is_empty(),
+                "level {level} cauldron shape must have boxes"
+            );
+            let max_y = fixed
+                .boxes()
+                .iter()
+                .map(|b| b.max_position().y)
+                .fold(0.0_f64, f64::max);
+            assert_eq!(max_y, 1.0, "shell top stays at 1.0 for level {level}");
+        }
+        assert!(layered_cauldron_filled_shape(0).is_none());
+        assert!(layered_cauldron_filled_shape(4).is_none());
     }
 }
 

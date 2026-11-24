@@ -17,7 +17,7 @@ mod owner_attachment_save_tests {
             },
         }),
         copy_on_death: true,
-        sync: false,
+        sync_codec: None,
     };
 
     /// The live value as the named owner file would hold it.

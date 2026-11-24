@@ -27,7 +27,7 @@ use sunrise_client::{
     particles::{ParticleOptions, ParticleType},
     random_source,
     scoreboard::pushable_by,
-    sound_engine::{BLOCKS, CartSound, PlayResult, SoundInstance, Sounds},
+    sound_engine::{BLOCKS, CartSound, PlayResult, SoundInstance},
 };
 use sunrise_core::{
     geometry::{Aabb, Vec3, trig},
@@ -1525,6 +1525,20 @@ impl Game<'_> {
             }
             // MinecartSpawner.tick: `BaseSpawner.serverTick` at the cart's block.
             CartKind::Spawner => {
+                if c.spawner.as_ref().is_some_and(|s| s.spawn_delay <= 0)
+                    && (mod_api::__private::listened(mod_api::HookId::MobSpawnPositionCheck)
+                        || mod_api::__private::listened(mod_api::HookId::FinalizeSpawn))
+                    && let Some(i) = cart_at(&self.carts, c.id, slot)
+                {
+                    // push_from_ticked_cart stored the moved cart. Bring its stored
+                    // fluid state up to date for the shared spawner hooks; mutable
+                    // hooks cannot touch it until the tick finishes.
+                    self.carts.update(i, |stored| {
+                        stored.velocity = c.velocity;
+                        stored.in_water = c.in_water;
+                        stored.fall_distance = c.fall_distance;
+                    });
+                }
                 if let Some(mut spawner) = c.spawner.take() {
                     let key = (
                         c.position.x.floor() as i32,
@@ -1601,8 +1615,7 @@ impl Game<'_> {
         let id = c.id as i32;
         self.lan_entity_event(id, TNT_PRIME_EVENT, at);
         if !self.entity_silent(c.id) {
-            self.audio
-                .play_on(BLOCKS, "minecraft:entity.tnt.primed", Some(at), 1.0, 1.0);
+            self.play_audio_on(BLOCKS, "minecraft:entity.tnt.primed", Some(at), 1.0, 1.0);
         }
     }
     /// `MinecartTNT.handleEntityEvent`: event 70 calls `primeFuse`, which on a
@@ -2041,7 +2054,7 @@ impl Game<'_> {
         for cart in &carts {
             if !self.cart_sounds.contains(&cart.id) {
                 let instance = SoundInstance::minecart(cart, random_source::create());
-                let (_, res) = self.audio.play_instance(instance, false);
+                let (_, res) = self.play_audio_instance(instance, false);
                 if res != PlayResult::NotStarted {
                     self.cart_sounds.insert(cart.id);
                 }
@@ -2055,7 +2068,7 @@ impl Game<'_> {
             for underwater in [true, false] {
                 let instance =
                     SoundInstance::riding_minecart(cart, underwater, random_source::create());
-                let (_, res) = self.audio.play_instance(instance, false);
+                let (_, res) = self.play_audio_instance(instance, false);
                 if res == PlayResult::NotStarted {
                     started = false;
                 }

@@ -3,7 +3,7 @@
 Use `level.capability(host, &ENERGY, pos, side)` to look up a block's
 `EnergyHandler`. Transfer energy inside a transaction with
 `move_energy(host, &from, &to, max, tx)`. It returns `Result<u32, TransactionError<Overanswered>>`: the amount moved, an
-[overanswer](answer-limits.md), or a refused savepoint. A partially accepted move is rolled back and
+[overanswer](../capabilities.md#capability-answer-limits), or a refused savepoint. A partially accepted move is rolled back and
 retried with the accepted amount.
 
 `ENERGY` corresponds to NeoForge's `Capabilities.Energy.BLOCK`. An `EnergyHandler`
@@ -18,6 +18,9 @@ Register a provider with `r.block_entity_capability(&ENERGY, &battery, …)`, us
 declared or looked-up block entity type key. Alternatively, declare the game's
 buffer with `r.block_energy(&block, buffer)`, where `buffer` is a `ModEnergyBuffer`:
 
+- `capacity`, `max_insert` and `max_extract` must be nonnegative (`>= 0`, matching NeoForge
+  `SimpleEnergyHandler`); negative values are refused at registration, while zero capacity and
+  transfer rates larger than `capacity` are kept as declared.
 - Insertion respects the input sides, remaining capacity and per-insert limit.
 - Extraction respects the output sides, stored amount and per-extract limit.
 - A side that permits neither operation returns no handler.

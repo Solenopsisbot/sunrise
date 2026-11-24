@@ -18,8 +18,8 @@ pub trait EntityFlagsBackend {
     fn entity_no_gravity(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
     /// Whether the entity's model is hidden (`Entity.isInvisible`): the
-    /// invisibility effect on a player or a mob, a mob's or an armor stand's
-    /// flag.
+    /// invisibility effect on a player or a mob, the flag of a mob, an armor
+    /// stand or an item frame.
     fn entity_is_invisible(&self, entity: EntityRef) -> Option<bool>;
 }
 /// The handles' writes of the `entity_flags` area, implemented by the game and reached through [`BackendMut`].
@@ -39,6 +39,7 @@ pub trait EntityFlagsBackendMut {
     /// Returns false for players and guests.
     fn entity_set_no_gravity(&mut self, entity: EntityRef, no_gravity: bool) -> bool;
     /// Side: server.
-    /// Sets the entity's shared invisibility flag (`Entity.setInvisible`). Returns false for players and guests.
+    /// Sets the entity's shared invisibility flag (`Entity.setInvisible`) on a mob, an armor
+    /// stand or an item frame. Returns false for players, guests and other kinds.
     fn entity_set_invisible(&mut self, entity: EntityRef, invisible: bool) -> bool;
 }

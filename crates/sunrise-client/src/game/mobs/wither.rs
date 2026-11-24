@@ -208,30 +208,28 @@ impl Game<'_> {
                 // WitherSkull.onHitEntity's source: the wither launched
                 // it, and `magic` names no entity and no position.
                 self.combat.projectile_owner = owner;
-                // EnchantmentHelper.doPostAttackEffects runs only on a
-                // target that lived.
-                self.combat.post_attack_if_alive = true;
                 if skull.from.is_none() {
                     self.combat.projectile_direct = None;
                 }
-                let hit = self.hurt_player_from(
-                    amount,
-                    skull.from,
-                    super::creatures::damage_type(kind, false),
-                    Some(owner),
-                    false,
-                );
-                if hit && wither_ticks > 0 {
-                    self.give_player_effect("minecraft:wither", wither_ticks, 1);
-                }
+                let damage_type = super::creatures::damage_type(kind, false);
+                let hit =
+                    self.hurt_player_from(amount, skull.from, damage_type, Some(owner), false);
                 // A totem that fired saves the player inside hurtServer:
-                // still alive, so no heal.
-                let killed = self
-                    .player
-                    .as_ref()
-                    .is_some_and(|pl| killed(hit, pl.health.dead_or_dying(), pl.health.totem_used));
+                // still alive, so run the enchantments instead of healing the owner.
+                let killed = self.player.as_ref().is_some_and(|pl| {
+                    killed(
+                        hit,
+                        pl.health.dead_or_dying(),
+                        pl.health.has_pending_protection(),
+                    )
+                });
                 if killed {
                     self.heal_skull_owner(p, live_owner);
+                } else if hit && live_owner.is_some() {
+                    self.shot_post_attack(p, Who::Player, damage_type);
+                }
+                if hit && wither_ticks > 0 {
+                    self.give_player_effect("minecraft:wither", wither_ticks, 1);
                 }
             }
             // EnderDragonPart.hurtServer / EndCrystal.hurtServer: skull with live owner uses wither_skull, else magic.
@@ -269,13 +267,18 @@ impl Game<'_> {
                             source.attacker,
                             self.combat.attack(),
                         );
+                        // The hit's causing entity, lent to its listeners beside the victim.
+                        let causing = self.causer_id(source.attacker);
+                        let decision = crate::game::entity::causer_decision!(self, causing);
                         let mut credit = plan.lend(&mut self.last_hurt_by_player);
-                        let hit = self.mobs[index].damage(
+                        let (victim, lend) =
+                            crate::game::entity::victim_and_causer!(self, index, causing, decision);
+                        let hit = victim.damage(
                             crate::game::entity::damage_level_of!(
                                 self,
                                 self.combat.attack(),
                                 &mut credit,
-                                None
+                                lend
                             ),
                             amount,
                             source,
@@ -310,18 +313,22 @@ impl Game<'_> {
                     self.mob_post_attack(
                         id,
                         live_owner,
-                        Some("minecraft:wither_skull"),
+                        Some((p.id, "minecraft:wither_skull")),
                         Some("minecraft:wither_skull"),
                     );
                 }
-                if survived_hit
-                    && wither_ticks > 0
-                    && let Some(m) = self
-                        .mobs
-                        .iter_mut()
-                        .find(|m| m.id == id && m.species() != Species::Wither)
-                {
-                    m.add_effect("minecraft:wither", wither_ticks, 1);
+                if survived_hit && wither_ticks > 0 {
+                    let effect_source = match live_owner {
+                        Some(Who::Mob(owner_id)) => self.entity(owner_id),
+                        Some(Who::Player) => self.entity(self.own_entity_id() as u32),
+                        None => None,
+                    }
+                    .or_else(|| self.entity(p.id));
+                    self.add_mob_effect(
+                        id,
+                        sunrise_client::effects::EffectInstance::new("wither", wither_ticks, 1),
+                        effect_source,
+                    );
                 }
                 if killed {
                     self.heal_skull_owner(p, live_owner);

@@ -2410,12 +2410,11 @@ fn a_button_label_wider_than_its_button_stays_inside_it() {
     let mut batch = HudBatch::scratch([640, 480]);
     b.draw_label(&mut batch, &atlas, u32::MAX);
     assert!(!batch.vertices.is_empty());
-    for v in &batch.vertices {
+    for [x0, y0, x1, y1] in batch.visible_quads().flatten() {
         assert!(
-            (b.x + 2.0..=b.x + b.w - 2.0).contains(&v.pos[0])
-                && (b.y..=b.y + 20.0).contains(&v.pos[1]),
-            "label vertex {:?} outside the button",
-            v.pos
+            b.x + 2.0 <= x0 && x1 <= b.x + b.w - 2.0 && b.y <= y0 && y1 <= b.y + 20.0,
+            "label quad {:?} outside the button",
+            [x0, y0, x1, y1]
         );
     }
     // A label that fits is centred in the button, as `centered_left` does.
@@ -2720,10 +2719,14 @@ mod text_and_icon {
             b.draw_label_at(&mut batch, &atlas, u32::MAX, now_ms);
             let xs = xs(&batch);
             assert!(!xs.is_empty());
-            for x in &xs {
+            let quads = batch.vertices.as_chunks::<6>().0.iter();
+            let text = quads
+                .zip(batch.visible_quads())
+                .filter(|(q, _)| q[0].text == 1);
+            for [x0, _, x1, _] in text.filter_map(|(_, visible)| visible) {
                 assert!(
-                    (32.0..=30.0 + 150.0 - 16.0 - 4.0).contains(x),
-                    "{x} at {now_ms} ms"
+                    32.0 <= x0 && x1 <= 30.0 + 150.0 - 16.0 - 4.0,
+                    "{x0}..{x1} at {now_ms} ms"
                 );
             }
             seen.insert(xs.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
@@ -2747,11 +2750,14 @@ fn a_create_world_tab_label_wider_than_its_tab_stays_inside_it() {
     let mut batch = HudBatch::scratch([90, 262]);
     f.title
         .draw(&atlas, &mut batch, (0.0, 100.0), true, &mut |_, _| {});
-    let labels: Vec<f32> = batch
-        .vertices
-        .iter()
-        .filter(|v| v.text == 1 && v.pos[1] < 24.0)
-        .map(|v| v.pos[0])
+    // The label glyphs' quads as far as each tab's scissor shows them.
+    let quads = batch.vertices.as_chunks::<6>().0.iter();
+    let labels: Vec<(f32, f32)> = quads
+        .zip(batch.visible_quads())
+        .filter(|(q, _)| q[0].text == 1)
+        .filter_map(|(_, visible)| visible)
+        .filter(|q| q[1] < 24.0)
+        .map(|q| (q[0], q[2]))
         .collect();
     assert!(!labels.is_empty());
     let boxes: Vec<(f32, f32)> = (0..3)
@@ -2762,15 +2768,15 @@ fn a_create_world_tab_label_wider_than_its_tab_stays_inside_it() {
             )
         })
         .collect();
-    for x in &labels {
+    for (x0, x1) in &labels {
         assert!(
-            boxes.iter().any(|(lo, hi)| (*lo..=*hi).contains(x)),
-            "label vertex at {x} is outside every tab's box"
+            boxes.iter().any(|(lo, hi)| lo <= x0 && x1 <= hi),
+            "label quad at {x0}..{x1} is outside every tab's box"
         );
     }
     for (tab, (lo, hi)) in boxes.iter().enumerate() {
         assert!(
-            labels.iter().any(|x| (*lo..=*hi).contains(x)),
+            labels.iter().any(|(x0, x1)| lo <= x0 && x1 <= hi),
             "tab {tab} draws no label"
         );
     }

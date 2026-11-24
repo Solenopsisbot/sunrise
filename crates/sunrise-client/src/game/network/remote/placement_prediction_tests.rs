@@ -593,25 +593,43 @@ fn a_predicted_break_reconciles_its_neighbour_s_shape_change() {
 #[test]
 #[ignore = "daily"]
 fn a_denied_break_restores_wall_sign_text_and_synced_attachments() {
-    use mod_api::{AttachmentCodec, AttachmentType, Host};
+    use mod_api::{AttachmentCodec, AttachmentDescriptor, AttachmentKey, Host};
     use sunrise_mod_runtime::attachments::AttachmentSync;
     use sunrise_protocol::attachment_sync::Message;
 
-    static VALUE: AttachmentType<i32> = AttachmentType {
-        namespace: "break_test",
-        name: "wall_sign",
-        default: || 0,
-        codec: Some(AttachmentCodec {
-            encode: |n| Ok([("n".into(), Tag::Int(*n))].into()),
-            decode: |c| match c.get(&"n".into()) {
-                Some(Tag::Int(n)) => Ok(*n),
-                _ => Err(mod_api::AttachmentError::Decode),
-            },
-        }),
-        copy_on_death: false,
-        sync: true,
+    const VALUE_CODEC: AttachmentCodec<i32> = AttachmentCodec {
+        encode: |n| Ok([("n".into(), Tag::Int(*n))].into()),
+        decode: |c| match c.get(&"n".into()) {
+            Some(Tag::Int(n)) => Ok(*n),
+            _ => Err(mod_api::AttachmentError::Decode),
+        },
     };
-    on_a_client(mod_api::Mods::default(), |game| {
+    struct BreakMod(Arc<std::sync::Mutex<Option<AttachmentKey<i32>>>>);
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for BreakMod {
+        fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+            let key = r
+                .register_attachment_type(
+                    AttachmentDescriptor::new("break_test:wall_sign", || 0i32)
+                        .serialize(VALUE_CODEC)
+                        .sync(VALUE_CODEC),
+                )
+                .unwrap();
+            *self.0.lock().unwrap() = Some(key);
+        }
+    }
+    let key_slot = Arc::new(std::sync::Mutex::new(None));
+    let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+        "break_test",
+        Box::new(BreakMod(key_slot.clone())),
+    )]
+    .into();
+    on_a_client(mods, |game| {
+        let value_key = key_slot
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("BreakMod registered");
         let spawn = play::SpawnInfo {
             dimension_type: 0,
             dimension: "minecraft:overworld".into(),
@@ -656,11 +674,7 @@ fn a_denied_break_restores_wall_sign_text_and_synced_attachments() {
         let holder = Holder::BlockEntity([0, 65, 0]);
         let attachment_values = |game: &Game<'_>| {
             let host: &dyn Host = game;
-            let query = host
-                .attachment_query(VALUE.namespace, VALUE.name)
-                .unwrap()
-                .query(&VALUE)
-                .unwrap();
+            let query = mod_api::AttachmentQueries::query(host, &value_key).unwrap();
             let scope = host.attachment_read_scope().unwrap();
             let mut rows = query.iter();
             std::iter::from_fn(|| rows.try_next().unwrap())
@@ -680,8 +694,8 @@ fn a_denied_break_restores_wall_sign_text_and_synced_attachments() {
             holder,
             replace: true,
             changes: vec![AttachmentSync {
-                namespace: VALUE.namespace.into(),
-                name: VALUE.name.into(),
+                namespace: value_key.namespace().into(),
+                name: value_key.name().into(),
                 value: Some([("n".into(), Tag::Int(41))].into()),
             }],
         });

@@ -121,6 +121,7 @@ fn gives_uuid(t: Target) -> Option<u32> {
         | Target::Other(id)
         | Target::Fangs(id)
         | Target::Cloud(id)
+        | Target::Bolt(id)
         | Target::General(id)
         | Target::Hook(id)
         | Target::Orb(id) => Some(id),
@@ -144,10 +145,13 @@ impl Game<'_> {
         if root.is_none() && dim == super::Dim::Overworld {
             root = save::read_dat(&self.world_root.join("data/minecraft/world_border.dat"));
         }
-        root.as_ref()
-            .and_then(|root| root.get("data"))
-            .map(sunrise_client::worldborder::WorldBorder::unpack)
-            .unwrap_or_default()
+        if let Some(data) = root.as_ref().and_then(|root| root.get("data")) {
+            match sunrise_client::worldborder::WorldBorder::unpack(data) {
+                Ok(border) => return border,
+                Err(error) => log::warn!("invalid saved world border in {}: {error}", dim.id()),
+            }
+        }
+        sunrise_client::worldborder::WorldBorder::default()
     }
     /// Save the border of the level in place (`SavedData`, one per level).
     pub(super) fn save_border(&self) {
@@ -309,6 +313,7 @@ impl Game<'_> {
             | Target::Other(id)
             | Target::Fangs(id)
             | Target::Cloud(id)
+            | Target::Bolt(id)
             | Target::Hook(id) => self.persist.raw.get(&id),
             Target::DragonPart(_) => None,
             Target::Player => self.level.player_extra.as_ref(),
@@ -616,6 +621,15 @@ impl Game<'_> {
     fn scoreboard_name(&self, id: u32, uuid: [i32; 4]) -> String {
         self.remote_player_name(id)
             .map_or_else(|| uuid_text(uuid), str::to_owned)
+    }
+    /// `Entity.getTeam`: the team holding this entity's scoreboard name (its UUID).
+    pub(super) fn entity_team(&self, id: u32) -> Option<&sb::Team> {
+        if self.score.board.teams.is_empty() {
+            return None;
+        }
+        let uuid = *self.persist.uuids.get(&id)?;
+        let own = self.scoreboard_name(id, uuid);
+        self.score.board.players_team(&own)
     }
     /// `TamableAnimal.getTeam` of a mob or another player: its own team, else,
     /// when it is a tamed pet, its root owner's.
@@ -1042,12 +1056,10 @@ impl Game<'_> {
             return;
         }
         // The faces of the players the list shows.
-        let faces: std::collections::HashSet<u128> = self
-            .tab_list
-            .displayed_ids(&players, &self.score.board)
-            .iter()
-            .copied()
-            .collect();
+        let faces: std::collections::HashSet<u128> =
+            tab_list::sorted_players(&players, &self.score.board)
+                .map(|player| player.uuid)
+                .collect();
         for p in players.iter_mut().filter(|p| faces.contains(&p.uuid)) {
             p.skin = self.face_skin(p.uuid, &p.skin);
         }
@@ -1160,7 +1172,7 @@ impl Env for GameEnv<'_, '_> {
         }
     }
     fn source(&mut self) -> Option<(Holder, bool)> {
-        let entity = match self.g.command_source {
+        let entity = match &self.g.command_source {
             Some(s) => s.entity,
             None => Some(Target::Player),
         }?;

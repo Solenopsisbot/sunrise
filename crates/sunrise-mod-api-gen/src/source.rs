@@ -110,19 +110,23 @@ pub(crate) fn crate_files(root: &Path, krate: &str) -> Result<Vec<ModuleFile>, S
     Ok(files)
 }
 
-/// A path without generic arguments or spaces, as listed paths and found ones are compared.
+/// A type or path without generic arguments or spaces, as listed paths, owners and found ones
+/// are compared (`Game<'_>` is `Game`).
 pub(crate) fn plain_path(path: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0;
-    for c in path.chars() {
-        match c {
-            '<' => depth += 1,
-            '>' => depth -= 1,
-            c if depth == 0 && !c.is_whitespace() => out.push(c),
-            _ => {}
-        }
-    }
-    out
+    let mut depth = 0usize;
+    path.chars()
+        .filter(|&c| match c {
+            '<' => {
+                depth += 1;
+                false
+            }
+            '>' => {
+                depth = depth.saturating_sub(1);
+                false
+            }
+            c => depth == 0 && !c.is_whitespace(),
+        })
+        .collect()
 }
 
 /// `r#type` as `type`.

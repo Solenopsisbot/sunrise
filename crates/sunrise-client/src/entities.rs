@@ -8,7 +8,7 @@ use crate::entity_rules::EntityRules;
 use crate::{
     blocks::{BlockFacts, Fluid},
     collisions::{EntityCollisions, SceneCollisions},
-    items::ItemStack,
+    items::{ItemStack, Items},
     motion::block_friction,
     world::World,
 };
@@ -46,8 +46,10 @@ mod item_move;
 mod item_no_physics;
 pub mod nameplate;
 mod obstacles;
-pub use fluids::{fall_reset_hit, fluid_flow, update_entity_fluids, water_clip};
-pub use item_merge::{ItemCells, merge_with_neighbours};
+pub use fluids::{
+    fall_reset_hit, fluid_flow, swept_fluid_contact, update_entity_fluids, water_clip,
+};
+pub use item_merge::{ItemCells, merge_with_neighbours, merge_with_neighbours_recording};
 pub use obstacles::ObstacleGrid;
 
 #[cfg(test)]
@@ -198,12 +200,18 @@ pub struct ItemEntity {
     /// `fallOn` on landing ([`ItemStep::landed`]), then reset.
     pub fall_distance: f64,
     pub age: i32,
-    /// Signed NBT counter; widened to retain the legacy internal u32::MAX sentinel.
-    pub pickup_delay: i64,
+    /// NeoForge `ItemEntity.lifespan`: maximum age in ticks before expiry
+    /// (default [`Self::LIFETIME`], 6000).
+    pub lifespan: i32,
+    /// `ItemEntity.pickupDelay`: signed tick counter (`32767` = never pick up).
+    pub pickup_delay: i32,
     pub bob_offset: f32,
     /// `Entity.tickCount`: ticks since the item entered the level, which
     /// paces `ItemEntity.mergeWithNeighbours`.
     pub ticks: u32,
+    /// `ItemEntity.setItem` replaces the stack even when its contents are equal.
+    /// Pickup captures this revision to distinguish that replacement from its original.
+    pub stack_revision: u64,
     /// `Entity.needsSync` / `syncPosition`: immediate `ServerEntity.sendChanges`
     /// after a bounce or velocity jump (`> 0.1` in `ItemEntity.tick`).
     pub needs_sync: bool,
@@ -230,7 +238,7 @@ pub struct ItemEntity {
 /// Particles are drawn on the client (`Level.addParticle` is empty on the
 /// server). The sound is `Entity.playSound`, which the server broadcasts;
 /// `ClientLevel.playSeededSound` ignores it when the except entity is null.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ItemSplash {
     Sound {
         at: [f64; 3],
@@ -446,6 +454,16 @@ impl ItemEntity {
     pub const DIMENSIONS: [f32; 3] = [0.25, 0.25, 0.2125];
     /// `EntityTypes.ITEM` declares a float eye height, widened by `Entity.getEyeY`.
     pub const EYE_HEIGHT: f64 = 0.2125_f32 as f64;
+    /// Vanilla `ItemEntity.LIFETIME`: default dropped-item lifespan in ticks.
+    pub const LIFETIME: i32 = 6000;
+    /// NeoForge `ItemEntity.tick` lifespan cap (`Short.MAX_VALUE - 1`),
+    /// preventing `age` (stored as a short) from wrapping into an accidental
+    /// infinite lifespan.
+    pub const MAX_LIFESPAN: i32 = i16::MAX as i32 - 1;
+    /// `ItemEntity.INFINITE_PICKUP_DELAY`: pickup delay that never counts down (`setNeverPickUp`).
+    pub const INFINITE_PICKUP_DELAY: i32 = i16::MAX as i32;
+    /// `ItemEntity.INFINITE_LIFETIME`: age that never increments (`setUnlimitedLifetime`).
+    pub const INFINITE_LIFETIME: i32 = i16::MIN as i32;
     /// `Entity.getLightProbePosition(partialTick)` for a dropped item: the eye
     /// position (`getEyePosition`) over the position drawn this frame
     /// (`getPosition(partialTick)`), not this tick's own.
@@ -487,18 +505,18 @@ impl ItemEntity {
     /// whose health reaches 0 is destroyed at once (`ItemStack.onDestroyed`,
     /// then `discard`), so what it held leaves it here. None while the item
     /// survives; the emptied stacks otherwise.
-    pub fn hurt(&mut self, amount: i32) -> Option<Vec<ItemStack>> {
+    pub fn hurt(&mut self, items: &Items, amount: i32) -> Option<Vec<ItemStack>> {
         self.health -= amount;
         if self.health > 0 {
             return None;
         }
-        Some(self.spill_destroyed_contents())
+        Some(self.spill_destroyed_contents(items))
     }
     /// Built-in `ItemStack.onDestroyed` spills (`BundleItem.onDestroyed` and
     /// `BlockItem.onDestroyed` for shulker boxes) computed without modifying
     /// `self.stack`, so `ItemPart::item_destroyed` sees the original intact
     /// stack (`ItemEntity.hurtServer` -> `ItemStack.onDestroyed` -> `discard()`).
-    pub fn peek_destroyed_contents(&self) -> Vec<ItemStack> {
+    pub fn peek_destroyed_contents(&self, items: &Items) -> Vec<ItemStack> {
         let Some(data) = self.stack.data() else {
             return Vec::new();
         };
@@ -506,18 +524,18 @@ impl ItemEntity {
             return Vec::new();
         }
         let mut copy = self.stack.clone();
-        let mut spilled = crate::bundle::destroyed(&mut copy);
+        let mut spilled = crate::bundle::destroyed(items, &mut copy);
         spilled.extend(crate::item_data::destroyed_container(&mut copy));
         spilled
     }
     /// Clears built-in container contents (`bundle_contents`, `container`) in place
     /// and returns them for dropping (`ItemStack.onDestroyed`).
-    pub fn spill_destroyed_contents(&mut self) -> Vec<ItemStack> {
+    pub fn spill_destroyed_contents(&mut self, items: &Items) -> Vec<ItemStack> {
         // `ItemStack.onDestroyed` runs the item's own arm, and the component
         // the stack holds is the dispatch: a bundle's (`BundleItem.onDestroyed`)
         // `bundle_contents` and a container item's (`BlockItem.onDestroyed`)
         // `container`, which a mod's own item carries in the same way.
-        let mut spilled = crate::bundle::destroyed(&mut self.stack);
+        let mut spilled = crate::bundle::destroyed(items, &mut self.stack);
         spilled.extend(crate::item_data::destroyed_container(&mut self.stack));
         spilled
     }
@@ -637,7 +655,7 @@ impl ItemEntity {
         if self.age != i16::MIN as i32 {
             self.age = self.age.wrapping_add(1);
         }
-        self.age < 6000 && self.position.y >= f64::from(world.shape.min_y - 64)
+        self.age < self.lifespan && self.position.y >= f64::from(world.shape.min_y - 64)
     }
     /// `Entity.makeStuckInBlock` as `WebBlock.entityInside` and
     /// `PowderSnowBlock.entityInside` call it for an item (which, unlike a
@@ -713,14 +731,16 @@ impl ItemEntity {
         };
     }
     fn has_infinite_pickup_delay(&self) -> bool {
-        self.pickup_delay == i64::from(i16::MAX) || self.pickup_delay == i64::from(u32::MAX)
+        self.pickup_delay == Self::INFINITE_PICKUP_DELAY
     }
-    /// `ItemEntity.isMergable` at `age`: a stack below its size whose pickup
-    /// delay isn't infinite, before its lifetime ends.
+    /// `ItemEntity.isMergable` at `age`: a non-empty stack below its size whose
+    /// pickup delay isn't infinite, before its lifetime ends.
     fn mergeable(&self, age: i32, max_stack: u32) -> bool {
-        !self.has_infinite_pickup_delay()
-            && age != i16::MIN as i32
-            && age < 6000
+        self.stack.count > 0
+            && &*self.stack.item != "minecraft:air"
+            && !self.has_infinite_pickup_delay()
+            && age != Self::INFINITE_LIFETIME
+            && age < Self::LIFETIME
             && self.stack.count < max_stack
     }
 }
@@ -1463,7 +1483,7 @@ impl Experience {
     /// bar and the total, and the levels they cross follow one at a time.
     pub fn add_points(&mut self, points: i32) {
         self.progress += points as f32 / Self::needed(self.level) as f32;
-        self.total = self.total.saturating_add(points).max(0);
+        self.total = self.total.wrapping_add(points).max(0);
     }
     /// The change `Player.giveExperienceLevels` makes: below level 0 the level,
     /// the progress and the total are 0.
@@ -1795,19 +1815,36 @@ pub struct ArmorStand {
     /// Unsaved fire immunity granted on this logical side.
     pub mod_fire_immune: bool,
     pub health: f32,
+    /// `LivingEntity.deathTime`: the ticks a stand at 0 health has been dead.
+    pub death_time: i16,
     pub tick_count: i32,
     /// Transient `LivingEntity.lastHurtMob`; an owned arrow or wind charge can set it.
     pub last_hurt_mob: Option<(u32, i32)>,
     pub id: u32,
+    /// `Entity.getRandom`, after UUID and living construction draws.
+    pub random: LegacyRandom,
     pub position: Vec3,
     /// `Entity.xo`, `yo`, `zo`: the position at the start of the tick, which
     /// the renderer blends toward `position` by the partial tick.
     pub previous: Vec3,
     pub velocity: Vec3,
-    /// `yRot`, which the body follows (`ArmorStand.tickHeadTurn`: `yBodyRot`).
+    /// `LivingEntity.hurtTime`, counted down each tick.
+    pub hurt_time: i32,
+    /// `Entity.airSupply`: refilled by 4 a tick up to 300 while it can breathe.
+    pub air: i32,
+    /// Shared flag 7, `FallFlying`: a stand cannot glide, so its first tick clears it.
+    pub fall_flying: bool,
+    /// `LivingEntity.currentImpulseContextResetGraceTime`.
+    pub impulse_grace: i32,
+    /// `Entity.yRot`; `ArmorStand.tickHeadTurn` copies it to `yBodyRot`.
     pub yaw: f32,
-    /// `yBodyRotO`: the body's yaw at the start of the tick.
+    pub body_yaw: f32,
+    /// `Entity.yRotO`: previous view yaw.
     pub previous_yaw: f32,
+    /// `LivingEntity.yBodyRotO`; `tickHeadTurn` syncs it to `yRotO` after admission.
+    pub previous_body_yaw: f32,
+    pub head_yaw: f32,
+    pub previous_head_yaw: f32,
     /// Every `EquipmentSlot`, by ordinal: mainhand, offhand, feet, legs, chest,
     /// head, body, saddle. Vanilla's `canUseSlot` refuses body and saddle only
     /// for interaction; `setItemSlot` and the save keep them.
@@ -1844,6 +1881,8 @@ pub struct ArmorStand {
     pub disabled_slots: i32,
     /// Server-only `LivingEntity.lastPos` for location-based enchantments.
     pub enchantment_block: Option<BlockPos>,
+    /// `Entity.tickCount` for periodic equipment effects.
+    pub enchantment_tick: u32,
     /// `Entity.fallDistance`, also used by `LivingEntity.checkFallDamage`'s landing callback.
     /// Each downward movement is narrowed to float before adding to this double.
     pub enchantment_fall_distance: f64,
@@ -2067,7 +2106,8 @@ impl ArmorStand {
     /// (`LivingEntityRenderer.solveBodyRot`: `Mth.rotLerp(partialTick,
     /// yBodyRotO, yBodyRot)`).
     pub fn render_yaw(&self, alpha: f32) -> f32 {
-        self.previous_yaw + alpha * crate::camera::wrap_degrees(self.yaw - self.previous_yaw)
+        self.previous_body_yaw
+            + alpha * crate::camera::wrap_degrees(self.body_yaw - self.previous_body_yaw)
     }
     /// A server's stand on its client, each tick:
     /// `setOldPosAndRot` (`ClientLevel.tickNonPassenger`), then the step of
@@ -2084,9 +2124,11 @@ impl ArmorStand {
             self.yaw += crate::camera::wrap_degrees(yaw - self.yaw);
             self.pitch = (pitch % 360.0).clamp(-90.0, 90.0);
         }
+        self.previous_body_yaw = self.previous_yaw;
+        self.body_yaw = self.yaw;
     }
-    /// Put there at once, with nothing to blend from
-    /// (`Entity.snapTo`).
+    /// Snap position and view rotation without changing the body's or head's
+    /// yaw samples (`Entity.snapTo`).
     pub fn snap(&mut self, at: Vec3, yaw: f32, pitch: f32) {
         self.position = at;
         self.previous = at;
@@ -2096,48 +2138,69 @@ impl ArmorStand {
         self.previous_pitch = self.pitch;
     }
     pub fn new(id: u32, position: Vec3, yaw: f32) -> Self {
-        Self {
-            size_answer: None,
-            attachment_lifetime: Default::default(),
-            pitch: 0.0,
-            previous_pitch: 0.0,
-            join: Default::default(),
-            fire_ticks: 0,
-            mod_fire_immune: false,
-            health: 20.0,
-            tick_count: 0,
-            last_hurt_mob: None,
-            id,
-            position,
-            previous: position,
-            velocity: Vec3::ZERO,
-            yaw,
-            previous_yaw: yaw,
-            equipment: Default::default(),
-            small: false,
-            show_arms: false,
-            no_base_plate: false,
-            invisible: false,
-            marker: false,
-            no_gravity: false,
-            no_physics: None,
-            custom_name: None,
-            name_visible: false,
-            last_hit: i64::MIN / 2,
-            pose: Self::DEFAULT_POSE,
-            vehicle: None,
-            disabled_slots: 0,
-            enchantment_block: None,
-            enchantment_fall_distance: 0.0,
-            enchantment_equipment: Default::default(),
-            live: Default::default(),
-            first_tick: true,
-            ground: Default::default(),
-            speed_instance: false,
-            nameplate: Default::default(),
-            client_effects: Default::default(),
-            darkness_blend: (0.0, 0.0),
-        }
+        Self::new_with_uuid(id, position, yaw).0
+    }
+
+    pub fn new_with_uuid(id: u32, position: Vec3, yaw: f32) -> (Self, [i32; 4]) {
+        let (mut random, uuid) = crate::mobs::living_random();
+        // LivingEntity's initial yaw draw, even when placement or loading replaces it.
+        random.next_float();
+        (
+            Self {
+                size_answer: None,
+                attachment_lifetime: Default::default(),
+                pitch: 0.0,
+                previous_pitch: 0.0,
+                join: Default::default(),
+                fire_ticks: 0,
+                mod_fire_immune: false,
+                death_time: 0,
+                health: 20.0,
+                tick_count: 0,
+                last_hurt_mob: None,
+                id,
+                random,
+                position,
+                hurt_time: 0,
+                air: 300,
+                fall_flying: false,
+                impulse_grace: 0,
+                previous: position,
+                velocity: Vec3::ZERO,
+                yaw,
+                body_yaw: yaw,
+                previous_yaw: yaw,
+                previous_body_yaw: yaw,
+                head_yaw: yaw,
+                previous_head_yaw: yaw,
+                equipment: Default::default(),
+                small: false,
+                show_arms: false,
+                no_base_plate: false,
+                invisible: false,
+                marker: false,
+                no_gravity: false,
+                no_physics: None,
+                custom_name: None,
+                name_visible: false,
+                last_hit: i64::MIN / 2,
+                pose: Self::DEFAULT_POSE,
+                vehicle: None,
+                disabled_slots: 0,
+                enchantment_block: None,
+                enchantment_fall_distance: 0.0,
+                enchantment_tick: 0,
+                enchantment_equipment: Default::default(),
+                live: Default::default(),
+                first_tick: true,
+                ground: Default::default(),
+                speed_instance: false,
+                nameplate: Default::default(),
+                client_effects: Default::default(),
+                darkness_blend: (0.0, 0.0),
+            },
+            uuid,
+        )
     }
     /// `Entity.getOnPos(0.2)` (`getOnPosLegacy`): the supporting block's
     /// column 0.2 below the feet, the supporting block itself when `tall`
@@ -2260,9 +2323,9 @@ impl ArmorStand {
                 }
             }
         }
-        // Dead: the damage type that ran its health out, which vanilla's
-        // `brokenByAnything` receives as the `DamageSource`.
-        (self.health <= 0.5).then(|| hit_by.unwrap_or("minecraft:generic"))
+        // `ArmorStand.causeDamage` breaks it only when this tick's damage left
+        // it at 0.5 or less: the damage type `brokenByAnything` receives.
+        hit_by.filter(|_| self.health <= 0.5)
     }
     /// `ArmorStand.getDefaultDimensions`: MARKER_DIMENSIONS, or BABY_DIMENSIONS (the type's at
     /// half scale, its eyes at 0.9875) for a small one, else the type's.
@@ -2708,6 +2771,8 @@ mod fire_environment_tests {
             ground: Default::default(),
             vertical_collision: false,
             age: 0,
+            stack_revision: 0,
+            lifespan: ItemEntity::LIFETIME,
             pickup_delay: 0,
             bob_offset: 0.0,
             ticks: 0,
@@ -2717,9 +2782,11 @@ mod fire_environment_tests {
         };
         let mut protected = make("minecraft:oak_planks");
         let mut heard = Vec::new();
+        let empty_items = Items::empty();
         let result = protected.environment_tick_with_hook(
             &mut world,
             facts,
+            &empty_items,
             assets.registry,
             &can_hurt,
             |_, damage| {
@@ -2736,7 +2803,7 @@ mod fire_environment_tests {
         );
         let mut wood = make("minecraft:oak_planks");
         let mut metal = make("minecraft:netherite_ingot");
-        let first = wood.environment_tick(&world, facts, assets.registry, &can_hurt);
+        let first = wood.environment_tick(&world, facts, &empty_items, assets.registry, &can_hurt);
         assert!(first.alive && first.lava_hurt);
         assert!(
             !first.should_play_lava_hurt_sound(1),
@@ -2747,7 +2814,7 @@ mod fire_environment_tests {
             wood.fire_ticks > 0,
             "lava contact must ignite dropped items"
         );
-        let last = wood.environment_tick(&world, facts, assets.registry, &can_hurt);
+        let last = wood.environment_tick(&world, facts, &empty_items, assets.registry, &can_hurt);
         assert!(
             !last.alive && last.lava_hurt,
             "lethal lava damage still emits burn sound"
@@ -2758,7 +2825,7 @@ mod fire_environment_tests {
         );
         for _ in 0..40 {
             let (result, allocations) = sunrise_threads::allocation_probe::measure(|| {
-                metal.environment_tick(&world, facts, assets.registry, &can_hurt)
+                metal.environment_tick(&world, facts, &empty_items, assets.registry, &can_hurt)
             });
             assert_eq!(
                 allocations.calls, 0,
@@ -2778,7 +2845,8 @@ mod fire_environment_tests {
             )
             .unwrap();
         let mut burning = make("minecraft:oak_planks");
-        let result = burning.environment_tick(&world, facts, assets.registry, &can_hurt);
+        let result =
+            burning.environment_tick(&world, facts, &empty_items, assets.registry, &can_hurt);
         assert!(result.alive && !result.lava_hurt);
         assert!(burning.fire_ticks > 0);
         world
@@ -2793,7 +2861,7 @@ mod fire_environment_tests {
             )
             .unwrap();
         let mut soul = make("minecraft:oak_planks");
-        soul.environment_tick(&world, facts, assets.registry, &can_hurt);
+        soul.environment_tick(&world, facts, &empty_items, assets.registry, &can_hurt);
         assert_eq!(soul.health, 3);
         let mut stand = ArmorStand::new(2, at, 0.0);
         world
@@ -2902,6 +2970,8 @@ mod destroyed_bundle_environment_tests {
             ground: Default::default(),
             vertical_collision: false,
             age: 0,
+            stack_revision: 0,
+            lifespan: ItemEntity::LIFETIME,
             pickup_delay: 0,
             bob_offset: 0.0,
             ticks: 0,
@@ -2910,9 +2980,12 @@ mod destroyed_bundle_environment_tests {
             was_touching_water: false,
         };
         // 5 health against 4 a tick: the first tick leaves 1 and nothing out.
-        let first = bundle.environment_tick(&world, facts, assets.registry, &can_hurt);
+        let empty_items = Items::empty();
+        let first =
+            bundle.environment_tick(&world, facts, &empty_items, assets.registry, &can_hurt);
         assert!(first.alive && first.spilled.is_empty());
-        let second = bundle.environment_tick(&world, facts, assets.registry, &can_hurt);
+        let second =
+            bundle.environment_tick(&world, facts, &empty_items, assets.registry, &can_hurt);
         assert!(!second.alive);
         assert_eq!(
             second
@@ -2954,6 +3027,8 @@ mod destroyed_bundle_environment_tests {
             ground: Default::default(),
             vertical_collision: false,
             age: 0,
+            stack_revision: 0,
+            lifespan: ItemEntity::LIFETIME,
             pickup_delay: 0,
             bob_offset: 0.0,
             ticks: 0,
@@ -2992,14 +3067,16 @@ mod destroyed_bundle_environment_tests {
             explosion_resistance: 0.0,
             item: text("minecraft:air"),
             pick_item: text("minecraft:air"),
-            sounds: sunrise_items::blocks::Sounds {
+            sounds: mod_api::BlockSoundType {
+                identity: mod_api::BlockSoundTypeIdentity::Other,
                 volume: 1.0,
                 pitch: 1.0,
-                break_sound: text(""),
-                step: text(""),
-                place: text(""),
-                hit: text(""),
-                fall: text(""),
+                break_sound: mod_api::SoundEventKey::parse("minecraft:intentionally_empty")
+                    .unwrap(),
+                step: mod_api::SoundEventKey::parse("minecraft:intentionally_empty").unwrap(),
+                place: mod_api::SoundEventKey::parse("minecraft:intentionally_empty").unwrap(),
+                hit: mod_api::SoundEventKey::parse("minecraft:intentionally_empty").unwrap(),
+                fall: mod_api::SoundEventKey::parse("minecraft:intentionally_empty").unwrap(),
             },
             fluid: Fluid::None,
             fluid_level: 0,
@@ -3031,17 +3108,18 @@ mod destroyed_bundle_environment_tests {
         let mut stack = ItemStack::new("minecraft:bundle", 1);
         stack.data_mut().bundle_contents = vec![ItemStack::new("minecraft:diamond", 2)];
         let (world, facts, registry) = air_world_and_facts();
+        let items = Items::empty();
         let can_hurt = |_: &ItemStack, _: &str| true;
 
         let mut burning = test_item_entity(1, 20, stack.clone());
-        let result = burning.environment_tick(&world, &facts, &registry, &can_hurt);
+        let result = burning.environment_tick(&world, &facts, &items, &registry, &can_hurt);
         assert!(!result.alive);
         assert_eq!(result.destroyed_by, Some("minecraft:on_fire"));
         assert_eq!(result.spilled.len(), 1);
         assert_eq!(&*result.spilled[0].item, "minecraft:diamond");
 
         let mut pre_killed = test_item_entity(0, 0, stack);
-        let result = pre_killed.environment_tick(&world, &facts, &registry, &can_hurt);
+        let result = pre_killed.environment_tick(&world, &facts, &items, &registry, &can_hurt);
         assert!(!result.alive);
         assert_eq!(result.destroyed_by, Some("minecraft:generic"));
         assert_eq!(result.spilled.len(), 1);
@@ -3053,12 +3131,14 @@ mod destroyed_bundle_environment_tests {
         let mut stack = ItemStack::new("minecraft:bundle", 1);
         stack.data_mut().bundle_contents = vec![ItemStack::new("minecraft:diamond", 3)];
         let (mut world, facts, registry) = air_world_and_facts();
+        let items = Items::empty();
         let can_hurt = |_: &ItemStack, _: &str| true;
 
         let mut burning = test_item_entity(1, 20, stack);
         let result = burning.environment_tick_with_hook_deferring_spill(
             &mut world,
             &facts,
+            &items,
             &registry,
             &can_hurt,
             |_, _| false,
@@ -3072,12 +3152,12 @@ mod destroyed_bundle_environment_tests {
         assert_eq!(&*intact[0].item, "minecraft:diamond");
         assert_eq!(intact[0].count, 3);
 
-        let peeked = burning.peek_destroyed_contents();
+        let peeked = burning.peek_destroyed_contents(&items);
         assert_eq!(peeked.len(), 1);
         assert_eq!(peeked[0].count, 3);
         assert_eq!(burning.stack.data().unwrap().bundle_contents.len(), 1);
 
-        let spilled = burning.spill_destroyed_contents();
+        let spilled = burning.spill_destroyed_contents(&items);
         assert_eq!(spilled.len(), 1);
         assert_eq!(spilled[0].count, 3);
         assert!(
@@ -3125,14 +3205,16 @@ mod armor_stand_render_tests {
         assert_eq!(stand.render_yaw(0.5), 190.0);
     }
 
-    /// A snap (a move too far to interpolate) leaves nothing to blend from.
+    /// A snap leaves no position or view samples to blend from. The body
+    /// keeps its own turn between ticks.
     #[test]
     fn a_snapped_stand_is_drawn_where_it_landed() {
         let mut stand = ArmorStand::new(1, Vec3::new(0.5, 70.0, 0.5), 0.0);
-        stand.interpolate(Some((Vec3::new(0.5, 69.0, 0.5), 0.0, 0.0)));
+        stand.interpolate(Some((Vec3::new(0.5, 69.0, 0.5), 20.0, 0.0)));
         stand.snap(Vec3::new(200.5, 64.0, 0.5), 90.0, 0.0);
         assert_eq!(stand.render_position(0.5), Vec3::new(200.5, 64.0, 0.5));
-        assert_eq!(stand.render_yaw(0.5), 90.0);
+        assert_eq!([stand.previous_yaw, stand.yaw], [90.0; 2]);
+        assert_eq!(stand.render_yaw(0.5), 10.0);
     }
 }
 #[cfg(test)]
@@ -3273,6 +3355,8 @@ mod merge_tests {
             ground: sunrise_world::ground_support::GroundState::from_ground_flag(true),
             vertical_collision: false,
             age,
+            stack_revision: 0,
+            lifespan: ItemEntity::LIFETIME,
             pickup_delay: 0,
             bob_offset: 0.0,
             ticks: age.max(0) as u32,
@@ -3431,14 +3515,18 @@ mod merge_tests {
 
     #[test]
     fn unmergeable_items_are_skipped() {
-        for delay in [i64::from(i16::MAX), i64::from(u32::MAX)] {
-            let mut items = [
-                item("minecraft:sand", 1, 0.5, 1),
-                item("minecraft:sand", 1, 0.5, 1),
-            ];
-            items[1].pickup_delay = delay;
-            assert_eq!(merge(&mut items, 0), [Some(1), Some(1)]);
-        }
+        let mut items = [
+            item("minecraft:sand", 1, 0.5, 1),
+            item("minecraft:sand", 1, 0.5, 1),
+        ];
+        items[1].pickup_delay = ItemEntity::INFINITE_PICKUP_DELAY;
+        assert_eq!(merge(&mut items, 0), [Some(1), Some(1)]);
+        // An empty item entity does not merge before its next tick discards it.
+        let mut items = [
+            item("minecraft:sand", 1, 0.5, 1),
+            item("minecraft:air", 0, 0.5, 1),
+        ];
+        assert_eq!(merge(&mut items, 0), [Some(1), Some(0)]);
         // At age 6000 the other item's lifetime is over; this one's tick
         // started at 5999, so it may still merge into a live item.
         let mut items = [
@@ -3807,6 +3895,8 @@ mod honey_slide_tests {
             ground: Default::default(),
             vertical_collision: false,
             age: 10,
+            stack_revision: 0,
+            lifespan: ItemEntity::LIFETIME,
             pickup_delay: 0,
             bob_offset: 0.0,
             ticks: 10,
@@ -3911,6 +4001,8 @@ mod slime_bounce_tests {
             ground: sunrise_world::ground_support::GroundState::from_ground_flag(true),
             vertical_collision: false,
             age: 10,
+            stack_revision: 0,
+            lifespan: ItemEntity::LIFETIME,
             pickup_delay: 0,
             bob_offset: 0.0,
             ticks: 10,
@@ -4818,6 +4910,8 @@ mod item_destroyed_tests {
             ground: Default::default(),
             vertical_collision: false,
             age: 0,
+            stack_revision: 0,
+            lifespan: ItemEntity::LIFETIME,
             pickup_delay: 0,
             bob_offset: 0.0,
             ticks: 0,
@@ -4837,10 +4931,11 @@ mod item_destroyed_tests {
             "minecraft:bundle",
             &[("minecraft:stone", 3), ("minecraft:diamond", 1)],
         );
+        let items = Items::empty();
         // Above zero after the hit: nothing leaves the bundle.
-        assert_eq!(bundle.hurt(1), None);
+        assert_eq!(bundle.hurt(&items, 1), None);
         assert_eq!(bundle.health, 4);
-        let spent = bundle.hurt(4).expect("the hit that destroys it");
+        let spent = bundle.hurt(&items, 4).expect("the hit that destroys it");
         assert_eq!(
             spent
                 .iter()
@@ -4857,8 +4952,11 @@ mod item_destroyed_tests {
         );
         // A second hit has nothing left to spill, and an item that holds
         // nothing never reports any.
-        assert_eq!(bundle.hurt(1), Some(Vec::new()));
-        assert_eq!(item("minecraft:stone", &[]).hurt(5), Some(Vec::new()));
+        assert_eq!(bundle.hurt(&items, 1), Some(Vec::new()));
+        assert_eq!(
+            item("minecraft:stone", &[]).hurt(&Items::empty(), 5),
+            Some(Vec::new())
+        );
     }
 
     /// `BlockItem.onDestroyed`: the same death path spills a container item's
@@ -4872,7 +4970,9 @@ mod item_destroyed_tests {
             (0, ItemStack::new("minecraft:oak_log", 8)),
             (3, ItemStack::new("minecraft:cobblestone", 64)),
         ];
-        let spent = box_item.hurt(5).expect("the hit that destroys it");
+        let spent = box_item
+            .hurt(&Items::empty(), 5)
+            .expect("the hit that destroys it");
         assert_eq!(
             spent
                 .iter()
@@ -5093,6 +5193,8 @@ mod dropped_item_light_tests {
             ground: Default::default(),
             vertical_collision: false,
             age: 0,
+            stack_revision: 0,
+            lifespan: ItemEntity::LIFETIME,
             pickup_delay: 0,
             bob_offset: 0.0,
             ticks: 0,

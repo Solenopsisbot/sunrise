@@ -6,7 +6,7 @@ pub mod saved_fields;
 pub use placement::PlacementInfo;
 #[path = "recipe_book_layout.rs"]
 mod layout;
-pub use layout::RecipeBookLayout;
+pub use layout::{RecipeBookLayout, RecipeBookPlacement};
 #[path = "recipe_book_filter.rs"]
 mod filter;
 pub use filter::RecipeBookFilterLook;

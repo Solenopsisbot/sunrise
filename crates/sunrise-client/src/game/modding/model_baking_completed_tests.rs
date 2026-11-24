@@ -395,7 +395,11 @@ fn pack_reload_runs_listeners_on_both_sides_of_model_manager() {
                         &[],
                         &[],
                         &game.mods,
-                        game.register_client_reload_listeners(),
+                        game.register_client_reload_listeners(
+                            &game
+                                .capture_candidate_settings(&game.options.resources)
+                                .unwrap(),
+                        ),
                         &[],
                         &game.pack.assets,
                         &game.res,
@@ -464,7 +468,11 @@ fn a_failed_reload_fires_no_model_baking_completed() {
                 &[],
                 &[],
                 &game.mods,
-                game.register_client_reload_listeners(),
+                game.register_client_reload_listeners(
+                    &game
+                        .capture_candidate_settings(&game.options.resources)
+                        .unwrap(),
+                ),
                 &[],
                 &game.pack.assets,
                 &game.res,

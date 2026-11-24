@@ -1,9 +1,10 @@
 # Drawing with your own render pipeline
 
 Draw world quads with your own fragment shader. Register a `RenderPipeline`, resolve
-its handle, and submit quads through a `WorldDrawContext`. This is the restricted
-counterpart of NeoForge's `RegisterRenderPipelinesEvent`: you supply the fragment
-stage; the game fixes the vertex stage, primitive type and bindings.
+its handle, and submit quads through a `WorldDrawContext` (in `submit_custom_geometry` or
+a debug renderer). This is the restricted counterpart of NeoForge's
+`RegisterRenderPipelinesEvent`: you supply the fragment stage; the game fixes the vertex
+stage, primitive type and bindings.
 
 ## 1. Write the shader
 
@@ -62,8 +63,10 @@ fn register_render_pipelines(
 scaled by its alpha. `WorldDepth::Tested` hides the quads behind nearer world surfaces, and
 `ThroughWalls` draws them over everything. No pipeline writes depth.
 
-The id must be in a namespace your mod owns (or in a content package it serves via `served_by`). There is no per-mod pipeline count cap. A registration
-with an unowned namespace or a duplicate id is logged with the mod's id and dropped.
+Any valid `Identifier` is accepted. Use a unique ID for every mod pipeline, regardless of its
+required or optional policy. A mod ID collision fails startup. Collisions with vanilla are checked
+in the corresponding required or optional table. If startup reports missing or invalid
+`render-pipelines.json`, prepare the client resources again.
 
 ### Required or optional
 
@@ -104,27 +107,22 @@ refused at load: when its registration declares no texture but the file samples 
 reverse), when the registration's texture or another resource it names is missing, or when the GPU
 rejects the shader.
 
-The check, and the load, also refuse a shader that is too costly or that a player's system could
-not translate:
-
-- **Expressions.** The composed shader (your file with the game's prelude and entry points, which
-  are small and fixed) may hold 20,000 expressions over all its functions. The refusal gives the
-  count: `21066 expressions; a pipeline shader may hold 20000`.
-- **Texture reads.** It may hold 64 texture reads (`textureLoad` and `textureSample*` expressions
-  written in the code, not executions). A textured pipeline's `pipeline_texture` function is one of
-  them, so your own code has 63. The refusal gives the count.
-- **Backends.** The shader is translated to SPIR-V (Vulkan), MSL (Metal) and HLSL (DirectX 12) as
-  the GPU library does, and a shader that any of them refuses is refused naming it, as in
-  `Vulkan (SPIR-V) refuses it: ...`. Some shaders pass validation and still fail here, such as
-  passing a pointer to a matrix column or to an element of a local array to a function; copy the
-  value into a function argument instead.
+The check, and the load, also refuse a shader that a player's system could not translate. The
+shader is translated to SPIR-V (Vulkan), MSL (Metal) and HLSL (DirectX 12) as the GPU library does,
+and a shader that any of them refuses is refused naming it, as in `Vulkan (SPIR-V) refuses it: ...`.
+Some shaders pass validation and still fail here, such as passing a pointer to a matrix column or
+to an element of a local array to a function; copy the value into a function argument instead.
+There is no count of expressions or texture reads: what the GPU library translates is drawn.
 
 ## 3. Resolve and draw
 
 ```rust,ignore
 fn client_setup(&self, context: &mut dyn ClientSetupContext, _event: &mut ClientSetupEvent<'_>) {
     let id = Identifier::parse("example:glow").unwrap();
-    *self.glow.lock().unwrap() = context.render_assets().render_pipeline(&id).ok();
+    *self.glow.lock().unwrap() = context
+        .render_assets()
+        .render_pipeline(&id)
+        .ok();
 }
 
 fn submit_custom_geometry(&self, _host: &dyn ClientHost, event: &mut SubmitCustomGeometryEvent<'_>) {
@@ -145,18 +143,15 @@ reload answers `Stale`.
 | `RenderPipelineError::Unknown` | No mod registered that id. |
 | `RenderPipelineError::Invalid` | The pipeline is optional and its shader file is missing, was refused or was rejected by the GPU. The log has a line `render pipeline <id> from mod <owner> refused: <file>: <reason>`, with the file's line number for a syntax or type error, or `render pipeline <id> from mod <owner> refused by the GPU: <reason>`. |
 | `RenderPipelineError::Stale` | The handle is from before a resource reload. |
-| `PipelineDrawError::NonFinite` | A corner or texture coordinate is not finite, or a camera-relative coordinate overflows `f32`. |
-| `PipelineDrawError::CapacityExceeded` | The view's 4,096 quads, shared with `WorldDrawContext::quads`, are used up. |
 
-A refused batch draws nothing. An `Invalid` pipeline never stops the game from starting; a required
-pipeline that cannot be built does.
+`pipeline_quads` returns `PipelineDrawError::Pipeline(...)` when the handle is invalid or stale, drawing nothing for that call. Any quad with a non-finite corner, camera-relative `f32` overflow, or non-finite texture coordinate is ignored while the valid quads in the batch still draw, and quad storage grows dynamically into the GPU buffers without a 4,096 cap. An `Invalid` pipeline never stops the game from starting; a required pipeline that cannot be built does.
 
 ## What a pipeline draws, and when
 
-`pipeline_quads` works wherever a `WorldDrawContext` is given: `submit_custom_geometry` and each
-`render_level_stage`. Within a stage, pipeline quads draw after that stage's plain quads and
-lines, in the order submitted. Under a shader pack they follow the plain quads: a stage the pack
-draws itself is drawn with the next stage the game reaches.
+`WorldDrawContext::pipeline_quads` in `submit_custom_geometry` or a debug renderer submits quads
+for the deferred world pass. Quads with non-finite coordinates or UVs are skipped individually
+without rejecting valid quads in the same slice; accepted pipeline quads draw after the pass's
+plain quads and lines, in submission order.
 
 ## Sampling a texture
 
@@ -203,5 +198,35 @@ cause and resolves to `Invalid`:
 A pipeline without `.textured(…)` has no `pipeline_texture`: its file is refused with a note
 naming `RenderPipeline::textured`.
 
-A pipeline cannot take values of its own from the mod, sample more than one texture, or replace the
-vertex stage.
+A pipeline cannot sample more than one texture or replace the vertex stage; custom per-frame values
+are available for translated shader-pack uniforms via `WorldDrawContext::set_pack_uniform` (below).
+
+## Participating in translated shader packs
+
+To let an active Iris/OptiFine shader pack shade a pipeline's geometry with its own program, declare
+its `PipelineGeometryClass` on registration via `.geometry_class(...)`:
+
+```rust,ignore
+event.register(
+    RenderPipeline::new(id.clone(), id, PipelineBlend::Translucent, WorldDepth::Tested)
+        .geometry_class(PipelineGeometryClass::Terrain),
+);
+```
+
+Each geometry class selects a standard Iris/OptiFine program fallback chain (for example,
+`Terrain` resolves `gbuffers_terrain -> gbuffers_textured_lit -> gbuffers_textured -> gbuffers_basic`,
+and `Particles` resolves `gbuffers_particles -> gbuffers_textured_lit -> gbuffers_textured -> gbuffers_basic`).
+Pipelines that need pack-defined programs, preprocessor defines, an auxiliary depth target, or
+per-frame pack uniforms attach an optional `.pack_binding(PackBinding::new()...)`. Startup refuses
+invalid GLSL identifiers, reserved Iris/OptiFine sampler/image/uniform names, and cross-mod or
+namespace collisions across samplers, uniforms, defines, and depth-target IDs.
+
+During a world draw hook, feed declared per-frame pack uniforms with
+`ctx.set_pack_uniform(name, PackUniformValue::...)` (returns `false` without panicking when `name`
+or its `PackUniformType` is not registered; any `previous_name` declared on the uniform is tracked
+automatically across frames). To inspect whether an active shader pack bound a specific pipeline to
+one of its translated programs (`PackOverrideState::Bound`), left it on the mod's own fallback
+shader (`PackOverrideState::UnboundPack`), or no pack is active (`PackOverrideState::NoPack`), call
+`ctx.pack_override_state(pipeline)`. To check generally whether a shader pack is currently loaded
+and rendering the world (always `false` on the title screen, matching `IrisApi.isShaderPackInUse()`),
+call `host.shader_pack_active()`.

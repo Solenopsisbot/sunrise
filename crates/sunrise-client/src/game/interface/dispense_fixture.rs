@@ -871,7 +871,7 @@ impl Game<'_> {
                     .position(|m| m.id == id)
                     .ok_or("the target is gone")?;
                 let kind = self.mobs[index].kind.id.clone();
-                let bonus = self.smash_damage_bonus(&kind);
+                let bonus = self.smash_damage_bonus(&kind, Some(id));
                 let join = self.mobs[index].join;
                 let (hurt, _) = self.hurt_by_player(index, base + bonus, source);
                 let index = self
@@ -882,12 +882,11 @@ impl Game<'_> {
                 // The hurt sound the mob raised, where it stands.
                 for event in std::mem::take(&mut self.mobs[index].outbox) {
                     if let sunrise_client::mobs::MobEvent::Sound(s, at, volume, pitch) = event {
-                        self.audio
-                            .play(&format!("minecraft:{s}"), Some(at), volume, pitch);
+                        self.play_audio(&format!("minecraft:{s}"), Some(at), volume, pitch);
                     }
                 }
                 if hurt {
-                    self.weapon_hit(index);
+                    self.weapon_hit(index, sunrise_client::mobs::Damage::player([0.0; 3]));
                 }
                 (bonus, hurt)
             }
@@ -897,7 +896,7 @@ impl Game<'_> {
                     .iter()
                     .position(|s| s.id == id)
                     .ok_or("the target is gone")?;
-                let bonus = self.smash_damage_bonus("minecraft:armor_stand");
+                let bonus = self.smash_damage_bonus("minecraft:armor_stand", Some(id));
                 (bonus, self.hit_armor_stand(index, |_, _, _| {}))
             }
             _ => return Err("an attack case has a living target or armor stand".into()),

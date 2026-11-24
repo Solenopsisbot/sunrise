@@ -126,6 +126,7 @@ fn a_custom_texture_over_a_buffer_ends_when_its_stage_flips_it() {
         wgpu::ShaderStages::FRAGMENT,
     );
     let stand_ins = std::cell::RefCell::new(Vec::new());
+    let mod_uniform_mismatches = std::cell::RefCell::new(std::collections::HashSet::new());
     let pack = Resources {
         textures: &textures,
         images: &[],
@@ -140,6 +141,11 @@ fn a_custom_texture_over_a_buffer_ends_when_its_stage_flips_it() {
         stand_ins: &stand_ins,
         shadow_linear: 0,
         jobs: None,
+        mod_depth_targets: &[],
+        mod_uniforms: &[],
+        mod_uniform_mismatches: &mod_uniform_mismatches,
+        mod_depth_target: std::cell::Cell::new(None),
+        depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
     };
     let reads = |group: Group| {
         let (_, samplers, ..) = bindings(
@@ -219,6 +225,7 @@ fn a_png_under_a_name_of_its_own_is_not_bound() {
         wgpu::ShaderStages::FRAGMENT,
     );
     let stand_ins = std::cell::RefCell::new(Vec::new());
+    let mod_uniform_mismatches = std::cell::RefCell::new(std::collections::HashSet::new());
     let pack = Resources {
         textures: &textures,
         images: &[],
@@ -233,6 +240,11 @@ fn a_png_under_a_name_of_its_own_is_not_bound() {
         shadow_linear: 0,
         jobs: None,
         packed: [None; BUFFERS],
+        mod_depth_targets: &[],
+        mod_uniforms: &[],
+        mod_uniform_mismatches: &mod_uniform_mismatches,
+        mod_depth_target: std::cell::Cell::new(None),
+        depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
     };
     let (_, samplers, ..) = bindings(
         device.features(),
@@ -299,6 +311,7 @@ fn an_image_without_an_entry_reads_zero() {
         wgpu::ShaderStages::FRAGMENT,
     );
     let stand_ins = std::cell::RefCell::new(Vec::new());
+    let mod_uniform_mismatches = std::cell::RefCell::new(std::collections::HashSet::new());
     let pack = Resources {
         textures: &[],
         images: &[],
@@ -313,6 +326,11 @@ fn an_image_without_an_entry_reads_zero() {
         stand_ins: &stand_ins,
         shadow_linear: 0,
         jobs: None,
+        mod_depth_targets: &[],
+        mod_uniforms: &[],
+        mod_uniform_mismatches: &mod_uniform_mismatches,
+        mod_depth_target: std::cell::Cell::new(None),
+        depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
     };
     let mut notes = Vec::new();
     let (.., images) = bindings(
@@ -422,6 +440,7 @@ fn a_composite_program_blends_onto_its_buffer() {
         wgpu::ShaderStages::FRAGMENT,
     );
     let stand_ins = std::cell::RefCell::new(Vec::new());
+    let mod_uniform_mismatches = std::cell::RefCell::new(std::collections::HashSet::new());
     let pack = Resources {
         textures: &[],
         images: &[],
@@ -436,6 +455,11 @@ fn a_composite_program_blends_onto_its_buffer() {
         stand_ins: &stand_ins,
         shadow_linear: 0,
         jobs: None,
+        mod_depth_targets: &[],
+        mod_uniforms: &[],
+        mod_uniform_mismatches: &mod_uniform_mismatches,
+        mod_depth_target: std::cell::Cell::new(None),
+        depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
     };
     let draws = DrawUniforms::new(&device);
     let mut notes = Vec::new();

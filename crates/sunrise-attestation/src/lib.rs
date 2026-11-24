@@ -21,6 +21,8 @@ const GITHUB_URL: &str = "https://github.com/";
 pub struct Attested {
     /// Stable GitHub repository identifier, not its name or URL (Fulcio .1.15).
     pub repository_id: u64,
+    /// Stable GitHub identifier of the source repository's owner account (Fulcio .1.17).
+    pub owner_id: u64,
     /// Source repository in `owner/name` form (Fulcio .1.12).
     pub repository_name: String,
     /// Builder in `owner/name/.github/workflows/file.yml@ref` form (Fulcio .1.9).
@@ -105,6 +107,11 @@ pub fn verify(
             .as_deref()
             .and_then(|s| s.parse().ok())
             .ok_or(Error::Claim("source repository ID"))?,
+        owner_id: claims
+            .source_repository_owner_identifier
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .ok_or(Error::Claim("source repository owner ID"))?,
         repository_name: github_claim(&claims.source_repository_uri, "source repository URI")?,
         signer_workflow_ref: github_claim(&claims.build_signer_uri, "build signer URI")?,
         source_ref: claim(&claims.source_repository_ref, "source ref")?,

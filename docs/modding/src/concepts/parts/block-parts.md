@@ -6,6 +6,9 @@ level, position, block state, and `include_data`, true when a creative player pi
 player reads such as `event.player.food(host).map(|food| food.level)`. The request does not include
 a client hit face. Return `None` to keep the game's item.
 
+A server mod reads the same answer, with that player acting, through `PlayerRef::clone_item_stack`
+(see its documentation in the [API reference](../../reference/api.md)).
+
 ## Breaking-crack display
 
 `BlockPart::break_progress_positions(host, event)` supplies extra positions for a
@@ -230,16 +233,29 @@ preserves the requested resource-drop flag.
 
 ## Inside-block effects
 
-`BlockPart::entity_inside` runs on the server as the entity's sweep reaches the block.
-Use `event.run_before` or `event.run_after` to schedule an `EntityWrite` around an
-`InsideEffect`. Both `entity_inside` and `step_on` accept
-`EntityWrite::Hurt { damage_type, amount }`. Request the key once in `register`,
-for example `r.damage_type_key("minecraft:hot_floor")`. The level supplies the
-registered damage type, including data-pack types and tags, without a causing
-or direct entity. If the type is absent in that world, the hurt does not apply.
-Players, mobs and dropped items accept hurt from both callbacks. Experience
-orbs accept hurt from `step_on` only. Neither callback adds a hurt path for
-armor stands, projectiles or vehicles.
+`BlockPart::entity_inside` (version 4) runs on the server as the entity's sweep reaches the block.
+Use `event.run_before` or `event.run_after` to queue an owned closure around an `InsideEffect` slot.
+The closure receives a short-lived `&mut InsideEntityView` when the sweep flushes, even if no
+`event.apply` was requested for that slot. Built-in effects use the same ordered slots, and
+later callbacks stop when the entity dies. A dropped item sweeps once, after `step_on`.
+
+```rust,ignore
+event.run_after(InsideEffect::FireIgnite, |entity| {
+    entity.hurt("minecraft:hot_floor", 1.0);
+});
+```
+
+When migrating a v2 `EntityWrite::Hurt`, use the same registered damage-type ID you used for
+`r.damage_type_key`. `hurt_with_source` can additionally take typed handles for the direct
+entity and the causing entity (for example, a projectile and its shooter). An absent damage
+type or stale source handle makes that hurt return `false`. Players, mobs and dropped items
+use their live hurt path; a projectile's hurt path can mark it hurt for sync and still return
+`false`.
+
+`BlockPart::step_on` still queues `EntityWrite`, not closures. Its `EntityWrite::Hurt` still
+takes a `DamageTypeKey` requested in `register`, and has no direct or causing entity.
+Experience orbs accept hurt from `step_on` only. Neither callback adds a hurt path for armor
+stands or vehicles.
 
 ## Storage changes
 
@@ -307,7 +323,8 @@ is not empty, passing the fluid (`FluidState`) and its position. The contract is
 
 Normally rain on the block above, session water tickets and dry-out work as usual. With no Part on the farmland the
 scan is vanilla's. When the content owner's subscribed rule is [switched off](../disabled-content.md), only earlier
-enabled Parts or an enabled mod's session water ticket can wet the block. Rain and dry-out are held, not trampling.
+enabled Parts or an active session water ticket (tickets attributed to a disabled mod are cleared on disable) can wet
+the block. Rain and dry-out are held, not trampling.
 Bookshelf slot-occupancy flags and the last-interacted slot are transactional storage bookkeeping,
 not notification effects. Aborting restores them with the items. Changed observers, comparator
 ticks and data-send requests already issued still survive that abort.
@@ -351,5 +368,5 @@ explicit state and position, or `event.level.add_terrain_particle(host, state, s
 velocity)` for an individual piece of debris. The debris uses the supplied state's material and
 samples its tint at `source_pos`, which can differ from the spawn point. These helpers don't
 redispatch the hit or destroy Part or play a sound, but can ask block tint sources. Read the
-supplied state's outline with `event.level.block_shape` if you need to sample it. The hit helper
-uses the same random stream as `event.random`.
+supplied state's outline with `event.level.visit_block_shape` if you need to sample it. The hit
+helper uses the same random stream as `event.random`.

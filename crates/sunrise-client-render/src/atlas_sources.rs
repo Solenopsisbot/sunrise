@@ -7,7 +7,7 @@
 use mod_api::{Identifier, ResourceReader, SpriteSourceOutput};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -649,9 +649,9 @@ fn sorted_textures(source: &crate::resource_source::ResourceSource) -> Vec<Strin
 }
 
 /// The sprites of the atlases a mod registered, each atlas listed from its own definition and
-/// asked of the mods under its own id: two atlases sharing a definition get an answer each. An
-/// atlas whose definition doesn't decode is left out. Once per client prepare, by the staging of
-/// the mods' atlases; the game's atlases are [`Listing`]'s.
+/// asked of the mods under its own id. An atlas whose definition doesn't decode is left out.
+/// Once per client prepare, by the staging of the mods' atlases; the game's atlases are
+/// [`Listing`]'s.
 pub fn registered(
     source: &crate::resource_source::ResourceSource,
     mods: &dyn ModSources,
@@ -670,9 +670,42 @@ pub fn registered(
         .collect()
 }
 
+/// Registration order and atlas ownership of sprites staged by `register_texture_atlases` for
+/// one resource generation, preserved through `HudAtlas` placement so an oversized atlas is
+/// diagnosed and isolated without affecting the base HUD or other mod atlases.
+#[derive(Debug, Default)]
+pub struct StagedTextureAtlases {
+    /// Admitted registrations in order: `(atlas_id, mod_id)`.
+    pub order: Vec<(String, &'static str)>,
+    /// Staged sprite identifier (`<namespace>:gui/atlases/...`) mapped to its owning index in
+    /// [`Self::order`].
+    pub sprite_atlas: HashMap<String, usize>,
+}
+
+/// Built-in engine atlas paths under `minecraft:` (`AtlasManager.KNOWN_ATLASES` in vanilla 26.3).
+pub const KNOWN_ATLASES: &[&str] = &[
+    "banner_patterns",
+    "blocks",
+    "items",
+    "chests",
+    "decorated_pot",
+    "gui",
+    "map_decorations",
+    "paintings",
+    "particles",
+    "shield_patterns",
+    "shulker_boxes",
+    "celestials",
+];
+
+/// Whether `id` names one of vanilla's built-in engine atlases (`AtlasManager.KNOWN_ATLASES`).
+pub fn is_builtin_atlas(id: &Identifier) -> bool {
+    id.namespace() == "minecraft" && KNOWN_ATLASES.contains(&id.path())
+}
+
 /// Sprite listings of the engine atlases (`AtlasManager.KNOWN_ATLASES`). A definition on its own
 /// does not register an atlas. Mod-registered atlases are listed under their own IDs by
-/// [`registered`], even when several atlas IDs use the same definition.
+/// [`registered`].
 #[derive(Debug, Default)]
 pub struct Listing {
     atlases: BTreeMap<String, Listed>,
@@ -681,30 +714,18 @@ impl Listing {
     /// The listing of `source`, asking `mods` for each entry of a registered type.
     pub fn build(source: &crate::resource_source::ResourceSource, mods: &dyn ModSources) -> Self {
         let textures = sorted_textures(source);
-        let atlases = [
-            "banner_patterns",
-            "blocks",
-            "items",
-            "chests",
-            "decorated_pot",
-            "gui",
-            "map_decorations",
-            "paintings",
-            "particles",
-            "shield_patterns",
-            "shulker_boxes",
-            "celestials",
-        ]
-        .into_iter()
-        .filter_map(|atlas| {
-            let id = Identifier::parse(atlas).expect("known engine atlas id");
-            let sources = definition(source, mods, &id)?;
-            Some((
-                id.to_string(),
-                list_atlas(source, &textures, mods, &id, &sources),
-            ))
-        })
-        .collect();
+        let atlases = KNOWN_ATLASES
+            .iter()
+            .copied()
+            .filter_map(|atlas| {
+                let id = Identifier::parse(atlas).expect("known engine atlas id");
+                let sources = definition(source, mods, &id)?;
+                Some((
+                    id.to_string(),
+                    list_atlas(source, &textures, mods, &id, &sources),
+                ))
+            })
+            .collect();
         Self { atlases }
     }
     /// The sprites `atlas` lists; none for an atlas without a definition.
@@ -1331,6 +1352,7 @@ mod tests {
                 (merged.to_owned(), vec![bytes("one"), bytes("two")]),
             ]
             .into(),
+            None,
         );
         let seen = Arc::new(Mutex::new(Vec::new()));
         let kept: Arc<Mutex<Option<Arc<dyn ResourceReader>>>> = Arc::default();

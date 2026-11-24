@@ -603,12 +603,12 @@ impl FixedStep {
     }
     /// `getTickTimesNanos`: the last 100 ticks' durations in nanoseconds, the tick numbered
     /// `n` at index `n % 100` (0 where none was recorded yet).
-    pub fn tick_times(&self) -> Vec<u64> {
-        self.tick_times.iter().map(|&t| t.max(0) as u64).collect()
+    pub fn tick_times(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
+        self.tick_times.iter().map(|&t| t.max(0) as u64)
     }
     /// The sorted `getTickTimesNanos` array (always 100 entries).
     pub fn sorted_samples(&self) -> Vec<u64> {
-        let mut v: Vec<u64> = self.tick_times.iter().map(|&t| t.max(0) as u64).collect();
+        let mut v: Vec<u64> = self.tick_times().collect();
         v.sort_unstable();
         v
     }
@@ -626,13 +626,13 @@ mod tests {
         for took in [7, 8, 9] {
             clock.record(std::time::Duration::from_nanos(took));
         }
-        let times = clock.tick_times();
+        let times: Vec<_> = clock.tick_times().collect();
         assert_eq!(times.len(), 100);
         assert_eq!(times[..4], [7, 8, 9, 0]);
         for took in 10..=109 {
             clock.record(std::time::Duration::from_nanos(took));
         }
-        let times = clock.tick_times();
+        let times: Vec<_> = clock.tick_times().collect();
         assert_eq!(times[..4], [107, 108, 109, 10]);
         assert_eq!(times[99], 106);
     }

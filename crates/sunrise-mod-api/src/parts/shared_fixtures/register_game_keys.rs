@@ -10,7 +10,9 @@ pub fn register_game_keys(
 ) {
     let ids: std::collections::BTreeSet<String> = ids.into_iter().collect();
     mod_vocab::testing::rebuild_parts(|| {
-        let mut registrar = super::register_all(crate::__private::mods(), dimension_shape);
+        let mut registrar = super::with_active_rule_schema(schema, || {
+            super::register_all(crate::__private::mods(), dimension_shape)
+        });
         registrar.mod_id = "sunrise";
         registrar.declare_fluid("definition_test");
         // Request in one order: callers hand over a `HashSet`, whose iteration order differs

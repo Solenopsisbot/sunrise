@@ -21,8 +21,8 @@ pub enum FluidDefinition<'a> {
 
 /// What a registered fluid is, apart from any level or entity. Vanilla reads the entity
 /// behaviours off `FluidTags.WATER` and `FluidTags.LAVA`, so `minecraft:flowing_water` answers as
-/// `minecraft:water`. The empty fluid and a tank-only fluid emit no light, nothing can be done in
-/// them, their fall modifier scales nothing and they drip nothing and never tick randomly.
+/// `minecraft:water`. Nothing can be done in the empty fluid and a tank-only fluid, their fall
+/// modifier scales nothing and they drip nothing and never tick randomly.
 #[derive(Clone, Debug, PartialEq)]
 // exhaustive: the game builds it with a literal; mods only read it
 #[derive(sunrise_mod_api_macros::Wire)]
@@ -30,7 +30,8 @@ pub struct FluidTypeProperties {
     /// `FluidType.getDescriptionId`: `fluid_type.<mod>.<name>`, vanilla's by its block
     /// (`block.minecraft.water`, `block.minecraft.air` for the empty fluid).
     pub description_id: String,
-    /// `FluidType.getLightLevel`: what the fluid's block emits, 0 through 15.
+    /// `FluidType.getLightLevel`, 0 through 15: 15 for lava, 0 for water and the empty fluid,
+    /// and what a mod fluid's file states (`light_level`, 0 by default), with or without a block.
     pub light_level: u8,
     /// `FluidType.getFallDistanceModifier`: what an entity's fall distance is multiplied by
     /// each tick in the fluid: water's 0 resets it, lava's 0.5 halves it.

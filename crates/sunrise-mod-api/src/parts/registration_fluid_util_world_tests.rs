@@ -25,11 +25,14 @@ mod tests {
         host.registries
             .resolve_fluids(["minecraft:empty", "minecraft:water", "minecraft:lava"])
             .unwrap();
-        host.registries.fluid_sounds(
-            "minecraft:lava",
-            "minecraft:item.bucket.fill_lava",
-            "minecraft:item.bucket.empty_lava",
-        );
+        host.registries
+            .fluid_sounds(
+                "minecraft:lava",
+                "minecraft:item.bucket.fill_lava",
+                "minecraft:item.bucket.empty_lava",
+            )
+            .fluid_bucket("minecraft:water", "minecraft:water_bucket")
+            .fluid_bucket("minecraft:lava", "minecraft:lava_bucket");
         host.level.block_entity(TANK).tanks = vec![FakeTank::new(8000)];
         host.join(PLAYER, 70).slots.insert(0, stack(item, count));
         host

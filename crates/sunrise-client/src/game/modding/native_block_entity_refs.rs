@@ -1,12 +1,13 @@
 //! Block entity handles: storage writes join the journal; explicit world notifications happen
 //! immediately and survive abort. Raw mod storage writes and restores synthesize no notice.
-use super::Game;
+use super::{Game, native_menus::PendingMenuOpen};
 use mod_api::__private::game::*;
 use mod_api::{
-    BlockEntityDataError, BlockEntityError, BlockEntityItemError, BlockEntityRef,
-    BlockEntityShapes, BlockEntityShapesError, BlockEntityTypeKey, LevelRef, PlayerRef,
-    TransactionContext,
+    BlockEntityAt, BlockEntityDataError, BlockEntityError, BlockEntityItemError, BlockEntityRef,
+    BlockEntityShapes, BlockEntityShapesError, BlockEntityTypeKey, LevelRef, LevelWriteError,
+    PlayerRef, TransactionContext,
 };
+use sunrise_client::block_entities::TakenType;
 use sunrise_client::{
     block_entity_nbt,
     containers::{BlockEntity, ModBlockEntity},
@@ -46,6 +47,29 @@ impl Game<'_> {
         Some(mod_api::__private::game::block_entity_ref(
             level, pos, generation,
         ))
+    }
+
+    pub(super) fn block_entity_sync(
+        &mut self,
+        entity: BlockEntityRef,
+    ) -> Result<(), LevelWriteError> {
+        if !self.is_logical_server() {
+            return Err(LevelWriteError::Unavailable);
+        }
+        let fields = entity.fields();
+        if self.block_entity_identity(fields.level, fields.position) != Some(entity) {
+            return Err(LevelWriteError::Stale);
+        }
+        let world = if fields.level.dimension() == self.dim.key() {
+            &mut self.world
+        } else {
+            self.levels
+                .parked_world_mut_of(fields.level.dimension_id())
+                .ok_or(LevelWriteError::Stale)?
+        };
+        let [x, y, z] = fields.position;
+        super::block_notifications::notify_block_clients(world, (x, y, z));
+        Ok(())
     }
 
     /// The data of the block entity at `pos`, as saved without identity or position
@@ -103,6 +127,7 @@ impl Game<'_> {
                 .find(|guest| {
                     guest.uuid == player.fields().uuid
                         && guest.placed
+                        && !guest.disconnect_pending
                         && guest.dimension == entity.fields().level.dimension_id()
                 })
                 .map(|guest| guest.conn)
@@ -112,6 +137,35 @@ impl Game<'_> {
         if self.menu_click_in_progress(conn) {
             return Ok(false);
         }
+        if self.menu_open_waits(conn) {
+            self.defer_menu_open(conn, PendingMenuOpen::Block(player, entity));
+            return Ok(true);
+        }
+        self.finish_player_open_menu(conn, player, entity)
+    }
+
+    pub(super) fn finish_player_open_menu(
+        &mut self,
+        conn: u32,
+        player: PlayerRef,
+        entity: BlockEntityRef,
+    ) -> Result<bool, BlockEntityError> {
+        if !self.level_in_place(entity.fields().level)
+            || self
+                .lan
+                .as_ref()
+                .and_then(|host| host.hub.guest(conn))
+                .is_none_or(|guest| {
+                    guest.disconnect_pending
+                        || guest.uuid != player.uuid()
+                        || guest.dimension != entity.fields().level.dimension_id()
+                })
+            || self.player_handle_read(player).is_none()
+        {
+            return Ok(false);
+        }
+        self.native_block_entity_target(entity)
+            .ok_or(BlockEntityError::Stale)?;
         let [x, y, z] = entity.fields().position;
         match self.open_block_menu(conn, (x, y, z)) {
             super::lan_actions::MenuOpen::Stale => Err(BlockEntityError::Stale),
@@ -125,6 +179,58 @@ impl Game<'_> {
         let [x, y, z] = entity.fields().position;
         let block = &self.pack.assets.registry.state(world.block(x, y, z))?.name;
         mod_api::__private::block_entity_type_key(save::block_entity_id(block_entity, block))
+    }
+
+    /// The block entities of an open server level, moving pistons' included, in the box
+    /// `min..max` and the build height, read from loaded chunks only (`ServerChunkCache.getChunkNow`,
+    /// `LevelChunk.getBlockEntities`). None for reversed bounds, a stale handle or a client.
+    pub(super) fn level_block_entities(
+        &self,
+        level: LevelRef,
+        min: [i32; 3],
+        max: [i32; 3],
+    ) -> Option<Vec<BlockEntityAt>> {
+        let world = self.native_level_world(level)?;
+        // The level's moving pistons as its ticks hold them now, not the copy collision reads.
+        let ticks = if level.dimension() == self.dim.key() {
+            &self.block_ticks
+        } else {
+            self.levels.parked_block_ticks_of(level.dimension_id())?
+        };
+        let registry = self.pack.assets.registry;
+        Some(
+            world
+                .block_entities_in_box(min, max)?
+                .into_iter()
+                .filter_map(|(x, y, z)| {
+                    let pos = (x, y, z);
+                    let block = || registry.state(world.block(x, y, z)).map(|s| &*s.name);
+                    let id = match world.block_entities.taken_type(&pos) {
+                        // Taken out: it keeps its own type, whatever stands there now.
+                        Some(TakenType::Mod(kind)) => {
+                            return Some(BlockEntityAt::new([x, y, z], kind?));
+                        }
+                        Some(TakenType::Vanilla(id)) => id,
+                        Some(TakenType::Container(id)) => save::chest_backed_id(id, block()?),
+                        None => save::block_entity_id(world.block_entities.get(&pos)?, block()?),
+                    };
+                    let kind = mod_api::__private::block_entity_type_key(id)?;
+                    Some(BlockEntityAt::new([x, y, z], kind))
+                })
+                .chain(
+                    ticks
+                        .moving_pistons
+                        .iter()
+                        .map(|(pos, _)| [pos.x, pos.y, pos.z])
+                        .filter(|&pos| world.in_box(min, max, pos) && world.loaded(pos[0], pos[2]))
+                        .filter_map(|pos| {
+                            let kind =
+                                mod_api::__private::block_entity_type_key("minecraft:piston")?;
+                            Some(BlockEntityAt::new(pos, kind))
+                        }),
+                )
+                .collect(),
+        )
     }
 
     /// The block entity's position.
@@ -340,7 +446,7 @@ impl Game<'_> {
         let block_entity = self
             .mod_block_entity_write_target(key)
             .ok_or(BlockEntityItemError::Unavailable)?;
-        let slots = mod_item_slots(&self.world, key, slot)?;
+        mod_item_slots(&self.world, key, slot)?;
         if let Some(stack) = &stack {
             if stack.count == 0
                 || stack.item.as_ref() == "minecraft:air"
@@ -367,12 +473,11 @@ impl Game<'_> {
         if index < block_entity.items.len() {
             self.journal_block_entity_slot(key, index);
             self.edit_mod_block_entity(key, |block_entity| {
-                *block_entity.item_slot_mut(index).unwrap() = stack;
+                *block_entity.item_slot_mut(index) = stack;
             });
         } else {
             self.write_mod_block_entity(key, |block_entity| {
-                block_entity.items.resize(slots, None);
-                *block_entity.item_slot_mut(index).unwrap() = stack;
+                *block_entity.item_slot_mut(index) = stack;
             });
         }
         self.journal_chunk_save(
@@ -1016,6 +1121,64 @@ mod tests {
             vec![0, 2, 3],
             "two bottles and the ingredient"
         );
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn block_entity_sync_targets_the_live_holder_even_when_ticking_or_parked() {
+        use super::super::Dim;
+        use super::super::native_entity_refs::tests::{run_fresh_cases, with_game};
+
+        if run_fresh_cases(
+            "game::native_block_entity_refs::tests::block_entity_sync_targets_the_live_holder_even_when_ticking_or_parked",
+            "SUNRISE_BLOCK_ENTITY_SYNC_CHILD",
+            &["holder"],
+        ) {
+            return;
+        }
+        with_game(|game| {
+            let key = (1, 64, 1);
+            let pos = [key.0, key.1, key.2];
+            let level = game.level("minecraft:overworld").unwrap();
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            game.world
+                .block_entities
+                .insert(key, BlockEntity::Chest(vec![None; 27]));
+            game.world.block_log = Some(Vec::new());
+            let holder = game.block_entity(level, pos).unwrap();
+            let (lease, entity) = game.world.block_entities.take(&key).unwrap();
+            assert!(game.block_entity(level, pos).is_none());
+            assert_eq!(holder.sync(game), Ok(()));
+            assert_eq!(game.world.block_log.as_deref(), Some(&[key][..]));
+            assert!(game.world.block_entities.put(lease, entity));
+            game.world.block_log = Some(Vec::new());
+
+            game.enter_command_level(Dim::Nether).unwrap();
+            game.world.block_log = Some(Vec::new());
+            assert_eq!(holder.sync(game), Ok(()));
+            assert_eq!(game.dim, Dim::Nether);
+            assert!(game.world.block_log.as_ref().unwrap().is_empty());
+            assert_eq!(
+                game.native_level_world(level).unwrap().block_log.as_deref(),
+                Some(&[key][..]),
+            );
+
+            let world = game
+                .levels
+                .parked_world_mut_of("minecraft:overworld")
+                .unwrap();
+            world.block_entities.remove(&key);
+            world
+                .block_entities
+                .insert(key, BlockEntity::Chest(vec![None; 27]));
+            assert_eq!(holder.sync(game), Err(LevelWriteError::Stale));
+            assert_eq!(
+                game.native_level_world(level).unwrap().block_log.as_deref(),
+                Some(&[key][..]),
+            );
+        });
     }
 
     #[test]

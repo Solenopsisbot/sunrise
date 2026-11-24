@@ -418,14 +418,15 @@ impl Warden {
 }
 
 pub fn register(m: &mut Mob) {
-    // The brain at construction, with the mob's own type id so a mod part's
-    // behaviors join it (#824).
-    let id = m.kind.id.clone();
+    // The brain at construction; authoritative mobs stage mod behaviors for it
+    // when `attach_mod_parts` runs.
+    let generation = m.next_brain_generation();
     let st = Warden {
-        brain: Brain::new(&id, 0),
+        brain: Brain::new(generation, 0),
         ..Warden::default()
     };
     m.extra.warden = Some(Box::new(st));
+    m.stage_brain_behaviors(super::mod_behaviors::BehaviorTarget::Warden(generation));
     m.ai.nav.can_float = true;
     m.set_malus(PathType::UnpassableRail, 0.0);
     m.set_malus(PathType::Damaging, 8.0);
@@ -446,13 +447,18 @@ pub fn delay_sensors(m: &mut Mob) {
 /// A brain whose `RunOne` shuffles with `seed` (vanilla seeds it from the
 /// clock; harnesses seed both sides alike), its sensors delayed again.
 pub fn init_brain(m: &mut Mob, seed: i64) {
+    let generation = m.next_brain_generation();
+    let mut built = false;
     if let Some(st) = m.extra.warden.as_mut() {
         let mem = std::mem::take(&mut st.brain.mem);
-        let id = m.kind.id.clone();
-        st.brain = Brain::new(&id, seed);
+        st.brain = Brain::new(generation, seed);
         st.brain.mem = mem;
+        built = true;
     }
     delay_sensors(m);
+    if built {
+        m.stage_brain_behaviors(super::mod_behaviors::BehaviorTarget::Warden(generation));
+    }
 }
 /// `Warden.finalizeSpawn`: a minute until it digs back down; a summoned
 /// warden climbs out of the ground first.

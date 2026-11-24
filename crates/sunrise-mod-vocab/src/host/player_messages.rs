@@ -78,6 +78,7 @@ pub trait PlayerMessagesBackendMut {
     /// published at the owning level's outermost commit. `true` means the request was accepted,
     /// not that a client received or played it. A deferred request is discarded on abort or if
     /// the player no longer resolves at commit, without drawing a seed.
+    /// Registered events go by ID; other valid keys go by name, with volume and pitch as supplied.
     fn player_play_sound(
         &mut self,
         player: PlayerRef,

@@ -126,7 +126,7 @@ fn a_marker_takes_no_rider() {
             position: Vec3::new(0.5, 64.0, 0.5),
             yaw: 0.0,
             pitch: 0.0,
-            item_transformation: None,
+            display: None,
             interaction: None,
             knot_check: None,
             eye: None,

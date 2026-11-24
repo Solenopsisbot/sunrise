@@ -1,5 +1,26 @@
 use super::*;
 
+/// Vanilla `ServerGamePacketListenerImpl.handleUseItem` + `Entity.absSnapRotationTo`:
+/// wrap both incoming packet angles via `Mth.wrapDegrees`, then snap each axis whose
+/// wrapped value is finite (`Entity.setYRot` / `Entity.setXRot` ignore non-finite values,
+/// keeping the previous axis unchanged).
+fn snap_use_item_rotation(yaw: &mut f32, pitch: &mut f32, target_yaw: f32, target_pitch: f32) {
+    let target_yaw = crate::game::remote::wrap_degrees(target_yaw);
+    let target_pitch = crate::game::remote::wrap_degrees(target_pitch);
+    if target_pitch != *pitch || target_yaw != *yaw {
+        let next_yaw = target_yaw % 360.0;
+        if next_yaw.is_finite() {
+            *yaw = next_yaw;
+        }
+        if target_pitch.is_finite() {
+            let next_pitch = target_pitch.clamp(-90.0, 90.0) % 360.0;
+            if next_pitch.is_finite() {
+                *pitch = (next_pitch % 360.0).clamp(-90.0, 90.0);
+            }
+        }
+    }
+}
+
 impl Game<'_> {
     pub(super) fn guest_tick_death(&mut self, gi: usize) {
         let removed = self.lan.as_mut().and_then(|host| {
@@ -30,7 +51,7 @@ impl Game<'_> {
     }
 
     pub(super) fn guest_drop_carried(&mut self, gi: usize) {
-        let carried = self.with_own_record(gi, |host, _| {
+        let carried = self.with_own_record(gi, |host, _, _| {
             let conn = host.hub.guests[gi].conn;
             let mut stacks = host.hub.take_closed_menu_cursors(conn).collect::<Vec<_>>();
             let (to_return, to_drop) = host.hub.take_closed_processing_inputs(conn);
@@ -434,19 +455,9 @@ impl Game<'_> {
         }
         let (spectator, spawn_egg) = (g.spectator(), held.item.ends_with("_spawn_egg"));
         if let Some((yaw, pitch)) = rotation {
-            use sunrise_client::lan::hub::wrap_degrees;
-            let (yaw, pitch) = (wrap_degrees(yaw), wrap_degrees(pitch));
-            if yaw != g.yaw || pitch != g.pitch {
-                self.lan.as_mut().unwrap().hub.guests.update(gi, |g| {
-                    // Entity.setYRot/setXRot discard non-finite values independently.
-                    if yaw.is_finite() {
-                        g.yaw = yaw;
-                    }
-                    if pitch.is_finite() {
-                        g.pitch = pitch.clamp(-90.0, 90.0);
-                    }
-                });
-            }
+            self.lan.as_mut().unwrap().hub.guests.update(gi, |g| {
+                snap_use_item_rotation(&mut g.yaw, &mut g.pitch, yaw, pitch)
+            });
         }
         // ServerPlayerGameMode.useItem returns PASS for spectators, after the turn.
         if spectator {
@@ -616,14 +627,13 @@ impl Game<'_> {
         }
         if let Some(victim) = self.pvp_victim(conn, id) {
             if let Ok(Some(strike)) = self.as_guest_at(gi, conn, |g| g.pvp_strike(id as u32))
-                && self.pvp_land(victim, &strike)
+                && let Some(stops_sprint) = self.pvp_land(victim, &strike)
             {
                 let on_ground = self.pvp_victim_on_ground(victim);
-                let stops_sprint = strike.stops_sprint();
                 let sent = self
                     .as_guest_at(gi, conn, |g| {
                         g.remember_player_target(Some(id as u32));
-                        g.pvp_hit_after(on_ground, stops_sprint)
+                        g.pvp_hit_after(id as u32, on_ground, stops_sprint, &strike)
                     })
                     .ok()
                     .flatten();
@@ -775,5 +785,96 @@ impl Game<'_> {
             host.hub.guests.update(gi, |guest| guest.pitch = value);
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn use_item_rotation_matches_vanilla_wrap_and_abs_snap() {
+        let (mut yaw, mut pitch) = (15.0_f32, 25.0_f32);
+        snap_use_item_rotation(&mut yaw, &mut pitch, 405.0, 120.0);
+        assert_eq!((yaw, pitch), (45.0, 90.0));
+
+        // Non-finite yaw preserves previous yaw while still snapping finite pitch.
+        snap_use_item_rotation(&mut yaw, &mut pitch, f32::NAN, -120.0);
+        assert_eq!((yaw, pitch), (45.0, -90.0));
+
+        // Non-finite pitch preserves previous pitch while still wrapping finite yaw.
+        snap_use_item_rotation(&mut yaw, &mut pitch, -540.0, f32::INFINITY);
+        assert_eq!((yaw, pitch), (-180.0, -90.0));
+
+        // Both non-finite preserve both previous axes.
+        snap_use_item_rotation(&mut yaw, &mut pitch, f32::NEG_INFINITY, f32::NAN);
+        assert_eq!((yaw, pitch), (-180.0, -90.0));
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn use_item_non_finite_angles_preserve_previous_axis_and_wrap_finite_ones() {
+        use crate::game::lan::world_spawn_sync_tests::host_for;
+        use crate::game::native_entity_refs::tests::run_fresh_cases;
+        use mod_api::PlayPacketRequest;
+        use sunrise_client::mod_packet_builders::encode_play_packet;
+        use sunrise_protocol::ids::play::serverbound as sb;
+
+        if run_fresh_cases(
+            "game::lan_actions::interaction::tests::use_item_non_finite_angles_preserve_previous_axis_and_wrap_finite_ones",
+            "SUNRISE_USE_ITEM_ROTATION_CHILD",
+            &["rotation"],
+        ) {
+            return;
+        }
+        let mut resources = None;
+        let mut game = crate::game::game_tests::tests::server_game(&mut resources);
+        let _rx = host_for(&mut game);
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.dimension = "minecraft:overworld".into();
+            g.yaw = 15.0;
+            g.pitch = 25.0;
+            g.inventory[0] = Some(ItemStack::new("minecraft:snowball", 4));
+        });
+
+        let cases = [
+            (1, f32::NAN, 120.0_f32, 15.0_f32, 90.0_f32, 3_u32),
+            (2, 405.0_f32, f32::INFINITY, 45.0_f32, 90.0_f32, 2_u32),
+            (3, f32::NEG_INFINITY, f32::NAN, 45.0_f32, 90.0_f32, 1_u32),
+        ];
+        for (sequence, yaw, pitch, want_yaw, want_pitch, want_count) in cases {
+            let built = encode_play_packet(&PlayPacketRequest::UseItem {
+                hand: 0,
+                sequence,
+                yaw,
+                pitch,
+            })
+            .expect("UseItem preserves non-finite float bits on the wire");
+            let decoded = S::decode(sb::USE_ITEM, &built.body).unwrap();
+            let before_proj = game.creatures.projectiles.len();
+            game.lan_guest_packet(1, decoded);
+
+            let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+            assert_eq!(guest.yaw, want_yaw, "sequence {sequence}");
+            assert_eq!(guest.pitch, want_pitch, "sequence {sequence}");
+            assert_eq!(
+                guest.inventory[0].as_ref().map(|s| s.count),
+                Some(want_count),
+                "sequence {sequence} still uses the held snowball"
+            );
+            assert_eq!(
+                game.creatures.projectiles.len(),
+                before_proj + 1,
+                "sequence {sequence} spawns a snowball"
+            );
+            let proj = game.creatures.projectiles.last().unwrap();
+            assert!(
+                proj.velocity.x.is_finite()
+                    && proj.velocity.y.is_finite()
+                    && proj.velocity.z.is_finite(),
+                "sequence {sequence} projectile velocity stays finite: {:?}",
+                proj.velocity
+            );
+        }
     }
 }

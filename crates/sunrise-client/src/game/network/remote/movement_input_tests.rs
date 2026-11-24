@@ -62,7 +62,7 @@ fn connect(game: &mut Game<'_>) -> sunrise_protocol::connection::Pipe {
 }
 
 fn tick(game: &mut Game<'_>) {
-    if let Some(input) = game.tick_local_player(Vec::new(), 7).unwrap() {
+    if let Some(input) = game.tick_local_player(Vec::new(), 7, None).unwrap() {
         game.remote_send_state(input);
     }
 }

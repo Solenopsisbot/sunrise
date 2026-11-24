@@ -15,7 +15,7 @@ queue (the hub, or `/suggest` on Discord) rather than to issues, which are for b
 
 **Mod-related pull requests come here too.** Sunrise is where the mod API is built: the mod API, native hooks and
 events for mods, native mods, content mods (`.smod`), mixins, `cargo sunrise-mod`, `sunrise-mods`, mod
-builds and the registry, and their docs ([mods](docs/mods.md), [native mods](docs/native-mods.md)). A change to the mod
+builds and the registry, and their docs ([modding book](docs/modding/src/introduction.md), [native mods](docs/modding/src/how-to/native-mods.md)). A change to the mod
 API follows its clean-break rules ([AGENTS.md](AGENTS.md#mod-api-the-clean-break)).
 
 When adding a native hook, keep its declaration under `crates/sunrise-mod-vocab/src/hooks/` and wire the engine

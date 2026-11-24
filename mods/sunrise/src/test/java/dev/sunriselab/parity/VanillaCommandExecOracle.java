@@ -81,6 +81,7 @@ import net.minecraft.world.level.storage.PrimaryLevelData;
  */
 public final class VanillaCommandExecOracle {
     static final List<JsonArray> messages = new ArrayList<>();
+    static final List<Component> rawMessages = new ArrayList<>();
 
     static final class Resolver implements ProfileResolver, UserNameToIdResolver {
         @Override public Optional<GameProfile> fetchByName(String name) { return Optional.empty(); }
@@ -560,10 +561,13 @@ public final class VanillaCommandExecOracle {
                 @Override public void sendSystemMessage(Component message, boolean overlay) {
                     if (!overlay) {
                         messages.add(spans(message));
+                        rawMessages.add(message);
                     }
                 }
                 @Override public void sendChatMessage(OutgoingChatMessage message, boolean filtered, ChatType.Bound chatType) {
-                    messages.add(spans(chatType.decorate(message.content())));
+                    Component decorated = chatType.decorate(message.content());
+                    messages.add(spans(decorated));
+                    rawMessages.add(decorated);
                 }
             };
             if(Boolean.getBoolean("sunrise.merchantFixture")||Boolean.getBoolean("sunrise.merchantCraftedFixture")) this.tickRateManager().setFrozen(true);
@@ -625,6 +629,7 @@ public final class VanillaCommandExecOracle {
                     case "cmd" -> {
                         String command = op.get("cmd").getAsString();
                         messages.clear();
+                        rawMessages.clear();
                         List<JsonArray> results = new ArrayList<>();
                         // Reuse the existing feedback receiver while retaining the actual
                         // server stack's null entity, names, position and permissions.
@@ -644,6 +649,14 @@ public final class VanillaCommandExecOracle {
                             JsonArray m = new JsonArray();
                             messages.forEach(m::add);
                             record.add("messages", m);
+                            if (op.has("components") && op.get("components").getAsBoolean()) {
+                                var ops = this.registryAccess().createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE);
+                                JsonArray comps = new JsonArray();
+                                for (Component raw : rawMessages) {
+                                    comps.add(net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(ops, raw).getOrThrow());
+                                }
+                                record.add("components", comps);
+                            }
                             JsonArray r = new JsonArray();
                             results.forEach(r::add);
                             record.add("results", r);

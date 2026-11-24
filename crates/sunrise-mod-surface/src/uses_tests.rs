@@ -25,6 +25,7 @@ fn handle(id: &str, signature: &str, refs: &[&str]) -> Function {
             signature: signature.into(),
             impl_generics: String::new(),
             refs: strings(refs),
+            behaviour_versions: Default::default(),
         },
     )
 }
@@ -2696,6 +2697,7 @@ fn legacy_tables_match_either_hash_of_an_unchanged_method_and_function() {
             signature: "fn get(&self) -> u8".into(),
             impl_generics: "<T: Copy>".into(),
             refs: strings(&["type:Value"]),
+            behaviour_versions: Default::default(),
         },
     );
     let assemble = |method, functions| {

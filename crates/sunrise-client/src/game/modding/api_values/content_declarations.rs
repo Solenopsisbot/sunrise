@@ -810,7 +810,13 @@ impl TryIntoEngine<()> for (String, mod_api::WorldFluid) {
                 slope_find_distance: fluid.slope_find_distance,
                 source_conversion: fluid.source_conversion,
                 bucket: fluid.bucket,
+                flowing: fluid.flowing.clone(),
             }),
+            // Named here, the generated bucket keeps its id over a fluid file's `bucket_item`.
+            bucket_item: fluid
+                .bucket_item
+                .clone()
+                .or_else(|| fluid.bucket.then(|| format!("{id}_bucket"))),
             measures: Default::default(),
         })
     }

@@ -80,6 +80,7 @@ impl Game<'_> {
                 dimension,
                 origin_dimension: dimension,
                 origin_player: false,
+                native_output: None,
                 level: None,
                 block: None,
                 cart: Some(id),
@@ -121,33 +122,17 @@ impl Game<'_> {
             self.cart_command_updated(id);
         }
     }
-    /// `CommandSourceStack.sendSuccess` from a command minecart: its output
-    /// when `send_command_feedback`, and `broadcastToAdmins` when
-    /// `command_block_output`.
-    pub(super) fn cart_command_success(&mut self, id: u32, message: Text, broadcast: bool) {
-        let Some(name) = self
-            .carts
-            .iter()
-            .find(|c| c.id == id && c.kind == CartKind::CommandBlock && c.command.track_output)
-            .map(|c| c.command.name())
-        else {
-            return;
-        };
-        let feedback = self
+    /// `CommandSourceStack.sendSuccess`'s line to a command minecart
+    /// (`BaseCommandBlock.acceptsSuccess`): its output while it tracks output
+    /// and `send_command_feedback` is on. The operators' share is
+    /// `broadcast_to_admins`.
+    pub(super) fn cart_command_success(&mut self, id: u32, message: Text) {
+        if self
             .ui
             .rules
-            .bool_at(sunrise_client::gamerules::vanilla::SEND_COMMAND_FEEDBACK);
-        if feedback {
-            self.cart_command_output(id, |timestamp| timestamp.append(message.clone()));
-        }
-        if broadcast
-            && feedback
-            && self
-                .ui
-                .rules
-                .bool_at(sunrise_client::gamerules::vanilla::COMMAND_BLOCK_OUTPUT)
+            .bool_at(sunrise_client::gamerules::vanilla::SEND_COMMAND_FEEDBACK)
         {
-            self.broadcast_source_to_admins(name, message);
+            self.cart_command_output(id, |timestamp| timestamp.append(message));
         }
     }
 

@@ -17,7 +17,10 @@ use crate::health::DamageLevel;
 use std::f32::consts::PI;
 use std::ops::ControlFlow;
 use sunrise_core::geometry::trig::Mth;
-use sunrise_core::{geometry::Vec3, random::RandomSource};
+use sunrise_core::{
+    geometry::{Axis, Vec3},
+    random::RandomSource,
+};
 
 // Guardian state: `flag` an active beam target (DATA_ID_ATTACK_TARGET),
 // `flag2` moving (DATA_ID_MOVING), `counter2` the client attack time.
@@ -137,6 +140,7 @@ impl Goal for GuardianAttack {
                         amount: magic,
                         from,
                         kind: "minecraft:indirect_magic",
+                        wielder: None,
                     })),
                 Who::Mob(id) => cx.events.push(MobEvent::DamageMob {
                     target: id,
@@ -218,9 +222,9 @@ pub(super) fn travel(
 ) -> ControlFlow<super::living::TravelPause> {
     m.move_relative(0.1, input);
     m.travel_move(w, level, events, pause, |m, _, _, _| {
-        m.velocity = m.velocity.scale(0.9);
+        m.set_velocity(m.velocity.scale(0.9));
         if !m.extra.flag2 && m.ai.target.is_none() {
-            m.velocity.y -= 0.005;
+            m.set_velocity(m.velocity.with_component(Axis::Y, m.velocity.y - 0.005));
         }
     })
 }
@@ -321,6 +325,7 @@ pub fn hurt_server(m: &mut Mob, d: &Damage) {
             amount: 2.0,
             from,
             kind: "minecraft:thorns",
+            wielder: None,
         }),
         Some(Who::Mob(id)) => m.outbox.push(MobEvent::DamageMob {
             target: id,

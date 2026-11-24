@@ -95,6 +95,7 @@ impl Game<'_> {
                     dimension: self.dim,
                     origin_dimension: self.dim,
                     origin_player: false,
+                    native_output: None,
                     level: None,
                     block: None,
                     cart: None,
@@ -129,7 +130,7 @@ impl Game<'_> {
         for line in &lines {
             self.native_send(uuid, system_chat(line));
         }
-        self.send_admin_feedback(self.lan_acting);
+        self.send_admin_feedback();
         self.admin_feedback = outer_admins;
         (ok, lines)
     }
@@ -193,15 +194,16 @@ mod tests {
                 (0, 0),
                 std::sync::Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)),
             );
-            let id = game
-                .summon(
-                    game.dim.id(),
+            let level = game.level(game.dim.id()).unwrap();
+            let stand = game
+                .level_summon(
+                    level,
                     "minecraft:armor_stand",
                     [1.5, 70.0, 1.5],
                     Default::default(),
                 )
+                .unwrap()
                 .unwrap();
-            let stand = game.entity(id).unwrap();
             let receivers: Vec<_> = [12, 13]
                 .into_iter()
                 .map(|conn| {

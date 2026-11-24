@@ -1,5 +1,4 @@
 //! The `use_animation` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0102
 
 pub trait Hooks {
     /// `Item.getUseAnimation` of `stack`: the animation the renderer draws while the stack is in

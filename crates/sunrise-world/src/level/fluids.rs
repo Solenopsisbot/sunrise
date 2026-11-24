@@ -4,7 +4,7 @@ use super::{
     Behaviours, LevelAccess, Sim, Spread,
     buckets::{Douse, Drain, PlacedLiquid},
     classes::{Class, Interface},
-    fluid_interactions::{Cell, first_match},
+    fluid_interactions::{Cell, Matched, first_match},
     update::{HORIZONTAL, above, below, rel},
 };
 use crate::{
@@ -966,15 +966,38 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             }
         });
         let below = b.block(self.below_state(pos));
-        let source_cell = self.fluid_at(pos).is_source();
-        let Some(result) = first_match(&interactions, neighbours, below, source_cell) else {
-            return true;
-        };
-        if let Some(state) = self.level.fluid_place_block(pos, pos, result) {
-            self.set_block_and_update(pos, state);
+        let fluid = self.fluid_at(pos);
+        let relative = |neighbour: usize| rel(pos, POSSIBLE_FLOW_DIRECTIONS[neighbour].opposite());
+        let level = &*self.level;
+        let matched = first_match(
+            &interactions,
+            neighbours,
+            below,
+            fluid.is_source(),
+            |handler, neighbour| {
+                level.fluid_interaction_test(handler, pos, relative(neighbour), fluid)
+            },
+        );
+        match matched {
+            None => true,
+            Some(Matched::Becomes(result)) => {
+                if let Some(state) = self.level.fluid_place_block(pos, pos, result) {
+                    self.set_block_and_update(pos, state);
+                }
+                self.level_event(1501, pos, 0);
+                false
+            }
+            Some(Matched::Handler { handler, neighbour }) => {
+                self.level.fluid_interaction_interact(
+                    self.ticks,
+                    handler,
+                    pos,
+                    relative(neighbour),
+                    fluid,
+                );
+                false
+            }
         }
-        self.level_event(1501, pos, 0);
-        false
     }
     /// `LiquidBlock.onPlace` / `neighborChanged`.
     pub(crate) fn liquid_block_changed(&mut self, pos: BlockPos, state: BlockStateId) {

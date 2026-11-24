@@ -721,7 +721,6 @@ impl Game<'_> {
     }
     pub(super) fn tick_rockets(&mut self) {
         let ticking = self.entity_ticking_area();
-        let hears_impacts = !self.rockets.is_empty() && self.native_hears_impacts();
         let mut i = 0;
         while i < self.rockets.len() {
             // ServerLevel.tick: only entities in entity-ticking chunks tick.
@@ -736,7 +735,7 @@ impl Game<'_> {
             // list tail twice per entity, which is O(n^2) for a crowd of rockets.
             let id = self.rockets[i].id;
             let rocket = self.rockets[i].clone();
-            let kept = self.tick_rocket(i, rocket, hears_impacts);
+            let kept = self.tick_rocket(i, rocket);
             // A hook may have added or removed rockets: resume right after this one
             // where it stands, or at `i` when it is gone.
             i = if !kept {
@@ -753,21 +752,22 @@ impl Game<'_> {
     }
     /// One tick of `r`, a clone of the resident rocket at `index`. Returns whether the
     /// rocket stays in the list; one that explodes or was removed has left it.
-    fn tick_rocket(&mut self, index: usize, mut r: Rocket, hears_impacts: bool) -> bool {
+    fn tick_rocket(&mut self, index: usize, mut r: Rocket) -> bool {
         let (id, join) = (r.id, r.join);
         let (mut old_rotation, hit) =
             self.with_entity_held_out(id, |game| game.advance_rocket(&mut r));
         let deflected = matches!(hit, ProjectileHit::Entity { who: Who::Mob(id), .. }
             if self.mobs.iter().any(|m| m.id == id && m.alive() && m.species() == Species::Breeze));
-        let canceled = if !deflected && hears_impacts && !matches!(hit, ProjectileHit::None) {
-            let Some((rocket, canceled)) = self.rocket_impact(index, r, hit) else {
-                return false;
+        let canceled =
+            if !deflected && !matches!(hit, ProjectileHit::None) && self.native_hears_impacts() {
+                let Some((rocket, canceled)) = self.rocket_impact(index, r, hit) else {
+                    return false;
+                };
+                r = rocket;
+                canceled
+            } else {
+                false
             };
-            r = rocket;
-            canceled
-        } else {
-            false
-        };
         let explodes_on_hit = !canceled
             && !deflected
             && match hit {
@@ -840,7 +840,7 @@ impl Game<'_> {
         r.update_rotation(old_rotation);
         let at = [r.position.x, r.position.y, r.position.z];
         if r.life == 0 && !r.silent {
-            self.audio.play(
+            self.play_audio(
                 "minecraft:entity.firework_rocket.launch",
                 Some(at),
                 3.0,
@@ -1174,7 +1174,7 @@ impl Game<'_> {
         let ctx = self.who_context(owner, None);
         self.post_game_event("minecraft:explode", at, ctx);
     }
-    fn rocket_hurt_mobs(
+    pub(in crate::game) fn rocket_hurt_mobs(
         &mut self,
         hits: &[(u32, f32)],
         rocket_id: u32,
@@ -1183,16 +1183,26 @@ impl Game<'_> {
     ) {
         let mut attack = self.attack_of_who(attacker);
         attack.projectile = Some(rocket_id as i32);
+        attack.enchantment_direct = Some(sunrise_client::health::EnchantmentActor {
+            id: rocket_id as i32,
+            kind: "minecraft:firework_rocket".into(),
+            motion: None,
+        });
         attack.projectile_kind = sunrise_client::health::DirectEntity::Projectile;
         attack.projectile_type = Some("minecraft:firework_rocket");
         for &(id, amount) in hits {
             let plan = self.prepare_knockback_credit(id as i32, attacker, &attack);
+            // The hit's causing entity, lent to its listeners beside the victim.
+            let causing = self.causer_id(attacker);
+            let decision = crate::game::entity::causer_decision!(self, causing);
             let mut credit = plan.lend(&mut self.last_hurt_by_player);
             if let Some(index) = self.mob_index.find(&self.mobs, id) {
                 let before = self.mobs[index].health;
                 let join = self.mobs[index].join;
-                let hurt = self.mobs[index].damage(
-                    crate::game::entity::damage_level_of!(self, &attack, &mut credit, None),
+                let (victim, lend) =
+                    crate::game::entity::victim_and_causer!(self, index, causing, decision);
+                let hurt = victim.damage(
+                    crate::game::entity::damage_level_of!(self, &attack, &mut credit, lend),
                     amount,
                     Damage::fireworks(attacker, at),
                 );

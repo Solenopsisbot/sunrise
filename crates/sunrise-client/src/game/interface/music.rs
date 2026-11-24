@@ -1,12 +1,12 @@
 //! `Minecraft.getSituationalMusic` and `getMusicVolume` for the music manager,
 //! the local player's ambient sound handlers and the sound engine tick.
-use super::Game;
+use super::{Game, native_hooks::play_sound::HookedSounds};
 use sunrise_client::{
     blocks::Fluid,
     music::{BackgroundMusic, Music, MusicFrequency, Situation},
     options_ui::MusicGroup,
     random_source,
-    sound_engine::{SoundInstance, Sounds, TickContext},
+    sound_engine::{SoundInstance, TickContext},
 };
 
 impl Game<'_> {
@@ -17,7 +17,9 @@ impl Game<'_> {
         self.native_music(&mut music, &mut volume);
         let mut layers = Vec::new();
         self.native_music_layers(&mut layers);
-        self.music_layers.tick(&layers, &mut self.audio);
+        let mut music_layers = std::mem::take(&mut self.music_layers);
+        music_layers.tick(&layers, &mut HookedSounds(self));
+        self.music_layers = music_layers;
         // Options.musicFrequency's listener: MusicManager.setMinutesBetweenSongs.
         let frequency = MusicFrequency::parse(&self.settings.file.name("musicFrequency"));
         if frequency != self.music.frequency {
@@ -41,8 +43,9 @@ impl Game<'_> {
                 .remote
                 .as_ref()
                 .is_some_and(|r| r.reconfiguring.is_some());
-        self.music
-            .tick(music.as_ref(), volume, loading, &mut self.audio);
+        let mut manager = std::mem::take(&mut self.music);
+        manager.tick(music.as_ref(), volume, loading, &mut HookedSounds(self));
+        self.music = manager;
         // Options.musicToast's listener: ToastManager.setMusicToastDisplayState.
         let state = self.settings.file.int("musicToast").clamp(0, 2) as u8;
         if state != self.music_toast_state {
@@ -65,7 +68,9 @@ impl Game<'_> {
     }
     /// A Music page row: play this track of `event` now.
     pub(super) fn play_music_track(&mut self, event: &str, track: &str) {
-        self.music.play_track(event, track, &mut self.audio);
+        let mut manager = std::mem::take(&mut self.music);
+        manager.play_track(event, track, &mut HookedSounds(self));
+        self.music = manager;
     }
     /// `Options.getFinalSoundSourceVolume(SoundSource.MUSIC)`.
     fn final_music_volume(&self) -> f32 {
@@ -192,7 +197,7 @@ impl Game<'_> {
         // elytra's flying sound.
         if player_fall_flying && !self.was_fall_flying {
             let instance = SoundInstance::elytra(player_position, random_source::create());
-            self.audio.play_instance(instance, false);
+            self.play_audio_instance(instance, false);
         }
         self.was_fall_flying = player_fall_flying;
         let ctx = TickContext {
@@ -213,7 +218,10 @@ impl Game<'_> {
         // Client mods' sounds asked for since the last update start with it, then their stops
         // and fades apply.
         self.apply_mod_sounds();
+        self.dispatch_live_play_sounds();
         self.audio.tick(self.pause, &ctx);
+        // A delayed sound that came due in the tick starts, with its hook, at that tick.
+        self.dispatch_play_sounds();
     }
     /// `Minecraft.setLevel` -> `updateLevelInEngines`: `SoundManager.stop()`.
     /// The music manager keeps its stopped track and, on its next tick, waits
@@ -339,7 +347,10 @@ impl Game<'_> {
             light: &light,
             bubble_column,
         };
+        // The context borrows the level, so the ambience starts through the audio and its
+        // `play_sound` hooks fire as this returns.
         self.ambience.tick(&ctx, &mut self.audio);
+        self.dispatch_play_sounds();
     }
 }
 

@@ -47,10 +47,10 @@ impl Game<'_> {
         }
         self.save
             .save_chunk_tickets(self.streaming.commanded(), self.tickets.portal_tickets())?;
-        self.save
-            .save_mod_tickets(self.streaming.mod_tickets(), |slot| {
-                mod_api::TicketController::from_slot(slot).map(|c| c.id())
-            })
+        self.save.save_mod_tickets(
+            self.streaming.mod_tickets(),
+            mod_api::__private::game::ticket_controller_id,
+        )
     }
 
     /// `Minecraft.stop`: record the request without reentering the client from a hook.
@@ -88,8 +88,24 @@ impl Game<'_> {
             });
             return Ok(());
         }
-        if self.title.is_some() || self.saved_for_exit {
-            // A quit from the title still needs the event loop to finish.
+        if self.saved_for_exit {
+            // A quit after exit saving has already run still needs the event loop to finish.
+            self.pending_save = Some(ClosingSave {
+                quit,
+                close: true,
+                reply: None,
+                started: Instant::now(),
+                stage: Stage::Quit,
+            });
+            return Ok(());
+        }
+        if self.title.is_some() {
+            // A quit from the title still needs the event loop to finish, and
+            // reaches Minecraft.exitWorldAndClose's disconnect boundary once.
+            if quit {
+                self.client_logging_out();
+                self.saved_for_exit = true;
+            }
             self.pending_save = Some(ClosingSave {
                 quit,
                 close: true,
@@ -134,6 +150,7 @@ impl Game<'_> {
                 stage: Stage::Quit,
             });
         } else {
+            self.client_logging_out();
             self.close_container();
             self.award_custom_stat("leave_game", 1);
             self.lan_close(false);
@@ -199,7 +216,12 @@ impl Game<'_> {
         };
         let result = (|| -> Result<bool> {
             match &mut save.stage {
-                Stage::Quit => Ok(true),
+                Stage::Quit => {
+                    if save.quit && !self.saved_for_exit {
+                        self.client_logging_out();
+                    }
+                    Ok(true)
+                }
                 Stage::Server => {
                     let server = self
                         .integrated
@@ -208,12 +230,13 @@ impl Game<'_> {
                     if !server.stopped() {
                         return Ok(false);
                     }
-                    // Drop/join only after completion; leave_server's teardown
-                    // can then run without blocking on the server's writes.
+                    // Drop/join only after completion; finish_leave_server's teardown
+                    // can then run without blocking on the server's writes or firing
+                    // client_logging_out a second time.
                     if save.quit {
                         self.integrated.take().unwrap().stop()?;
                     } else {
-                        self.leave_server(None)?;
+                        self.finish_leave_server(None)?;
                     }
                     Ok(true)
                 }
@@ -226,11 +249,9 @@ impl Game<'_> {
                         match self.streaming.prepare_poll_save(&mut self.world, deadline) {
                             sunrise_client::streaming::SaveStep::Pending => break,
                             sunrise_client::streaming::SaveStep::Full(chunk) => {
-                                self.native_late_full_chunk_snapshot(&chunk);
-                                self.streaming.save_finished(chunk);
+                                self.save_late_full_chunk(chunk);
                             }
                             sunrise_client::streaming::SaveStep::Protos(protos) => {
-                                self.native_proto_snapshots(&protos);
                                 if self.streaming.submit_protos(protos) {
                                     save.stage = Stage::Chunks(
                                         self.world.modified.iter().copied().collect(),
@@ -249,7 +270,6 @@ impl Game<'_> {
                         // ChunkMap.save consumes the dirty mark before capturing the snapshot.
                         self.world.modified.remove(&key);
                         let chunks = self.with_entities(self.world.chunks.get(&key));
-                        self.native_full_chunk_snapshots(&chunks);
                         self.save.save_later(
                             &chunks,
                             self.pack.assets.registry,
@@ -261,8 +281,8 @@ impl Game<'_> {
                         }
                     }
                     if keys.is_empty() {
-                        self.spawn_loaded_entities();
-                        save.stage = Stage::Entities(self.world.chunks.keys().copied().collect());
+                        save.stage =
+                            Stage::Entities(self.prepare_entity_save().into_iter().collect());
                     }
                     Ok(false)
                 }
@@ -280,7 +300,12 @@ impl Game<'_> {
                     if keys.is_empty() {
                         self.prune_entity_memory();
                         self.save_raids();
-                        self.save.save_attachments(&self.world.attachments)?;
+                        if let Err(error) = self.save.save_attachments(&self.world.attachments)
+                            && !error
+                                .is::<sunrise_mod_runtime::attachments::AttachmentEncodeError>()
+                        {
+                            return Err(error);
+                        }
                         self.save_chunk_tickets()?;
                         self.save_game_metadata()?;
                         save.stage = Stage::Writes(Some(self.save.flush_later()?));
@@ -305,6 +330,8 @@ impl Game<'_> {
                     // A later shutdown barrier must force the files again if this one failed.
                     *flush = None;
                     result?;
+                    // The unaffected columns were written; the save did not complete.
+                    self.entity_save_complete()?;
                     if !save.close {
                         self.message = Some((
                             sunrise_client::lang::get("commands.save.success"),
@@ -407,7 +434,7 @@ impl Game<'_> {
             "Saving world...",
             progress,
         );
-        renderer.render(&loading_frame(&hud))?;
+        renderer.render(&loading_frame(&hud), None)?;
         Ok(())
     }
 
@@ -480,11 +507,9 @@ impl Game<'_> {
         loop {
             match self.streaming.prepare_save(&mut self.world, wait, deadline) {
                 sunrise_client::streaming::SaveStep::Full(chunk) => {
-                    self.native_late_full_chunk_snapshot(&chunk);
-                    self.streaming.save_finished(chunk);
+                    self.save_late_full_chunk(chunk);
                 }
                 sunrise_client::streaming::SaveStep::Protos(protos) => {
-                    self.native_proto_snapshots(&protos);
                     self.streaming.finish_save(protos, wait);
                     break;
                 }
@@ -492,14 +517,17 @@ impl Game<'_> {
             }
         }
         let keys: Vec<_> = self.world.modified.iter().copied().collect();
-        self.save.save_attachments(&self.world.attachments)?;
+        if let Err(error) = self.save.save_attachments(&self.world.attachments)
+            && !error.is::<sunrise_mod_runtime::attachments::AttachmentEncodeError>()
+        {
+            return Err(error);
+        }
         // ChunkMap.save calls tryMarkSaved before creating the snapshot. A record failure
         // finishes this attempt and does not put the mark back.
         for key in &keys {
             self.world.modified.remove(key);
         }
         let chunks = self.with_entities(keys.iter().filter_map(|k| self.world.chunks.get(k)));
-        self.native_full_chunk_snapshots(&chunks);
         self.save
             .save_later(&chunks, self.pack.assets.registry, world_biomes!(self))?;
         // Prepare entities while the chunk writer runs, then use one barrier.

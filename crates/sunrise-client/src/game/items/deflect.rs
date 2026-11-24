@@ -175,8 +175,7 @@ impl Game<'_> {
             Some(self.creatures.projectiles[i].id),
         );
         let sweep = self.sweep_before_hit("minecraft:shulker_bullet", false);
-        let p = self.remove_projectile_at(i);
-        self.shulker_bullet_hurt([p.position.x, p.position.y, p.position.z]);
+        let p = self.destroy_shulker_bullet(i);
         self.vehicle_attack_sounds(p.aabb(), sweep, magic.then_some(p.id as i32));
         if admitted {
             self.remember_player_target(None);
@@ -185,19 +184,44 @@ impl Game<'_> {
         self.swing_arm();
     }
 
-    /// `ShulkerBullet.hurtServer`'s sound and fifteen crit particles
-    /// (`sendParticles`, spread 0.2) at the bullet, before it is destroyed.
-    pub(super) fn shulker_bullet_hurt(&mut self, at: [f64; 3]) {
-        self.audio
-            .play("minecraft:entity.shulker_bullet.hurt", Some(at), 1.0, 1.0);
+    /// `ShulkerBullet.hurtServer`, whatever hurt it: the hurt sound, fifteen
+    /// crit particles (`sendParticles`, spread 0.2), then `destroy`
+    /// (`discard` and `gameEvent(ENTITY_DAMAGE)` from the bullet).
+    pub(in crate::game) fn destroy_shulker_bullet(&mut self, i: usize) -> Projectile {
+        let (id, at, owner, owner_uuid, silent) = {
+            let p = &self.creatures.projectiles[i];
+            (
+                p.id,
+                [p.position.x, p.position.y, p.position.z],
+                p.owner,
+                p.owner_uuid,
+                self.entity_silent(p.id),
+            )
+        };
+        let ctx = sunrise_client::sculk::Context {
+            owner,
+            owner_uuid,
+            ..self.entity_event_context(id, None)
+        };
+        self.shulker_bullet_hurt(at, silent);
+        let p = self.remove_projectile_at(i);
+        self.post_game_event("minecraft:entity_damage", at, ctx);
+        p
+    }
+
+    /// `ShulkerBullet.hurtServer`'s sound (unless silent) and fifteen crit particles
+    /// (`sendParticles`, spread 0.2) at the bullet, before it is discarded.
+    pub(super) fn shulker_bullet_hurt(&mut self, at: [f64; 3], silent: bool) {
+        if !silent {
+            self.play_audio("minecraft:entity.shulker_bullet.hurt", Some(at), 1.0, 1.0);
+        }
         if let Some(ty) = sunrise_client::particles::ParticleType::from_name("crit") {
             let options = sunrise_client::particles::ParticleOptions::simple(ty);
             self.particles
-                .send_particles(&options, at, [0.2, 0.2, 0.2], 0.0, 15);
+                .send_particles(&options, at, [0.2, 0.2, 0.2], 0.0, 15, None);
             self.lan_level_particles(&options, at, [0.2, 0.2, 0.2], 0.0, 15, None);
         }
     }
-
     /// `Player.canInteractWithEntity(box, 3.0)` as the server checks an
     /// attack packet: the projectile's box within the reach plus 3 of the eyes.
     pub(super) fn within_interaction_range(&self, i: usize) -> bool {
@@ -250,8 +274,7 @@ impl Game<'_> {
             .player
             .as_ref()
             .map(|p| [p.position.x, p.position.y, p.position.z]);
-        self.audio
-            .play("minecraft:entity.player.attack.nodamage", from, 1.0, 1.0);
+        self.play_audio("minecraft:entity.player.attack.nodamage", from, 1.0, 1.0);
         turned
     }
 

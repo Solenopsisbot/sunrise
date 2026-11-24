@@ -789,10 +789,7 @@ pub fn main() -> sunrise_client::Result<()> {
         let mut spawn = |l: &World, r: &SpawnRequest, _: &mut LegacyRandom| -> Option<Spawned> {
             let bounds = neutral_box(l, r);
             l.entities.borrow_mut().push((r.entity.to_owned(), bounds));
-            Some(Spawned {
-                school: true,
-                cluster_size: None,
-            })
+            Some(Spawned { school: true })
         };
         let mode = get("mode", "chunk");
         if mode == "spawner" {
@@ -906,6 +903,7 @@ pub fn main() -> sunrise_client::Result<()> {
                     chunk,
                     [v[0], v[1], v[2]],
                     &mut spawn,
+                    &mut |_, _, vanilla| vanilla,
                     &mut trace,
                 );
             } else {
@@ -920,6 +918,7 @@ pub fn main() -> sunrise_client::Result<()> {
                         &categories,
                         chunk,
                         &mut spawn,
+                        &mut |_, _, vanilla| vanilla,
                         &mut trace,
                     );
                 }

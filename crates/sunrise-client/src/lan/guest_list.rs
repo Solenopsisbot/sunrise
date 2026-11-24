@@ -556,7 +556,7 @@ mod tests {
             default: || 0,
             codec: None,
             copy_on_death: false,
-            sync: false,
+            sync_codec: None,
         };
 
     #[test]
@@ -1023,7 +1023,9 @@ mod tests {
             craft: None,
             links: Vec::new(),
             asks_still_valid: false,
+            opener_block: None,
             opening_item: None,
+            removed: false,
             slot_changed_seen: None,
         };
         let owned_menu = || Menu {
@@ -1043,7 +1045,9 @@ mod tests {
             craft: None,
             links: Vec::new(),
             asks_still_valid: false,
+            opener_block: None,
             opening_item: None,
+            removed: false,
             slot_changed_seen: None,
         };
 

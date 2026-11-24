@@ -1,4 +1,5 @@
 use super::*;
+use sunrise_core::geometry::border::BorderError;
 
 impl Game<'_> {
     /// `C::ForgetLevelChunk`: its arms of `apply_packet`, guard and order kept.
@@ -81,24 +82,28 @@ impl Game<'_> {
         }
     }
 
-    /// `C::InitializeBorder`: its arms of `apply_packet`, guard and order kept.
-    pub(super) fn apply_initialize_border_packet(&mut self, p: play::InitializeBorder) {
-        let b = &mut self.border;
-        b.set_center([p.center_x, p.center_z]);
+    /// `ClientPacketListener.handleInitializeBorder`: install the level's incoming geometry
+    /// and warnings, without running server listeners.
+    pub(super) fn apply_initialize_border_packet(
+        &mut self,
+        p: play::InitializeBorder,
+    ) -> std::result::Result<(), BorderError> {
+        let mut border = sunrise_client::worldborder::WorldBorder::default();
+        // Validate the incoming extent against the incoming center and clip limit,
+        // not against any part of the extent this packet replaces.
+        border.set_absolute_max_size(p.absolute_max_size)?;
+        border.set_center([p.center_x, p.center_z])?;
         if p.lerp_time > 0 {
-            b.lerp_between(p.old_size, p.new_size, p.lerp_time);
+            border.lerp_between(p.old_size, p.new_size, p.lerp_time)?;
         } else {
-            b.set_size(p.new_size);
+            border.set_size(p.new_size)?;
         }
-        b.set_absolute_max_size(p.absolute_max_size);
-        b.warning_distance = p.warning_blocks;
-        b.warning_time = p.warning_time;
-    }
-
-    /// `C::SetBorderLerpSize`: its arms of `apply_packet`, guard and order kept.
-    pub(super) fn apply_set_border_lerp_size_packet(&mut self, p: play::SetBorderLerpSize) {
-        self.border
-            .lerp_between(p.old_size, p.new_size, p.lerp_time);
+        border.warning_distance = p.warning_blocks;
+        border.warning_time = p.warning_time;
+        border.damage_per_block = self.border.damage_per_block;
+        border.safe_zone = self.border.safe_zone;
+        self.border = border;
+        Ok(())
     }
 
     /// `ClientPacketListener.handleSetSpawn` / `ClientLevel.setRespawnData`: store the

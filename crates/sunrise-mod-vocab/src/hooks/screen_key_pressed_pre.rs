@@ -1,5 +1,4 @@
 //! The `screen_key_pressed_pre` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0108
 
 pub trait Hooks {
     /// A key went down over the open screen (`ScreenEvent.KeyPressed.Pre`,

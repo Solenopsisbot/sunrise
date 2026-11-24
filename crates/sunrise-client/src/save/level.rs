@@ -56,6 +56,8 @@ pub struct Level {
     pub xp_level: i32,
     pub xp_progress: f32,
     pub xp_total: i32,
+    /// `Player.getScore`, stored as `Score` independently of the experience fields.
+    pub player_score: i32,
     pub weather: crate::world::Weather,
     /// Player.Dimension (minecraft:overworld / minecraft:the_nether).
     pub dimension: String,
@@ -267,15 +269,16 @@ impl Level {
             level.difficulty_locked = n(d.get("locked")) != 0;
         }
         level.allow_commands = Some(n(data.get("allowCommands")) != 0);
-        // WorldDataConfiguration.MAP_CODEC's lenient optional field uses the default
-        // for both absent and malformed input. A valid empty list is not the default.
+        // Identifier.CODEC resolves each name before FeatureFlags.REGISTRY looks it up.
+        // WorldDataConfiguration.MAP_CODEC defaults the whole set on a decode error;
+        // a valid empty set is not the default.
         if let Some(Tag::List(flags)) = data.get("enabled_features")
             && let Some(flags) = flags
                 .iter()
-                .map(|flag| text(Some(flag)))
-                .collect::<Option<Arc<[_]>>>()
+                .map(|flag| mod_api::FeatureFlag::from_id(text(Some(flag))?.as_str()))
+                .collect::<Option<FeatureFlagIds>>()
         {
-            level.enabled_features = flags.into();
+            level.enabled_features = flags;
         }
         level.saved_mods = level_mods::saved(&root);
         if let Some(packs) = data.get("DataPacks") {
@@ -414,6 +417,7 @@ impl Level {
         self.xp_level = n("XpLevel").unwrap_or(0) as i32;
         self.xp_progress = f("XpP").unwrap_or(0.0) as f32;
         self.xp_total = n("XpTotal").unwrap_or(0) as i32;
+        self.player_score = n("Score").unwrap_or(0) as i32;
         self.selected_slot = n("SelectedItemSlot").unwrap_or(0) as i32;
         self.fall_distance = f("fall_distance").unwrap_or(0.0);
         self.on_ground = n("OnGround").unwrap_or(0) != 0;
@@ -455,12 +459,7 @@ impl Level {
             .map(|v| v as f32);
         self.abilities = p.get("abilities").map(|a| {
             let flag = |key: &str, default: bool| number(a.get(key)).map_or(default, |v| v != 0);
-            let speed = |key: &str, default: f32| {
-                float(a.get(key))
-                    .map(|v| v as f32)
-                    .filter(|v| v.is_finite())
-                    .unwrap_or(default)
-            };
+            let speed = |key: &str, default: f32| float(a.get(key)).map_or(default, |v| v as f32);
             crate::lan::abilities::PlayerAbilities {
                 invulnerable: flag("invulnerable", false),
                 flying: flag("flying", false),
@@ -664,6 +663,7 @@ impl Level {
             ("XpLevel", Tag::Int(self.xp_level)),
             ("XpP", Tag::Float(self.xp_progress.to_bits())),
             ("XpTotal", Tag::Int(self.xp_total)),
+            ("Score", Tag::Int(self.player_score)),
             ("SelectedItemSlot", Tag::Int(self.selected_slot)),
             ("XpSeed", Tag::Int(self.xp_seed)),
             (
@@ -763,7 +763,6 @@ impl Level {
                 ("Fire", Tag::Short(-20)),
                 ("Invulnerable", Tag::Byte(0)),
                 ("PortalCooldown", Tag::Int(0)),
-                ("Score", Tag::Int(0)),
                 ("SleepTimer", Tag::Short(0)),
                 ("XpSeed", Tag::Int(0)),
                 ("seenCredits", Tag::Byte(0)),
@@ -797,9 +796,9 @@ impl Level {
         self.write_internal(dir, None, false, false)
     }
 
-    /// `level.dat` without a new player file: the single-player owner's file stays as last
-    /// saved, and a legacy `Data.Player` (before the first normal save the owner's only copy)
-    /// stays in `level.dat`.
+    /// Write world metadata without saving the owner. The first `level.dat` names a
+    /// known profile, even before login. Later writes preserve the existing profile
+    /// reference and any legacy `Data.Player`.
     pub fn write_keeping_player(&mut self, dir: &Path) -> Result<()> {
         self.write_internal(dir, None, false, true)
     }
@@ -834,7 +833,18 @@ impl Level {
     ) -> Result<()> {
         fs::create_dir_all(dir)?;
         restore_level_dat(dir);
-        let mut root = compound_or_empty(read_dat(&dir.join("level.dat")));
+        let existing = read_dat(&dir.join("level.dat"));
+        // `saveAllChunks` passes the single-player profile independently of `PlayerList`.
+        // For an existing world with no placed owner, keep its on-disk reference (even
+        // when absent); `self.player_uuid` can name a different profile in that case.
+        let uuid = if upload {
+            None
+        } else if keep_legacy_player {
+            self.player_uuid.filter(|_| existing.is_none())
+        } else {
+            Some(self.ensure_player_uuid())
+        };
+        let mut root = compound_or_empty(existing);
         let legacy = root
             .get("Data")
             .is_some_and(|d| d.get("Player").is_some() || d.get("WorldGenSettings").is_some());
@@ -881,11 +891,6 @@ impl Level {
                 map.remove(&JavaString::from(key));
             }
         }
-        // An upload's level.dat names no player (`createTag(null)`); every other file
-        // names this world's own.
-        // A keep-owner write names nothing new: the on-disk `singleplayer_uuid` (or its absence)
-        // stays, so reopening loads the same owner file as before.
-        let uuid = (!upload && !keep_legacy_player).then(|| self.ensure_player_uuid());
         // A new world's first spawn point is its world spawn.
         if self.world_spawn.is_none() {
             self.world_spawn = self.spawn.map(|s| {

@@ -846,21 +846,32 @@ pub(crate) fn block_entity_type_display_name(key: BlockEntityTypeKey) -> Registr
 }
 
 /// Resolve requested effects once, after every mod's content has been registered.
+/// A request an optional dependent made of a provider package that was not admitted
+/// (`provider_admitted` says by package id) is dropped, not refused; a request of an admitted
+/// provider that does not supply the effect keeps its refusal.
 pub fn resolve_effects<'a>(
     ids: impl IntoIterator<Item = &'a str>,
     resolve: impl FnMut(&str) -> Option<usize>,
+    provider_admitted: impl Fn(&str) -> bool,
 ) -> Result<(), Vec<String>> {
-    let effects = sunrise_mod_runtime::registry_keys::resolve_effects(
-        &crate::parts::requested_keys().effects,
-        ids,
-        resolve,
-    )
-    .map_err(|errors| {
-        errors
-            .into_iter()
-            .map(|error| error.to_string())
-            .collect::<Vec<_>>()
-    })?;
+    let mut requests = crate::parts::requested_keys().effects.clone();
+    if let Some(installed) = crate::parts::installed() {
+        requests.withdraw_where(|mod_id, id| {
+            crate::parts::optional_provider_lost(
+                &installed.dependencies,
+                &provider_admitted,
+                mod_id,
+                id,
+            )
+        });
+    }
+    let effects = sunrise_mod_runtime::registry_keys::resolve_effects(&requests, ids, resolve)
+        .map_err(|errors| {
+            errors
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+        })?;
     let _ = crate::parts::resolved_effects().set(effects);
     Ok(())
 }

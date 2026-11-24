@@ -6,7 +6,8 @@ pub trait Hooks {
     /// and the HUD chat layer. Focused chat is drawn by its screen, not the layer walk.
     /// Toasts draw after the active screen or overlay and are outside this veto. F1 hides
     /// ordinary toasts and audio stream failure notices, but not other callback error toasts.
-    /// Does not fire when a server dialog or the connection screen covers the world HUD.
+    /// Fires before Options over a world. Does not fire during replay or when a
+    /// server dialog or the connection screen covers the world HUD.
     /// Client-side.
     #[hook(
         receiver = "read",

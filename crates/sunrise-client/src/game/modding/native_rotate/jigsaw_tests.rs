@@ -11,7 +11,6 @@ use std::{
 use sunrise_core::{
     bounding_box::BoundingBox,
     nbt::{self, Compound, Limits, NamedTag, Tag},
-    position::ChunkPos,
     random::{LegacyRandom, RandomSource},
 };
 use sunrise_world::{
@@ -28,7 +27,6 @@ use sunrise_world::{
         structure::{
             StateTransforms, StructureResources,
             jigsaw::{self, JigsawConfig, JigsawContext, PoolPiece, Pools},
-            piece_limited,
             start::{NoiseColumnTarget, StartContext},
         },
     },
@@ -135,6 +133,9 @@ impl StartContext for Flat {
     }
     fn noise_biome(&mut self, _: [i32; 3]) -> BiomeId {
         BiomeId(0)
+    }
+    fn biome_key(&self, _: BiomeId) -> mod_api::BiomeKey {
+        mod_api::BiomeKey::from_parts("minecraft", "plains").unwrap()
     }
     fn noise_biomes(&mut self, positions: &[[i32; 3]]) -> Vec<BiomeId> {
         vec![BiomeId(0); positions.len()]
@@ -408,11 +409,11 @@ fn publish(game: &mut crate::game::Game<'_>) {
 
 #[test]
 #[ignore = "daily"]
-fn position_sensitive_part_connects_at_built_height_in_both_assemblers() {
+fn position_sensitive_part_connects_at_built_height() {
     // The Part table and the published worldgen hooks are process-wide: another test's
     // install in the shared process would swap this connector's Part mid-assembly.
     if crate::game::native_entity_refs::tests::run_fresh_cases(
-        "game::native_rotate::jigsaw_tests::position_sensitive_part_connects_at_built_height_in_both_assemblers",
+        "game::native_rotate::jigsaw_tests::position_sensitive_part_connects_at_built_height",
         "SUNRISE_JIGSAW_POSITION_SENSITIVE_CHILD",
         &["position-sensitive"],
     ) {
@@ -444,23 +445,6 @@ fn position_sensitive_part_connects_at_built_height_in_both_assemblers() {
             .unwrap();
             assert_built(&normal, &resources);
             assert_connector_reads(&normal, &resources, sunrise_core::geometry::Direction::East);
-            let (_, limited) = piece_limited::assemble(
-                &config,
-                &piece_limited::Config::decode(&json!({})),
-                &mut Flat,
-                &pools,
-                &resources,
-                &bindings,
-                ChunkPos::new(0, 0),
-                [10, 10, 20],
-            )
-            .unwrap();
-            assert_built(&limited, &resources);
-            assert_connector_reads(
-                &limited,
-                &resources,
-                sunrise_core::geometry::Direction::West,
-            );
             let projected = JigsawConfig {
                 max_depth: 0,
                 project_to: Some(HeightmapType::WorldSurfaceWg),
@@ -642,24 +626,6 @@ fn no_part_fixed_seed_layout_bytes_and_draws_stay_unchanged() {
                     ])
                 );
                 assert_eq!(random.next_long(), 5_700_976_833_288_827_063);
-                let (_, limited) = piece_limited::assemble(
-                    &config,
-                    &piece_limited::Config::decode(&json!({})),
-                    &mut Flat,
-                    &pools,
-                    &resources,
-                    &bindings,
-                    ChunkPos::new(0, 0),
-                    [10, 10, 20],
-                )
-                .unwrap();
-                assert_eq!(
-                    saved(&limited),
-                    bytes(vec![
-                        expected_piece(false, "CLOCKWISE_180", true),
-                        expected_piece(true, "CLOCKWISE_90", true)
-                    ])
-                );
                 let start_only = JigsawConfig {
                     max_depth: 0,
                     ..config
@@ -817,18 +783,6 @@ fn placed_palette_keeps_connector_identity_and_named_start_requirement() {
                 expanded.iter().map(|j| j.pos).collect::<Vec<_>>(),
                 [[10, 78, 20]]
             );
-            let (_, pieces) = piece_limited::assemble(
-                &config,
-                &piece_limited::Config::decode(&json!({})),
-                &mut Flat,
-                &pools,
-                &resources,
-                &bindings,
-                ChunkPos::new(0, 0),
-                [10, 10, 20],
-            )
-            .unwrap();
-            assert_eq!(pieces.len(), 2);
             let Tag::Compound(mut start) = template_tag(false) else {
                 unreachable!()
             };

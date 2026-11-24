@@ -10,19 +10,32 @@ use mod_api::{
 use sunrise_client::advancements::{Advancement, Frame, Tree};
 
 impl Game<'_> {
-    /// A parsed native command with the level and position it executes at: after `execute
-    /// in/at/positioned`, or the console's overworld spawn corner.
+    /// A parsed native command with the level, position and rotation it executes at (after
+    /// `execute in/at/positioned/rotated/facing`, or the console's overworld spawn corner) and
+    /// the entity it executes as (after `execute as/on`). The entity is the leaf source's own:
+    /// one that no longer resolves is None, never the player in place.
     pub(super) fn native_invocation(
-        &self,
+        &mut self,
         literals: Vec<String>,
         arguments: Vec<CommandArgument>,
     ) -> CommandInvocation {
-        CommandInvocation::new(
+        let invocation = CommandInvocation::new(
             literals,
             arguments,
             self.native_level_key(),
             self.source_position(),
-        )
+            self.source_rotation(),
+        );
+        let Some(target) = self.source_entity() else {
+            return invocation;
+        };
+        if let Some(player) = self.native_command_player_target(target) {
+            return invocation.with_player(player);
+        }
+        match self.native_command_entity_target(target) {
+            Some(entity) => invocation.with_entity(entity),
+            None => invocation,
+        }
     }
 
     /// `ServerPlayer.getGameProfile`: the name `player_name` reads, and the properties the
@@ -102,6 +115,7 @@ mod tests {
             name: name.into(),
             trigger: "minecraft:inventory_changed".into(),
             conditions: sunrise_world::lazy_json::LazyJson::new(&serde_json::json!({})),
+            player: None,
         };
         let mut icon = sunrise_client::crafting::recipe_result(&serde_json::json!({
             "id": "minecraft:wooden_pickaxe",

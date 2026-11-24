@@ -96,7 +96,7 @@ fn open_hub(game: &mut super::Game<'_>, role: ExecutionRole) {
         seed: 0,
         max_players: 4,
         integrated: role == ExecutionRole::IntegratedServer,
-        levels: game.level_shapes,
+        levels: game.level_shapes.clone(),
         level_seeds: game.levels.runtime.seeds(),
     };
     game.lan_host(settings, net, config).unwrap();

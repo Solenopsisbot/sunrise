@@ -115,7 +115,6 @@ pub(in crate::game) enum Effect {
     Orb([f64; 3], u32),
     Drops(u32, Vec<sunrise_client::items::ItemStack>),
     Reward(u128, Advancement),
-    Notice(u128, String, u32),
 }
 
 impl Game<'_> {
@@ -191,8 +190,7 @@ impl Game<'_> {
         true
     }
 
-    /// Screen replacement cannot publish while a transaction owns a click. The older
-    /// merchant guard protects its own guest; a scoped mod click can reach any guest's menu.
+    /// A speculative quick move or merchant action still owns a window until commit.
     pub(super) fn menu_click_in_progress(&self, conn: u32) -> bool {
         self.transactions
             .iter()
@@ -273,7 +271,6 @@ impl Game<'_> {
         let mut previous = None;
         let mut throw_amount = 1;
         let mut edited = false;
-        let mut traded = false;
         let mut refresh = false;
         loop {
             let Some(host) = self.lan.as_ref() else {
@@ -405,19 +402,11 @@ impl Game<'_> {
             if !accepted {
                 return false;
             }
-            traded = true;
             edited |= changed;
             if moved.is_none() {
                 break;
             }
             previous = moved;
-        }
-        if traded && let Some(guest) = self.lan.as_ref().and_then(|host| host.hub.guest(conn)) {
-            self.after_commit(After::Trade(Box::new(Effect::Notice(
-                guest.uuid,
-                guest.name.clone(),
-                mob,
-            ))));
         }
         self.send_merchant_take(conn, p.container, refresh || edited);
         true
@@ -668,7 +657,7 @@ impl Game<'_> {
                 pitch,
             });
         } else {
-            self.audio.play(sound, Some(at), 1.0, pitch);
+            self.play_audio(sound, Some(at), 1.0, pitch);
         }
     }
 
@@ -687,16 +676,6 @@ impl Game<'_> {
     }
     pub(in crate::game) fn commit_merchant_effect(&mut self, effect: Effect) {
         match effect {
-            Effect::Notice(uuid, name, mob) => {
-                // A completed trade cannot be undone if the notification fails.
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.native_player_trade(uuid, &name, mob);
-                }))
-                .is_err()
-                {
-                    log::warn!("player_trade: a completion listener failed after commit");
-                }
-            }
             Effect::Orb(at, value) => self.add_orb(at, value),
             Effect::Drops(conn, stacks) => {
                 if let Some(gi) = self

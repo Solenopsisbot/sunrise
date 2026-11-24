@@ -23,8 +23,8 @@ const BUCKET: u32 = 1000;
 pub(in crate::game) struct FluidEffects {
     level: LevelRef,
     pos: [i32; 3],
-    /// The fluid's world form, whose bucket sounds play; none for a tank-only one.
-    fluid: Option<FluidKind>,
+    /// The bucket's sound for the fluid; none for a fluid that has none.
+    sound: Option<&'static str>,
     /// A fill (`fluid_pickup`), else an empty (`fluid_place`).
     pickup: bool,
     player: Option<PlayerRef>,
@@ -234,13 +234,21 @@ impl Game<'_> {
         if !self.current_transaction_is_here() || !self.level_in_place(level) {
             return Ok(false);
         }
-        let Some(id) = mod_api::__private::fluid_id(fluid) else {
+        if mod_api::__private::fluid_id(fluid).is_none() {
             return Ok(false);
-        };
+        }
+        let tables = super::native_block_tables::BlockTables::of(self);
+        let sound = match pickup {
+            true => tables.fluid_pickup_sound(fluid),
+            false => tables.fluid_empty_sound(fluid),
+        }
+        .ok()
+        .flatten();
         self.after_commit(After::FluidEffects(Box::new(FluidEffects {
             level,
             pos,
-            fluid: FluidKind::from_name(id),
+            // A tank-only fluid that names a bucket has its sounds too.
+            sound,
             pickup,
             player,
         })));
@@ -269,26 +277,29 @@ impl Game<'_> {
             self.commit_fluid_effects(FluidEffects {
                 level,
                 pos,
-                fluid: Some(write.fluid),
+                sound: match pickup {
+                    true => fluid_pickup_sound(write.fluid),
+                    false => fluid_empty_sound(write.fluid),
+                },
                 pickup,
                 player,
             });
         }
     }
-    /// The bucket's sound (none for a fluid with no world form) and fluid game event, from the
-    /// player when one is given, at the outermost commit.
+    /// The bucket's sound the effects carry (none for a fluid without one) and the fluid game
+    /// event, from the player when one is given, at the outermost commit.
     pub(in crate::game) fn commit_fluid_effects(&mut self, effects: FluidEffects) {
         let FluidEffects {
             level,
             pos,
-            fluid,
+            sound,
             pickup,
             player,
         } = effects;
         let at = pos.map(|c| f64::from(c) + 0.5);
-        let (sound, event) = match pickup {
-            true => (fluid.and_then(fluid_pickup_sound), "minecraft:fluid_pickup"),
-            false => (fluid.and_then(fluid_empty_sound), "minecraft:fluid_place"),
+        let event = match pickup {
+            true => "minecraft:fluid_pickup",
+            false => "minecraft:fluid_place",
         };
         if let Some(sound) = sound {
             self.level_play_sound(level, sound, at, SoundSource::Blocks, 1.0, 1.0, None);

@@ -107,7 +107,7 @@ pub struct World {
     pub attachments: sunrise_mod_runtime::attachments::Attachments,
     /// Mod-owned watered areas; never serialized with the world.
     pub water_tickets: sunrise_mod_runtime::water_tickets::WaterTickets,
-    /// The holders lent to mods since the last flush, whose synced changes
+    /// The holders with accepted sync updates since the last flush, whose changes
     /// `flush_attachment_sync` sends.
     pub attachment_syncs: FxHashSet<sunrise_mod_runtime::attachments::Holder>,
     /// Block entities a moving piston landed since the last flush, whose
@@ -201,6 +201,9 @@ pub struct World {
     /// The chunks changed in bulk (`edit_runs`) since the log was last
     /// drained, kept while `block_log` is: sent to the players whole.
     pub bulk_log: FxHashSet<(i32, i32)>,
+    /// Explicit resends with their light-completion markers (`ChunkResend`). Unlike bulk edits,
+    /// these do not refresh far terrain for a client that hasn't received the chunk.
+    pub chunk_resends: FxHashMap<(i32, i32), ChunkResend>,
     /// The sections whose light changed since the log was last drained, as
     /// a bit per section of each column, kept while `block_log` is
     /// (`ChunkHolder.sectionLightChanged`).
@@ -219,6 +222,12 @@ pub struct World {
     /// (`ShulkerBoxBlockEntity.getBoundingBox`), as `moving_pistons` for pistons.
     pub shulkers: FxHashMap<[i32; 3], crate::block_entity_anim::Shulker>,
 }
+/// `Level.isRaining` and `isThundering` compare interpolated float strengths to doubles.
+/// Use zero strengths for a level that cannot have weather.
+pub fn weather_flags((rain, thunder): (f32, f32)) -> (bool, bool) {
+    (f64::from(rain) > 0.2, f64::from(thunder) > 0.9)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Weather {
     pub clear_time: i32,
@@ -230,6 +239,15 @@ pub struct Weather {
     pub thunder_level: (f32, f32),
 }
 impl Weather {
+    /// `MinecraftServer.getWeatherData` is shared; the Level interpolants are not.
+    pub fn copy_parameters_from(&mut self, weather: Self) {
+        self.clear_time = weather.clear_time;
+        self.rain_time = weather.rain_time;
+        self.thunder_time = weather.thunder_time;
+        self.raining = weather.raining;
+        self.thundering = weather.thundering;
+    }
+
     /// The timers of `advanceWeatherCycle`, which run only while
     /// `advance_weather` is on.
     pub fn tick_timers(&mut self, random: &mut sunrise_core::random::LegacyRandom) {
@@ -275,13 +293,21 @@ impl Weather {
         self.rain_level.1 =
             (self.rain_level.1 + if self.raining { 0.01 } else { -0.01 }).clamp(0.0, 1.0);
     }
+    /// `Level.setRainLevel` and `Level.setThunderLevel`: clamp both strengths to
+    /// `[0, 1]` and set both the previous and current interpolants.
+    pub fn set_levels(&mut self, rain: f32, thunder: f32) {
+        let rain = rain.clamp(0.0, 1.0);
+        let thunder = thunder.clamp(0.0, 1.0);
+        self.rain_level = (rain, rain);
+        self.thunder_level = (thunder, thunder);
+    }
+
     /// The levels at their targets at once (rain 1 while it rains, else 0, and thunder the
     /// same), both halves, so the frame shows them at any partial tick: a frozen world under
     /// `SUNRISE_STILL`, which would otherwise have to run about a hundred ticks to fade them.
     pub fn settle_levels(&mut self) {
         let target = |on: bool| if on { 1.0 } else { 0.0 };
-        self.rain_level = (target(self.raining), target(self.raining));
-        self.thunder_level = (target(self.thundering), target(self.thundering));
+        self.set_levels(target(self.raining), target(self.thundering));
     }
     /// Level.getRainLevel / getThunderLevel (thunder scales with rain).
     pub fn levels(&self, partial: f32) -> (f32, f32) {
@@ -397,6 +423,7 @@ impl World {
             group_lifetime: None,
             path_writes: None,
             bulk_log: Default::default(),
+            chunk_resends: Default::default(),
             light_log: None,
             moving_piston_fallback: Vec::new(),
             moving_pistons: Vec::new(),
@@ -893,6 +920,7 @@ impl World {
     pub fn unload_chunk(&mut self, key: (i32, i32)) -> Option<Arc<Chunk>> {
         self.capability_generations.unload_chunk(key);
         let chunk = self.chunks.remove(&key)?;
+        self.chunk_resends.remove(&key);
         // A surviving quad may join across any side or corner of the dropped column.
         for &cell in chunk.connection_groups.keys() {
             let (x, y, z) = chunk.dynamic_cell_coords(cell);
@@ -914,6 +942,52 @@ impl World {
     /// Never loads a chunk.
     pub fn is_loaded_at(&self, x: i32, y: i32, z: i32) -> bool {
         self.shape.contains_y(y) && self.loaded(x, z)
+    }
+    /// The block entities of loaded chunks (taken-out ones included) in the box from `min`
+    /// (inclusive) to `max` (exclusive) and the build height, in no order. Empty for a box of
+    /// zero volume; None for reversed bounds. Walks the box's columns or the loaded chunks,
+    /// whichever are fewer, so no corner overflows or makes it scan past what is loaded.
+    pub fn block_entities_in_box(
+        &self,
+        min: [i32; 3],
+        max: [i32; 3],
+    ) -> Option<Vec<crate::block_entities::Pos>> {
+        if (0..3).any(|axis| min[axis] > max[axis]) {
+            return None;
+        }
+        if (0..3).any(|axis| min[axis] == max[axis]) {
+            return Some(Vec::new());
+        }
+        // `max > min` on every axis, so `max - 1` cannot overflow.
+        let (x0, x1) = (min[0] >> 4, (max[0] - 1) >> 4);
+        let (z0, z1) = (min[2] >> 4, (max[2] - 1) >> 4);
+        let span = (i64::from(x1 - x0) + 1) * (i64::from(z1 - z0) + 1);
+        let columns: Vec<(i32, i32)> = if span <= self.chunks.len() as i64 {
+            (x0..=x1)
+                .flat_map(|x| (z0..=z1).map(move |z| (x, z)))
+                .filter(|key| self.chunks.contains_key(key))
+                .collect()
+        } else {
+            self.chunks
+                .keys()
+                .copied()
+                .filter(|&(x, z)| (x0..=x1).contains(&x) && (z0..=z1).contains(&z))
+                .collect()
+        };
+        Some(
+            columns
+                .into_iter()
+                .flat_map(|chunk| self.block_entities.in_chunk(chunk))
+                .copied()
+                .filter(|&(x, y, z)| self.in_box(min, max, [x, y, z]))
+                .collect(),
+        )
+    }
+    /// Whether `pos` lies in the box from `min` (inclusive) to `max` (exclusive) and the build
+    /// height.
+    pub fn in_box(&self, min: [i32; 3], max: [i32; 3], pos: [i32; 3]) -> bool {
+        (0..3).all(|axis| (min[axis]..max[axis]).contains(&pos[axis]))
+            && self.shape.contains_y(pos[1])
     }
     /// Persisted container capacity override; absence preserves vanilla capacity.
     pub fn container_stack_limit(&self, key: (i32, i32, i32)) -> Option<u32> {
@@ -1060,6 +1134,22 @@ impl World {
     }
 }
 
+/// Completion boundary for an explicit chunk resend (`ChunkMap.waitForLightBeforeSending` /
+/// `ThreadedLevelLightEngine.waitForPendingTasks`): tracks only the light work that preceded
+/// the resend request, so later light checks do not keep the resend queued indefinitely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChunkResend {
+    /// Preceding light work for this column is complete; ready to send on the next broadcast.
+    Ready,
+    /// Waiting for the prefix of `World::light_edits` already queued for the next light pass.
+    WaitingEdits { through: usize },
+    /// Waiting for the whole-column light job for this column that covers the request: the
+    /// running job when nothing was queued after it, else the first job submitted after the
+    /// request (`from_seq` and later). That job's light is published when it returns, even
+    /// if a newer request has since queued another job; later requests never extend the wait.
+    WaitingLight { from_seq: u64 },
+}
+
 /// The game rules and difficulty a player's health reads (`Player.isInvulnerableTo`,
 /// natural regeneration), kept with the world they belong to.
 #[derive(Clone, Copy, Debug)]
@@ -1103,6 +1193,68 @@ mod tests {
         assert_eq!(world.block(16, 64, 0), BlockStateId(0));
         assert_eq!(world.chunks.len(), count);
         assert!(!world.loaded(16, 0));
+    }
+
+    #[test]
+    fn block_entities_in_box_reads_loaded_chunks_inside_the_build_height() {
+        use crate::containers::BlockEntity;
+        let mut world = World::new(BlockStateId(0), 0);
+        for key in [(0, 0), (-1, 0)] {
+            world
+                .chunks
+                .insert(key, Arc::new(Chunk::empty(key.0, key.1)));
+        }
+        let inside = [(1, 64, 1), (-16, -64, 15), (15, 319, 0)];
+        for pos in inside.into_iter().chain([(0, 320, 0), (40, 64, 40)]) {
+            world
+                .block_entities
+                .insert(pos, BlockEntity::Campfire(Box::default()));
+        }
+        // Above the build height, and in chunk (2, 2), which is not loaded: never listed.
+        let sorted = |found: Option<Vec<_>>| {
+            let mut found = found.unwrap();
+            found.sort_unstable();
+            found
+        };
+        let mut expected = inside.to_vec();
+        expected.sort_unstable();
+        let all = [i32::MIN; 3];
+        let top = [i32::MAX; 3];
+        assert_eq!(sorted(world.block_entities_in_box(all, top)), expected);
+        assert_eq!(
+            sorted(world.block_entities_in_box([-16, -64, 0], [16, 320, 16])),
+            expected,
+            "the box's own columns"
+        );
+        // A block entity taken out for its tick is still listed.
+        let taken = world.block_entities.take(&(1, 64, 1)).unwrap();
+        assert_eq!(
+            world.block_entities_in_box([1, 64, 1], [2, 65, 2]),
+            Some(vec![(1, 64, 1)])
+        );
+        assert_eq!(
+            world.block_entities.taken_type(&(1, 64, 1)),
+            Some(crate::block_entities::TakenType::Vanilla(
+                "minecraft:campfire"
+            ))
+        );
+        assert!(world.block_entities.put(taken.0, taken.1));
+        assert_eq!(world.block_entities.taken_type(&(1, 64, 1)), None);
+        // The maximum is exclusive on every axis; the build height clips the box.
+        for max in [[1, 65, 2], [2, 64, 2], [2, 65, 1]] {
+            assert_eq!(world.block_entities_in_box([0, 63, 0], max), Some(vec![]));
+        }
+        assert_eq!(
+            world.block_entities_in_box([0, 320, 0], [16, top[1], 16]),
+            Some(vec![])
+        );
+        assert_eq!(
+            world.block_entities_in_box([32, 0, 32], [48, 100, 48]),
+            Some(vec![])
+        );
+        assert_eq!(world.block_entities_in_box(top, top), Some(vec![]));
+        assert_eq!(world.block_entities_in_box([2, 0, 0], [1, 10, 10]), None);
+        assert_eq!(world.block_entities_in_box(top, all), None);
     }
 
     #[test]

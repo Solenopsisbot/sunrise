@@ -15,7 +15,7 @@ use sunrise_core::{
     jmath,
     random::{LegacyRandom, RandomSource},
 };
-use sunrise_world::registry::BlockStateId;
+use sunrise_world::{dimension_type::Skybox, registry::BlockStateId};
 
 /// Per-biome water fog end multipliers (`visual/water_fog_end_distance`).
 #[derive(Default)]
@@ -454,12 +454,20 @@ pub fn rain_fog_target(rain: f32, sky_light: u8, biome_rains: bool) -> f32 {
     let sky = ((f32::from(sky_light) - 8.0) / 7.0).clamp(0.0, 1.0);
     rain * sky * if biome_rains { 1.0 } else { 0.5 }
 }
-/// Whether the frame draws no sky, only the clear to the fog colour: `LevelRenderer.addSkyPass`
-/// leaves the sky out in lava and powder snow and while blindness or darkness is on (`Camera`'s
-/// `doesMobEffectBlockSky`), and `GameRenderer.renderLevel` gives `LevelRenderer.render`
-/// `shouldRenderSky` false while a boss bar makes world fog (the Ender Dragon's).
+/// `LevelRenderer.addSkyPass`: the logical sky pass, before drawing policy such as boss fog
+/// or Sunrise's sky setting. NeoForge posts `RenderLevelStageEvent.AfterSky` inside this pass.
+pub fn sky_pass_present(fog_type: FogType, effect_blocks_sky: bool, skybox: Skybox) -> bool {
+    skybox != Skybox::None && !camera_blocks_sky(fog_type, effect_blocks_sky)
+}
+
+fn camera_blocks_sky(fog_type: FogType, effect_blocks_sky: bool) -> bool {
+    matches!(fog_type, FogType::Lava | FogType::PowderSnow) || effect_blocks_sky
+}
+
+/// Whether to suppress the engine's sky drawing: the camera can block it, and
+/// `GameRenderer.renderLevel` also suppresses it under a boss bar's world fog.
 pub fn sky_pass_skipped(fog_type: FogType, effect_blocks_sky: bool, boss_world_fog: bool) -> bool {
-    matches!(fog_type, FogType::Lava | FogType::PowderSnow) || effect_blocks_sky || boss_world_fog
+    camera_blocks_sky(fog_type, effect_blocks_sky) || boss_world_fog
 }
 /// `AtmosphericFogEnvironment.updateRainFogState`.
 pub fn update_rain_fog(
@@ -544,6 +552,20 @@ mod tests {
         assert_eq!(fog(surface + 0.05, 0.0), FogType::Atmospheric);
         // The eye itself is not tested: looking up, the whole plane is above it.
         assert_eq!(fog(surface - 0.01, -90.0), FogType::Atmospheric);
+    }
+    #[test]
+    fn logical_sky_pass_matches_the_camera_and_dimension_gate() {
+        use FogType::*;
+        for (fog, effect_blocks_sky, skybox, pass) in [
+            (Atmospheric, false, Skybox::Overworld, true),
+            (Water, false, Skybox::End, true),
+            (Atmospheric, false, Skybox::None, false),
+            (Lava, false, Skybox::Overworld, false),
+            (PowderSnow, false, Skybox::End, false),
+            (Atmospheric, true, Skybox::Overworld, false),
+        ] {
+            assert_eq!(sky_pass_present(fog, effect_blocks_sky, skybox), pass);
+        }
     }
     #[test]
     fn the_dragon_fights_world_fog_leaves_out_the_sky() {

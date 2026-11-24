@@ -5,10 +5,11 @@ use crate::game::{
     native_entity_refs::tests::{run_fresh_cases, with_game},
 };
 use mod_api::{
-    Flow, Hand, Hooks, HostTransaction, ItemPlace, ItemResource, MenuClickedEvent, MenuClosedEvent,
-    MenuContainer, MenuItemsRefusal, MenuKey, MenuPart, MenuRef, MenuReplace, MenuSlotBackRefusal,
-    MenuSlotBacking, MenuSlotChangedEvent, MenuSlotPlace, MenuSlotWrite, MenuStillValidEvent,
-    ModEntry, Mods, Registrar, ServerHost,
+    Flow, Hand, Hooks, HostTransaction, ItemPlace, ItemResource, MenuClickedEvent, MenuContainer,
+    MenuItemsRefusal, MenuKey, MenuPart, MenuRef, MenuRemovedEvent, MenuReplace,
+    MenuSlotBackRefusal, MenuSlotBacking, MenuSlotChangedEvent, MenuSlotPlace, MenuSlotWrite,
+    MenuStillValidEvent, ModEntry, Mods, PlayerContainerCloseEvent, PlayerRef, Registrar,
+    ServerHost,
 };
 use std::sync::mpsc;
 use sunrise_client::{items::ItemStack, lan::Out};
@@ -16,14 +17,30 @@ use sunrise_protocol::packets::play::{
     Clientbound as C, ContainerClick, ContainerClose, Serverbound as S, SetCursorItem,
 };
 
-thread_local! {
-    static SCRIPTED_CLICK: std::cell::Cell<Option<Flow>> = const { std::cell::Cell::new(None) };
-    static WINDOW_REQUEST: std::cell::Cell<Option<(MenuKey, bool)>> = const { std::cell::Cell::new(None) };
-    static CLOSE_NOTICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static LOCK_FIRST_SLOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+#[derive(Clone, Copy)]
+enum ClickAction {
+    Close { commit: Option<bool> },
+    Replace { mod_menu: MenuKey },
+    InvalidateOpeningItem,
+    PanicAfterCommit,
 }
 
-struct Part;
+thread_local! {
+    static SCRIPTED_CLICK: std::cell::Cell<Option<Flow>> = const { std::cell::Cell::new(None) };
+    static CLICK_ACTION: std::cell::Cell<Option<ClickAction>> = const { std::cell::Cell::new(None) };
+    static CLOSE_NOTICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LOCK_FIRST_SLOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REOPEN_ON_REMOVED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RECORD_CLOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CLOSE_TRACE: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    static LAST_CLOSE_DIMENSION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static LAST_REMOVED: std::cell::RefCell<Option<(Option<PlayerRef>, u128, i32, Option<Hand>, Vec<Option<mod_api::ItemStack>>)>> = const { std::cell::RefCell::new(None) };
+    static LAST_CONTAINER_CLOSE: std::cell::RefCell<Option<(PlayerRef, String, Option<MenuRef>, Option<MenuRef>, Option<Option<mod_api::ItemStack>>)>> = const { std::cell::RefCell::new(None) };
+}
+
+struct Part {
+    return_contents: bool,
+}
 #[mod_api::sunrise_part]
 impl MenuPart for Part {
     fn menu_still_valid(&self, _: &dyn mod_api::LoopContext, event: &mut MenuStillValidEvent<'_>) {
@@ -47,34 +64,86 @@ impl MenuPart for Part {
     }
 
     fn menu_clicked(&self, host: &mut dyn ServerHost, event: &mut MenuClickedEvent<'_>) -> Flow {
-        if let Some((key, by_handle)) = WINDOW_REQUEST.get() {
-            let title = mod_api::Text::literal("Would replace the current menu");
-            assert_eq!(
-                host.open_menu(
-                    event.uuid,
-                    1,
-                    title.clone(),
-                    Vec::new(),
-                    MenuReplace::InPlace
-                ),
-                Ok(None)
-            );
+        if let Some(action) = CLICK_ACTION.get() {
             let player = host.player(event.uuid).unwrap();
-            assert_eq!(
-                player.open_mod_menu(host, mod_api::ModMenuOpen::new(key, title)),
-                Err(mod_api::OpenMenuError::ClickInProgress)
-            );
-            if by_handle {
-                let menu = player.container_menu(host).unwrap();
-                assert!(menu.close_container(host));
-            } else {
-                host.close_menu(event.uuid);
+            let stack = |id| mod_api::ItemStack::of(mod_api::__private::item_key(id).unwrap());
+            match action {
+                ClickAction::Close { commit } => {
+                    let menu = player.container_menu(host).unwrap();
+                    let close = |host: &mut dyn ServerHost| assert!(menu.close_container(host));
+                    if let Some(commit) = commit {
+                        let result = host.transaction(|host, tx| {
+                            let slot = ItemPlace::PlayerSlot {
+                                player: event.uuid,
+                                slot: 20,
+                            };
+                            assert_eq!(
+                                slot.insert(
+                                    host,
+                                    tx,
+                                    &ItemResource::of(&stack("minecraft:gold_ingot")),
+                                    1
+                                ),
+                                Ok(1)
+                            );
+                            close(host);
+                            assert_eq!(menu.container_id(host), Some(event.window));
+                            if commit { Ok(()) } else { Err(()) }
+                        });
+                        assert_eq!(result.is_ok(), commit);
+                        return Flow::Cancel;
+                    }
+                    close(host);
+                    assert_eq!(menu.container_id(host), None);
+                }
+                ClickAction::Replace { mod_menu } => {
+                    let old = player.container_menu(host).unwrap();
+                    let title = mod_api::Text::literal("Replacement menu");
+                    let next = player
+                        .open_mod_menu(host, mod_api::ModMenuOpen::new(mod_menu, title))
+                        .unwrap()
+                        .expect("open_mod_menu replaces the current menu directly");
+                    assert_ne!(next.container_id(host).unwrap(), event.window);
+                    assert_eq!(old.container_id(host), None);
+                    assert_eq!(player.container_menu(host), Some(next));
+                }
+                ClickAction::InvalidateOpeningItem => {
+                    host.transaction(|host, tx| {
+                        let hand = ItemPlace::PlayerHand {
+                            player: event.uuid,
+                            hand: Hand::Off,
+                        };
+                        assert_eq!(
+                            hand.extract(host, tx, &ItemResource::of(&stack("minecraft:paper")), 2),
+                            Ok(2)
+                        );
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                }
+                ClickAction::PanicAfterCommit => {
+                    let menu = player.container_menu(host).unwrap();
+                    host.transaction(|host, tx| {
+                        let target = ItemPlace::MenuSlot {
+                            menu,
+                            slot: usize::try_from(event.slot).unwrap(),
+                        };
+                        assert_eq!(
+                            target.insert(
+                                host,
+                                tx,
+                                &ItemResource::of(&stack("minecraft:stick")),
+                                1
+                            ),
+                            Ok(1)
+                        );
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                    panic!("a replacement click failed after committing its edit");
+                }
             }
-            assert!(
-                host.menu(event.uuid, event.window).is_some(),
-                "close is deferred"
-            );
-            return Flow::Cancel;
+            return Flow::Continue;
         }
         if let Some(flow) = SCRIPTED_CLICK.get() {
             return flow;
@@ -82,7 +151,11 @@ impl MenuPart for Part {
         if event.slot != 1 {
             return Flow::Continue;
         }
-        let Some(menu) = host.menu(event.uuid, event.window) else {
+        let Some(menu) = host
+            .player(event.uuid)
+            .and_then(|player| player.container_menu(host))
+            .filter(|menu| menu.container_id(host) == Some(event.window))
+        else {
             return Flow::Continue;
         };
         let Some(cursor) = menu.carried(host).flatten() else {
@@ -100,6 +173,54 @@ impl MenuPart for Part {
         .unwrap();
         Flow::Cancel
     }
+
+    fn menu_removed(&self, host: &mut dyn ServerHost, event: &mut MenuRemovedEvent<'_>) {
+        CLOSE_NOTICES.set(CLOSE_NOTICES.get() + 1);
+        if RECORD_CLOSE.get() {
+            CLOSE_TRACE.with(|trace| trace.borrow_mut().push("menu_removed"));
+            LAST_REMOVED.with(|slot| {
+                *slot.borrow_mut() = Some((
+                    event.player,
+                    event.uuid,
+                    event.window,
+                    event.opening_hand,
+                    event.owned_slots.to_vec(),
+                ));
+            });
+        }
+        if REOPEN_ON_REMOVED.replace(false) {
+            let next = event
+                .player
+                .unwrap()
+                .open_chest_menu(
+                    host,
+                    1,
+                    mod_api::Text::literal("Replacement"),
+                    Vec::new(),
+                    MenuReplace::InPlace,
+                )
+                .unwrap();
+            assert_eq!(next.container_id(host), None);
+            CLOSE_TRACE.with(|trace| trace.borrow_mut().push("removed continued"));
+        }
+        if !self.return_contents {
+            return;
+        }
+        assert_eq!(event.opening_hand, Some(Hand::Off));
+        let Some(player) = event.player else {
+            return;
+        };
+        let closing = player.container_menu(host).unwrap();
+        assert_eq!(closing.container_id(host), Some(event.window));
+        assert_eq!(closing.slot(host, 0), Some(None));
+        host.transaction(|host, _| {
+            for stack in event.owned_slots.iter().flatten() {
+                assert!(player.give_stack(host, stack.clone()).unwrap().is_none());
+            }
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+    }
 }
 
 struct Listener {
@@ -109,7 +230,12 @@ struct Listener {
 #[mod_api::__subscriptions]
 impl Hooks for Listener {
     fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
-        r.menu_part(MOD_MENU, Part);
+        r.menu_part(
+            MOD_MENU,
+            Part {
+                return_contents: self.return_contents,
+            },
+        );
         r.register_menu_screen(
             MOD_MENU,
             std::sync::Arc::new(
@@ -126,21 +252,51 @@ impl Hooks for Listener {
         .unwrap();
     }
 
-    fn menu_closed(&self, host: &mut dyn ServerHost, event: &mut MenuClosedEvent<'_>) {
-        CLOSE_NOTICES.set(CLOSE_NOTICES.get() + 1);
-        if !self.return_contents {
-            return;
+    fn player_container_open(
+        &self,
+        _: &mut dyn ServerHost,
+        _: &mut mod_api::PlayerContainerOpenEvent<'_>,
+    ) {
+        if RECORD_CLOSE.get() {
+            CLOSE_TRACE.with(|trace| trace.borrow_mut().push("player_container_open"));
         }
-        assert_eq!(event.opening_hand, Some(Hand::Off));
-        assert!(host.menu(event.uuid, event.window).is_none());
-        let player = host.player(event.uuid).unwrap();
-        host.transaction(|host, _| {
-            for stack in event.owned_slots.iter().flatten() {
-                assert!(player.give_stack(host, stack.clone()).unwrap().is_none());
-            }
-            Ok::<_, ()>(())
-        })
-        .unwrap();
+    }
+
+    fn player_logged_out(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut mod_api::PlayerLoggedOutEvent<'_>,
+    ) {
+        if RECORD_CLOSE.get() {
+            let player = host.player(event.player).unwrap();
+            let menu = player.container_menu(host).unwrap();
+            assert_ne!(menu.container_id(host).unwrap(), 0);
+            CLOSE_TRACE.with(|trace| trace.borrow_mut().push("player_logged_out"));
+        }
+    }
+
+    fn player_container_close(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut PlayerContainerCloseEvent<'_>,
+    ) {
+        if RECORD_CLOSE.get() {
+            CLOSE_TRACE.with(|trace| trace.borrow_mut().push("player_container_close"));
+            let current = event.player.container_menu(host);
+            LAST_CLOSE_DIMENSION.with(|dimension| {
+                *dimension.borrow_mut() = event.player.dimension(host).map(|id| id.to_string());
+            });
+            let slot0 = event.menu.and_then(|menu| menu.slot(host, 0));
+            LAST_CONTAINER_CLOSE.with(|slot| {
+                *slot.borrow_mut() = Some((
+                    event.player,
+                    event.menu_type.to_owned(),
+                    event.menu,
+                    current,
+                    slot0,
+                ));
+            });
+        }
     }
 }
 
@@ -162,6 +318,7 @@ fn with_owned_layout(
     )]
     .into();
     mod_platform::testing::with_mods(mods.clone(), || {
+        mod_api::__private::install_content_owners([], [], [], [(MOD_MENU, "listen")]);
         api_values::install_parts(&mods).unwrap();
         let _callbacks = sunrise_client::native_client_hooks::scoped_menu_validity_hooks(
             api_values::menu_still_valid,
@@ -198,7 +355,7 @@ fn open(game: &mut Game<'_>, key: MenuKey) -> (i32, MenuRef) {
     let player = game.player(123).unwrap();
     // Open from the acting player's item action, when the hand lives in the game,
     // not in the guest's record.
-    let window = game
+    let menu = game
         .as_guest(1, |game| {
             player.open_mod_menu(game, {
                 let mut request =
@@ -210,7 +367,25 @@ fn open(game: &mut Game<'_>, key: MenuKey) -> (i32, MenuRef) {
         .unwrap()
         .unwrap()
         .unwrap();
-    (window, game.player_container_menu(player).unwrap())
+    (menu.container_id(game).unwrap(), menu)
+}
+
+/// `AbstractContainerMenu.getStateId` on a server (#5323): the open menu's handle reads the state
+/// its opening content was sent with.
+#[test]
+#[ignore = "daily"]
+fn an_open_menus_state_id_is_the_one_its_content_was_sent_with() {
+    with_owned_menu(false, |game, rx, key| {
+        let (window, menu) = open(game, key);
+        let state = sent(&rx)
+            .iter()
+            .find_map(|p| match p {
+                C::ContainerSetContent(p) if p.container == window => Some(p.state),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(menu.state_id(game), Some(state));
+    });
 }
 
 fn click(game: &mut Game<'_>, container: i32, slot: i16) {
@@ -240,11 +415,9 @@ fn an_item_opened_menu_has_two_empty_owned_slots_with_individual_caps() {
                 && content.items == vec![None, None]
         )));
         assert_eq!(menu.slot_count(game), Some(2));
-        let player = game.player(123).unwrap();
         assert_eq!(
-            player.back_mod_menu_slots(
+            menu.back_slots(
                 game,
-                window,
                 vec![MenuSlotPlace::HeldItem {
                     hand: Hand::Off,
                     slot: 0
@@ -273,7 +446,7 @@ fn an_item_opened_menu_has_two_empty_owned_slots_with_individual_caps() {
         }
         let host: &mut dyn ServerHost = game;
         assert_eq!(
-            host.menu_set_items(123, window, vec![]),
+            menu.set_items(host, vec![]),
             Err(MenuItemsRefusal::OwnedSlots)
         );
         assert_eq!(menu.slot(host, 0), Some(Some(stick)));
@@ -669,44 +842,137 @@ fn closing_discards_owned_slots_unless_the_listener_returns_their_contents() {
 
 #[test]
 #[ignore = "daily"]
-fn abort_after_replacement_restores_only_committed_contents_to_the_old_close() {
+fn a_player_turn_closes_its_native_window_and_returns_both_kinds_of_stack_once() {
     with_owned_menu(true, |game, _rx, key| {
-        let (_, old) = open(game, key);
+        let (_, menu) = open(game, key);
+        let stick =
+            mod_api::ItemStack::of(mod_api::__private::item_key("minecraft:stick").unwrap());
+        let host: &mut dyn ServerHost = game;
+        host.transaction(|host, tx| {
+            assert_eq!(
+                ItemPlace::MenuSlot { menu, slot: 1 }.insert(
+                    host,
+                    tx,
+                    &ItemResource::of(&stick),
+                    3
+                ),
+                Ok(3)
+            );
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        let dirt = ItemStack::new("minecraft:dirt", 2);
+        CLOSE_NOTICES.set(0);
+        game.as_guest(1, |game| {
+            game.carried = Some(dirt.clone());
+            assert!(menu.close_container(game));
+            assert!(!menu.close_container(game));
+            assert!(game.carried.is_none());
+        })
+        .unwrap();
+        game.run_native_menu_events();
+        game.run_native_menu_events();
+        assert_eq!(CLOSE_NOTICES.get(), 1);
+        let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+        let mut returned: Vec<_> = guest.inventory.iter().flatten().cloned().collect();
+        returned.sort_by(|a, b| a.item.cmp(&b.item));
+        assert_eq!(returned, [dirt, ItemStack::new("minecraft:stick", 3)]);
+    });
+}
+
+fn assert_inventory_cursor(game: &mut Game<'_>, rx: &mpsc::Receiver<Out>, cursor: &ItemStack) {
+    let hub = &mut game.lan.as_mut().unwrap().hub;
+    let expected = hub
+        .stack(&Some(cursor.clone()))
+        .expect("registered cursor item");
+    hub.send_inventory(0);
+    assert!(matches!(
+        sent(rx).as_slice(),
+        [C::ContainerSetContent(snapshot)]
+            if snapshot.container == 0 && snapshot.carried.as_ref() == Some(&expected)
+    ));
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_transactional_replacement_keeps_the_old_menu_until_commit() {
+    with_owned_menu(true, |game, rx, key| {
+        let inventory_cursor = ItemStack::new("minecraft:dirt", 3);
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.carried = Some(inventory_cursor.clone());
+        });
+        let (window, old) = open(game, key);
         let player = game.player(123).unwrap();
         let stick =
             mod_api::ItemStack::of(mod_api::__private::item_key("minecraft:stick").unwrap());
         let resource = ItemResource::of(&stick);
         let old_slot = ItemPlace::MenuSlot { menu: old, slot: 1 };
+        let carried = Some(ItemStack::new("minecraft:stone", 2));
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.carried = carried.clone();
+        });
         let host: &mut dyn ServerHost = game;
         host.transaction(|host, tx| {
             assert_eq!(old_slot.insert(host, tx, &resource, 2), Ok(2));
             Ok::<_, ()>(())
         })
         .unwrap();
+        sent(&rx);
+        CLOSE_NOTICES.set(0);
 
-        let aborted: Result<(), mod_api::TransactionError<()>> = host.transaction(|host, tx| {
-            assert_eq!(old_slot.insert(host, tx, &resource, 1), Ok(1));
-            player
-                .open_mod_menu(host, {
-                    let mut request =
-                        mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Replacement"));
-                    request.opening_hand = Some(Hand::Off);
-                    request.replace = MenuReplace::InPlace;
-                    request
-                })
-                .unwrap()
-                .unwrap();
-            let new = player.container_menu(host).unwrap();
-            let new_slot = ItemPlace::MenuSlot { menu: new, slot: 1 };
-            assert_eq!(new_slot.insert(host, tx, &resource, 4), Ok(4));
-            Err(())
-        });
-        assert_eq!(aborted, Err(mod_api::TransactionError::Aborted(())));
-        let new = game.player_container_menu(player).unwrap();
-        assert_eq!(old.slot(game, 1), None);
-        assert_eq!(new.slot(game, 1), Some(None), "no leakage between windows");
-        game.run_native_menu_events();
+        let replace = |host: &mut dyn ServerHost, commit| {
+            host.transaction(|host, tx| {
+                assert_eq!(old_slot.insert(host, tx, &resource, 1), Ok(1));
+                let next = player
+                    .open_mod_menu(host, {
+                        let mut request =
+                            mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Replacement"));
+                        request.opening_hand = Some(Hand::Off);
+                        request.replace = MenuReplace::InPlace;
+                        request
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    player.container_menu(host).unwrap().container_id(host),
+                    Some(window)
+                );
+                assert_eq!(next.container_id(host), None);
+                assert_eq!(
+                    ItemPlace::MenuSlot {
+                        menu: next,
+                        slot: 1
+                    }
+                    .insert(host, tx, &resource, 4),
+                    Ok(0)
+                );
+                assert!(sent(&rx).is_empty());
+                if commit { Ok(next) } else { Err(()) }
+            })
+        };
+        assert_eq!(
+            replace(game, false),
+            Err(mod_api::TransactionError::Aborted(()))
+        );
+        assert_eq!(old.slot(game, 1).flatten().unwrap().count(), 2);
+        assert_eq!(CLOSE_NOTICES.get(), 0);
         let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+        assert_eq!(guest.carried, carried);
+        assert!(guest.inventory.iter().all(Option::is_none));
+        assert!(sent(&rx).is_empty());
+        assert_inventory_cursor(game, &rx, &inventory_cursor);
+
+        let staged = replace(game, true).unwrap();
+        game.run_native_menu_events();
+        let replacement = player.container_menu(game).unwrap();
+        let next = replacement.container_id(game).unwrap();
+        assert_eq!(old.container_id(game), None);
+        assert_eq!(staged.container_id(game), None);
+        assert_ne!(next, window);
+        assert_eq!(replacement.slot(game, 1), Some(None));
+        assert_eq!(CLOSE_NOTICES.get(), 1);
+        let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+        assert!(guest.carried.is_none());
         assert_eq!(
             guest
                 .inventory
@@ -714,9 +980,17 @@ fn abort_after_replacement_restores_only_committed_contents_to_the_old_close() {
                 .flatten()
                 .cloned()
                 .collect::<Vec<_>>(),
-            [ItemStack::new("minecraft:stick", 2)],
-            "the old close returned only the committed value"
+            [
+                ItemStack::new("minecraft:stone", 2),
+                ItemStack::new("minecraft:stick", 3),
+            ]
         );
+        assert!(
+            sent(&rx)
+                .iter()
+                .any(|p| matches!(p, C::OpenScreen(p) if p.container == next))
+        );
+        assert_inventory_cursor(game, &rx, &inventory_cursor);
     });
 }
 
@@ -765,6 +1039,122 @@ fn the_part_closes_the_menu_when_the_opening_stack_leaves_its_hand() {
 
 #[test]
 #[ignore = "daily"]
+fn a_click_that_changes_the_opening_hand_cannot_run_the_default_pickup() {
+    with_owned_menu(false, |game, rx, key| {
+        let (window, menu) = open(game, key);
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.native_menu[0] = Some(ItemStack::new("minecraft:stick", 1));
+        });
+        sent(&rx);
+        CLICK_ACTION.set(Some(ClickAction::InvalidateOpeningItem));
+        click(game, window, 0);
+        CLICK_ACTION.set(None);
+        assert_eq!(menu.container_id(game), None);
+        let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+        assert!(guest.offhand.is_none(), "the callback's edit committed");
+        assert!(
+            guest.carried.is_none(),
+            "the invalid menu could not be picked up from"
+        );
+        assert!(guest.inventory.iter().all(Option::is_none));
+        assert!(sent(&rx).iter().any(|p| matches!(p,
+            C::ContainerClose(p) if p.container == window
+        )));
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_click_panic_keeps_a_committed_owned_slot_edit_without_running_default() {
+    with_owned_menu(false, |game, rx, key| {
+        let (window, menu) = open(game, key);
+        sent(&rx);
+        CLICK_ACTION.set(Some(ClickAction::PanicAfterCommit));
+        click(game, window, 0);
+        CLICK_ACTION.set(None);
+        let expected = ItemStack::new("minecraft:stick", 1);
+        assert_eq!(
+            menu.slot(game, 0),
+            Some(Some(expected.clone().try_into_api().unwrap()))
+        );
+        assert_eq!(menu.carried(game), Some(None));
+        let expected = game.lan.as_mut().unwrap().hub.stack(&Some(expected));
+        assert!(
+            sent(&rx)
+                .iter()
+                .any(|p| matches!(p, C::ContainerSetContent(p)
+                    if p.container == window && p.items[0] == expected && p.carried.is_none()
+                ))
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_close_requested_in_a_click_transaction_preserves_both_cursors_on_abort() {
+    with_owned_menu(false, |game, rx, key| {
+        let inventory_cursor = ItemStack::new("minecraft:dirt", 3);
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.carried = Some(inventory_cursor.clone());
+        });
+        let (window, menu) = open(game, key);
+        let carried = ItemStack::new("minecraft:stone", 2);
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.carried = Some(carried.clone());
+        });
+        sent(&rx);
+        CLOSE_NOTICES.set(0);
+        CLICK_ACTION.set(Some(ClickAction::Close {
+            commit: Some(false),
+        }));
+        click(game, window, 0);
+        CLICK_ACTION.set(None);
+        assert_eq!(menu.container_id(game), Some(window));
+        let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+        assert_eq!(guest.carried.as_ref(), Some(&carried));
+        assert!(guest.inventory.iter().all(Option::is_none));
+        assert_eq!(CLOSE_NOTICES.get(), 0);
+        assert!(!sent(&rx).iter().any(|p| matches!(p, C::ContainerClose(_))));
+        assert_inventory_cursor(game, &rx, &inventory_cursor);
+
+        CLICK_ACTION.set(Some(ClickAction::Close { commit: Some(true) }));
+        click(game, window, 0);
+        CLICK_ACTION.set(None);
+        assert_eq!(menu.container_id(game), None);
+        let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+        assert_eq!(guest.carried.as_ref(), Some(&inventory_cursor));
+        assert_eq!(
+            guest.inventory[20],
+            Some(ItemStack::new("minecraft:gold_ingot", 1))
+        );
+        assert_eq!(
+            guest
+                .inventory
+                .iter()
+                .flatten()
+                .filter(|stack| **stack == carried)
+                .count(),
+            1
+        );
+        assert_eq!(CLOSE_NOTICES.get(), 1);
+        assert!(
+            sent(&rx)
+                .iter()
+                .any(|p| matches!(p, C::ContainerClose(p) if p.container == window))
+        );
+        let cursors = game
+            .lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update(0, |guest| guest.take_menu_cursors().collect::<Vec<_>>());
+        assert_eq!(cursors, [inventory_cursor]);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn scoped_owned_clicks_replace_or_continue_each_input_mode() {
     use sunrise_client::lan::menu::input::*;
     with_owned_layout(false, true, |game, rx, key| {
@@ -784,13 +1174,14 @@ fn scoped_owned_clicks_replace_or_continue_each_input_mode() {
         ]);
         for (input, button, slot) in cases {
             for flow in [Flow::Cancel, Flow::Continue] {
-                let window = player
+                let menu = player
                     .open_mod_menu(
                         game,
                         mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Click matrix")),
                     )
                     .unwrap()
                     .unwrap();
+                let window = menu.container_id(game).unwrap();
                 let hub = &mut game.lan.as_mut().unwrap().hub;
                 hub.guests.update(0, |g| {
                     g.game_mode = i32::from(input == CLONE);
@@ -958,9 +1349,9 @@ fn send_scoped_click(
 
 #[test]
 #[ignore = "daily"]
-fn a_click_refuses_opens_and_closes_only_on_commit() {
+fn a_click_can_close_or_replace_a_live_menu_without_a_transaction() {
     with_owned_menu(true, |game, rx, key| {
-        for by_handle in [false, true] {
+        {
             let (window, menu) = open(game, key);
             let stored = ItemStack::new("minecraft:stick", 3);
             let carried = ItemStack::new("minecraft:dirt", 2);
@@ -973,26 +1364,13 @@ fn a_click_refuses_opens_and_closes_only_on_commit() {
             hub.resend_menu(1, window, &game.world);
             sent(&rx);
             CLOSE_NOTICES.set(0);
-            WINDOW_REQUEST.set(Some((key, by_handle)));
-
-            game.storage_scope(|game, _| {
-                click(game, window, 0);
-                assert_eq!(game.menu(123, window), Some(menu));
-                assert!(sent(&rx).is_empty());
-                ((), false)
-            });
-            game.run_native_menu_events();
-            assert_eq!(game.menu(123, window), Some(menu));
-            let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
-            assert_eq!(guest.native_menu, [None, Some(stored.clone())]);
-            assert_eq!(guest.carried, Some(carried.clone()));
-            assert!(guest.inventory.iter().all(Option::is_none));
-            assert!(sent(&rx).is_empty());
-            assert_eq!(CLOSE_NOTICES.get(), 0);
+            CLOSE_TRACE.with(|trace| trace.borrow_mut().clear());
+            RECORD_CLOSE.set(true);
+            CLICK_ACTION.set(Some(ClickAction::Close { commit: None }));
 
             click(game, window, 0);
-            WINDOW_REQUEST.set(None);
-            assert!(game.menu(123, window).is_none());
+            CLICK_ACTION.set(None);
+            assert_eq!(menu.container_id(game), None);
             let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
             assert!(guest.carried.is_none());
             assert!(guest.native_menu.is_empty());
@@ -1002,6 +1380,13 @@ fn a_click_refuses_opens_and_closes_only_on_commit() {
                 "the close returned the cursor and detached owned inputs once"
             );
             assert_eq!(CLOSE_NOTICES.get(), 1);
+            RECORD_CLOSE.set(false);
+            CLOSE_TRACE.with(|trace| {
+                assert_eq!(
+                    trace.borrow().as_slice(),
+                    ["menu_removed", "player_container_close"]
+                )
+            });
             let packets = sent(&rx);
             assert_eq!(
                 packets
@@ -1010,8 +1395,60 @@ fn a_click_refuses_opens_and_closes_only_on_commit() {
                     .count(),
                 1
             );
-            assert!(!packets.iter().any(|p| matches!(p, C::OpenScreen(_))));
+            assert!(
+                !packets
+                    .iter()
+                    .any(|p| matches!(p, C::ContainerSetContent(p) if p.container == window)),
+                "no stale resend after closing the menu"
+            );
         }
+
+        // Replacing the menu inside `menu_clicked` opens the new window directly and skips
+        // default click execution on both the old and replacement windows.
+        let (window, menu) = open(game, key);
+        let stored = ItemStack::new("minecraft:stick", 3);
+        let carried = ItemStack::new("minecraft:dirt", 2);
+        let hub = &mut game.lan.as_mut().unwrap().hub;
+        hub.guests.update(0, |g| {
+            g.inventory.fill(None);
+            g.native_menu[0] = Some(stored.clone());
+            g.carried = Some(carried.clone());
+        });
+        hub.resend_menu(1, window, &game.world);
+        sent(&rx);
+        CLOSE_NOTICES.set(0);
+        CLICK_ACTION.set(Some(ClickAction::Replace { mod_menu: key }));
+
+        click(game, window, 0);
+        CLICK_ACTION.set(None);
+        assert_eq!(menu.container_id(game), None);
+        let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+        let replacement = guest.menu.as_ref().expect("replacement menu is open");
+        assert_ne!(replacement.window, window);
+        assert!(guest.carried.is_none());
+        assert_eq!(
+            guest.native_menu,
+            [None, None],
+            "default click did not run on the replacement menu"
+        );
+        assert_eq!(
+            guest.inventory.iter().flatten().collect::<Vec<_>>(),
+            [&carried, &stored],
+            "replacing the menu returned the old cursor and detached owned inputs"
+        );
+        assert_eq!(CLOSE_NOTICES.get(), 1);
+        let packets = sent(&rx);
+        assert!(
+            packets
+                .iter()
+                .any(|p| matches!(p, C::OpenScreen(p) if p.container == replacement.window))
+        );
+        assert!(
+            !packets
+                .iter()
+                .any(|p| matches!(p, C::ContainerSetContent(p) if p.container == window)),
+            "no stale resend for the replaced window"
+        );
     });
 }
 
@@ -1039,6 +1476,754 @@ fn owned_slot_queries_use_the_rule_a_click_will_apply() {
         assert_eq!(guest.native_menu[0], Some(stored));
         assert!(guest.carried.is_none());
     });
+}
+
+#[test]
+#[ignore = "daily"]
+fn menu_removed_precedes_player_container_close_with_live_handles() {
+    with_owned_menu(false, |game, _rx, key| {
+        game.lan.as_mut().unwrap().play.entry(1).or_default();
+        let player = game.player(123).unwrap();
+        let (window, menu) = open(game, key);
+        let stored = ItemStack::new("minecraft:stick", 1);
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update(0, |g| g.native_menu[0] = Some(stored.clone()));
+
+        CLOSE_TRACE.with(|trace| trace.borrow_mut().clear());
+        LAST_REMOVED.with(|slot| *slot.borrow_mut() = None);
+        LAST_CONTAINER_CLOSE.with(|slot| *slot.borrow_mut() = None);
+        RECORD_CLOSE.set(true);
+        game.lan_guest_packet(1, S::ContainerClose(ContainerClose { container: window }));
+        RECORD_CLOSE.set(false);
+
+        CLOSE_TRACE.with(|trace| {
+            assert_eq!(
+                trace.borrow().as_slice(),
+                ["menu_removed", "player_container_close"]
+            );
+        });
+        let removed = LAST_REMOVED.with(|slot| slot.borrow_mut().take()).unwrap();
+        assert_eq!(removed.0, Some(player));
+        assert_eq!(removed.1, 123);
+        assert_eq!(removed.2, window);
+        assert_eq!(removed.3, Some(Hand::Off));
+        assert_eq!(removed.4, [Some(stored.try_into_api().unwrap()), None]);
+
+        let closed = LAST_CONTAINER_CLOSE
+            .with(|slot| slot.borrow_mut().take())
+            .unwrap();
+        assert_eq!(closed.0, player);
+        assert_eq!(closed.0.uuid(), 123);
+        assert_eq!(closed.1, MOD_MENU);
+        assert_eq!(closed.2, Some(menu));
+        assert_eq!(closed.3, Some(menu));
+        assert_eq!(closed.4, Some(None));
+        assert_eq!(
+            player
+                .container_menu(game)
+                .and_then(|inventory| inventory.container_id(game)),
+            Some(0)
+        );
+        assert_eq!(menu.slot(game, 0), None);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn menu_removed_runs_with_no_player_when_player_is_already_gone() {
+    with_owned_menu(false, |game, _rx, key| {
+        let (window, _menu) = open(game, key);
+        let stored = ItemStack::new("minecraft:diamond", 2);
+        {
+            let hub = &mut game.lan.as_mut().unwrap().hub;
+            let mut guest = hub.guests.remove(0);
+            guest.native_menu[1] = Some(stored.clone());
+            if let Some(menu) = guest.menu.as_mut() {
+                let closed = menu.native_removed(
+                    guest.uuid,
+                    guest.menu_generation,
+                    &mut guest.native_menu,
+                    false,
+                );
+                hub.native_menu_events.extend(closed);
+            }
+        }
+
+        CLOSE_TRACE.with(|trace| trace.borrow_mut().clear());
+        LAST_REMOVED.with(|slot| *slot.borrow_mut() = None);
+        RECORD_CLOSE.set(true);
+        game.run_native_menu_events();
+        RECORD_CLOSE.set(false);
+
+        CLOSE_TRACE.with(|trace| {
+            assert_eq!(trace.borrow().as_slice(), ["menu_removed"]);
+        });
+        let removed = LAST_REMOVED.with(|slot| slot.borrow_mut().take()).unwrap();
+        assert_eq!(removed.0, None);
+        assert_eq!(removed.1, 123);
+        assert_eq!(removed.2, window);
+        assert_eq!(removed.3, Some(Hand::Off));
+        assert_eq!(removed.4, [None, Some(stored.try_into_api().unwrap())]);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn ordinary_transaction_publishes_the_whole_close_before_a_replacement() {
+    with_owned_menu(true, |game, rx, key| {
+        let (window, menu) = open(game, key);
+        let stack = ItemStack::new("minecraft:stick", 1);
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update(0, |guest| guest.native_menu[0] = Some(stack.clone()));
+        sent(&rx);
+        CLOSE_TRACE.with(|trace| trace.borrow_mut().clear());
+        RECORD_CLOSE.set(true);
+        let player = game.player(123).unwrap();
+        let host: &mut dyn ServerHost = game;
+        let abort = host.transaction(|host, _| {
+            assert!(menu.close_container(host));
+            assert_eq!(player.container_menu(host), Some(menu));
+            assert!(sent(&rx).is_empty());
+            Err::<(), _>(())
+        });
+        assert!(abort.is_err());
+        assert_eq!(player.container_menu(host), Some(menu));
+        CLOSE_TRACE.with(|trace| assert!(trace.borrow().is_empty()));
+        let staged = host
+            .transaction(|host, _| {
+                assert!(menu.close_container(host));
+                let next = player
+                    .open_chest_menu(
+                        host,
+                        1,
+                        mod_api::Text::literal("Next"),
+                        Vec::new(),
+                        MenuReplace::InPlace,
+                    )
+                    .unwrap();
+                assert_eq!(player.container_menu(host), Some(menu));
+                assert_eq!(next.container_id(host), None);
+                assert!(sent(&rx).is_empty());
+                CLOSE_TRACE.with(|trace| assert!(trace.borrow().is_empty()));
+                Ok::<_, ()>(next)
+            })
+            .unwrap();
+        RECORD_CLOSE.set(false);
+        CLOSE_TRACE.with(|trace| {
+            assert_eq!(
+                trace.borrow().as_slice(),
+                [
+                    "menu_removed",
+                    "player_container_close",
+                    "player_container_open"
+                ]
+            )
+        });
+        assert_eq!(menu.container_id(game), None);
+        assert_eq!(staged.container_id(game), None);
+        assert_eq!(
+            player
+                .container_menu(game)
+                .and_then(|menu| menu.container_id(game)),
+            Some(window % 100 + 1)
+        );
+        assert!(
+            game.lan.as_ref().unwrap().hub.guests[0]
+                .inventory
+                .contains(&Some(stack))
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn owner_can_open_a_replacement_without_interrupting_teardown() {
+    with_owned_menu(false, |game, rx, key| {
+        for from_packet in [true, false] {
+            let (window, menu) = open(game, key);
+            sent(&rx);
+            CLOSE_TRACE.with(|trace| trace.borrow_mut().clear());
+            RECORD_CLOSE.set(true);
+            REOPEN_ON_REMOVED.set(true);
+            if from_packet {
+                game.lan_guest_packet(1, S::ContainerClose(ContainerClose { container: window }));
+            } else {
+                assert!(menu.close_container(game));
+            }
+            RECORD_CLOSE.set(false);
+            CLOSE_TRACE.with(|trace| {
+                assert_eq!(
+                    trace.borrow().as_slice(),
+                    [
+                        "menu_removed",
+                        "removed continued",
+                        "player_container_close",
+                        "player_container_open"
+                    ]
+                )
+            });
+            let old = LAST_CONTAINER_CLOSE.with(|close| close.borrow_mut().take().unwrap());
+            assert_eq!(old.2, Some(menu));
+            assert_eq!(old.3, Some(menu));
+            assert_eq!(menu.container_id(game), None);
+            let packets = sent(&rx);
+            let [next] = packets
+                .iter()
+                .filter_map(|packet| match packet {
+                    C::OpenScreen(open) => Some(open.container),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()[..]
+            else {
+                panic!("expected one replacement screen")
+            };
+            let player = game.player(123).unwrap();
+            assert_eq!(
+                player
+                    .container_menu(game)
+                    .and_then(|menu| menu.container_id(game)),
+                Some(next)
+            );
+        }
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn unsupported_crafting_close_does_not_report_the_inventory() {
+    with_owned_menu(false, |game, rx, _| {
+        game.lan_open_crafting(1, [0, 64, 0]);
+        let window = sent(&rx)
+            .iter()
+            .find_map(|packet| match packet {
+                C::OpenScreen(open) => Some(open.container),
+                _ => None,
+            })
+            .unwrap();
+        RECORD_CLOSE.set(true);
+        game.lan_guest_packet(1, S::ContainerClose(ContainerClose { container: window }));
+        RECORD_CLOSE.set(false);
+        let closed = LAST_CONTAINER_CLOSE.with(|event| event.borrow_mut().take().unwrap());
+        assert_eq!(closed.1, "minecraft:crafting");
+        assert_eq!(closed.2, None);
+        assert_eq!(closed.3, None);
+        assert_eq!(
+            closed.0.container_menu(game).unwrap().container_id(game),
+            Some(0)
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn late_container_sync_invalidation_closes_in_its_original_level() {
+    use crate::game::Dim;
+    use sunrise_client::{containers::BlockEntity, lan::menu::Slots};
+    with_owned_menu(false, |game, rx, _| {
+        let pos = (0, 64, 0);
+        game.world.block_entities.insert(
+            pos,
+            BlockEntity::Chest(vec![Some(ItemStack::new("minecraft:apple", 1)); 27]),
+        );
+        game.enter_level(Dim::Nether).unwrap();
+        game.world
+            .block_entities
+            .insert(pos, BlockEntity::Chest(vec![None; 27]));
+        let hub = &mut game.lan.as_mut().unwrap().hub;
+        hub.update_guest(1, |guest| {
+            guest.dimension = Dim::Nether.id().into();
+            guest.position = [0.5, 64.0, 0.5];
+        });
+        hub.open_container(
+            1,
+            "minecraft:generic_9x3",
+            sunrise_core::nbt::Tag::String("Chest".into()),
+            pos,
+            Slots::Block(pos),
+            vec![None; 27],
+            None,
+        );
+        game.player_menu_opening(1);
+        let player = game.player(123).unwrap();
+        let menu = player.container_menu(game).unwrap();
+        let window = menu.container_id(game).unwrap();
+        game.lan_containers_tick();
+        assert_eq!(menu.slot(game, 0), Some(None));
+        sent(&rx);
+        game.world.block_entities.remove(&pos);
+        let events = game.lan.as_mut().unwrap().hub.sync_containers(&game.world);
+        assert_eq!(events.len(), 1);
+        assert!(sent(&rx).is_empty());
+        assert_eq!(menu.container_id(game), Some(window));
+        game.enter_level(Dim::Overworld).unwrap();
+        RECORD_CLOSE.set(true);
+        let host = game.lan.take().unwrap();
+        game.lan = game.lan_process_events(host, events, &[], [0.5, 64.0, 0.5]);
+        RECORD_CLOSE.set(false);
+        let closed = LAST_CONTAINER_CLOSE.with(|event| event.borrow_mut().take().unwrap());
+        assert_eq!(closed.2, Some(menu));
+        assert_eq!(
+            closed.4, None,
+            "did not read overworld backing at the same coordinates"
+        );
+        LAST_CLOSE_DIMENSION
+            .with(|dimension| assert_eq!(dimension.borrow().as_deref(), Some(Dim::Nether.id())));
+        assert_eq!(game.dim, Dim::Overworld);
+        assert_eq!(menu.container_id(game), None);
+        assert_eq!(
+            sent(&rx)
+                .iter()
+                .filter(
+                    |packet| matches!(packet, C::ContainerClose(close) if close.container == window)
+                )
+                .count(),
+            1
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn disconnect_reports_logout_then_removed_then_close_with_live_views() {
+    with_owned_menu(false, |game, _rx, key| {
+        let (window, menu) = open(game, key);
+        let player = game.player(123).unwrap();
+        CLOSE_TRACE.with(|trace| trace.borrow_mut().clear());
+        RECORD_CLOSE.set(true);
+        game.lan
+            .as_ref()
+            .unwrap()
+            .hub
+            .lan
+            .shared
+            .events
+            .send(sunrise_client::lan::NetEvent::Left(
+                1,
+                "test disconnect".into(),
+            ))
+            .unwrap();
+        game.tick_lan_packets();
+        RECORD_CLOSE.set(false);
+        CLOSE_TRACE.with(|trace| {
+            assert_eq!(
+                trace.borrow().as_slice(),
+                [
+                    "player_logged_out",
+                    "menu_removed",
+                    "player_container_close"
+                ]
+            )
+        });
+        let removed = LAST_REMOVED.with(|event| event.borrow_mut().take().unwrap());
+        assert_eq!(removed.0, Some(player));
+        assert_eq!(removed.2, window);
+        let closed = LAST_CONTAINER_CLOSE.with(|event| event.borrow_mut().take().unwrap());
+        assert_eq!(closed.0, player);
+        assert_eq!(closed.2, Some(menu));
+        assert_eq!(closed.3, Some(menu));
+        assert!(game.player(123).is_none());
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn staging_replacement_keeps_nested_edits_on_the_live_owner_until_commit() {
+    with_owned_menu(true, |game, rx, key| {
+        let (_, old) = open(game, key);
+        let player = game.player(123).unwrap();
+        let stick =
+            mod_api::ItemStack::of(mod_api::__private::item_key("minecraft:stick").unwrap());
+        let resource = ItemResource::of(&stick);
+        let old_slot = ItemPlace::MenuSlot { menu: old, slot: 1 };
+        let host: &mut dyn ServerHost = game;
+        host.transaction(|host, tx| {
+            assert_eq!(old_slot.insert(host, tx, &resource, 2), Ok(2));
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        sent(&rx);
+        CLOSE_TRACE.with(|trace| trace.borrow_mut().clear());
+        RECORD_CLOSE.set(true);
+        let staged = host
+            .transaction(|host, tx| {
+                assert_eq!(old_slot.insert(host, tx, &resource, 1), Ok(1));
+                let next = player
+                    .open_mod_menu(host, {
+                        let mut request =
+                            mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Replacement"));
+                        request.opening_hand = Some(Hand::Off);
+                        request.replace = MenuReplace::InPlace;
+                        request
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(player.container_menu(host), Some(old));
+                assert_eq!(next.container_id(host), None);
+                let nested: Result<(), mod_api::TransactionError<()>> =
+                    host.transaction(|host, tx| {
+                        assert_eq!(old_slot.insert(host, tx, &resource, 1), Ok(1));
+                        Err(())
+                    });
+                assert!(nested.is_err());
+                assert_eq!(
+                    old.slot(host, 1),
+                    Some(Some(
+                        ItemStack::new("minecraft:stick", 3).try_into_api().unwrap()
+                    ))
+                );
+                assert!(sent(&rx).is_empty());
+                CLOSE_TRACE.with(|trace| assert!(trace.borrow().is_empty()));
+                Ok::<_, ()>(next)
+            })
+            .unwrap();
+        RECORD_CLOSE.set(false);
+        CLOSE_TRACE.with(|trace| {
+            assert_eq!(
+                trace.borrow().as_slice(),
+                [
+                    "menu_removed",
+                    "player_container_close",
+                    "player_container_open"
+                ]
+            )
+        });
+        assert_eq!(old.container_id(game), None);
+        assert_eq!(staged.container_id(game), None);
+        let replacement = game.player_container_menu(player).unwrap();
+        assert_ne!(replacement, old);
+        assert_eq!(replacement.slot(game, 1), Some(None));
+        let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+        assert_eq!(
+            guest
+                .inventory
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [ItemStack::new("minecraft:stick", 3)],
+            "old teardown returned committed plus pre-replacement writes"
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn aborted_window_reservations_do_not_collide_at_wraparound() {
+    with_owned_menu(false, |game, rx, key| {
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .update_guest(1, |g| g.next_window = 99);
+        let (window, old) = open(game, key);
+        assert_eq!(window, 100);
+        sent(&rx);
+        let expected_next = window % 100 + 1;
+        let player = game.player(123).unwrap();
+        let host: &mut dyn ServerHost = game;
+        for _ in 0..99 {
+            let aborted: Result<(), mod_api::TransactionError<()>> = host.transaction(|host, _| {
+                let reserved = player
+                    .open_chest_menu(
+                        host,
+                        1,
+                        mod_api::Text::literal("Aborted"),
+                        Vec::new(),
+                        MenuReplace::InPlace,
+                    )
+                    .unwrap();
+                assert_eq!(reserved.container_id(host), None);
+                Err(())
+            });
+            assert!(aborted.is_err());
+        }
+        assert_eq!(game.lan.as_ref().unwrap().hub.guests[0].next_window, window);
+        assert_eq!(old.container_id(game), Some(window));
+        let host: &mut dyn ServerHost = game;
+        let next = host
+            .transaction(|host, _| {
+                let next = player
+                    .open_chest_menu(
+                        host,
+                        1,
+                        mod_api::Text::literal("Committed"),
+                        Vec::new(),
+                        MenuReplace::InPlace,
+                    )
+                    .unwrap();
+                Ok::<_, ()>(next)
+            })
+            .unwrap();
+        assert_eq!(next.container_id(game), None);
+        assert_eq!(old.container_id(game), None);
+        assert_eq!(
+            player
+                .container_menu(game)
+                .and_then(|menu| menu.container_id(game)),
+            Some(expected_next)
+        );
+        assert_eq!(
+            game.lan.as_ref().unwrap().hub.guests[0].next_window,
+            expected_next
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn reentrant_open_follows_both_root_opens_and_ignores_a_stale_close() {
+    with_owned_menu(false, |game, rx, key| {
+        let (old, _) = open(game, key);
+        let hub = &game.lan.as_ref().unwrap().hub;
+        let [first_kind, second_kind, reentrant_kind] = [2, 3, 1].map(|rows| {
+            hub.registry_id("minecraft:menu", &format!("minecraft:generic_9x{rows}"))
+                .unwrap()
+        });
+        sent(&rx);
+        REOPEN_ON_REMOVED.set(true);
+        let player = game.player(123).unwrap();
+        game.transaction(|host, _| {
+            let [first, second] = [(2, "First"), (3, "Second")].map(|(rows, title)| {
+                player
+                    .open_chest_menu(
+                        host,
+                        rows,
+                        mod_api::Text::literal(title),
+                        Vec::new(),
+                        MenuReplace::InPlace,
+                    )
+                    .unwrap()
+            });
+            assert_eq!(first.container_id(host), None);
+            assert_eq!(second.container_id(host), None);
+            assert_ne!(first, second);
+            assert!(sent(&rx).is_empty());
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+
+        let first = old % 100 + 1;
+        let second = first % 100 + 1;
+        let reentrant = second % 100 + 1;
+        let packets = sent(&rx);
+        let opens: Vec<_> = packets
+            .iter()
+            .filter_map(|packet| match packet {
+                C::OpenScreen(open) => Some((open.container, open.menu)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            opens,
+            [
+                (first, first_kind),
+                (second, second_kind),
+                (reentrant, reentrant_kind)
+            ]
+        );
+        assert!(!packets.iter().any(|p| matches!(p, C::ContainerClose(_))));
+        let replacement = player.container_menu(game).unwrap();
+        assert_eq!(replacement.container_id(game), Some(reentrant));
+        game.lan_guest_packet(1, S::ContainerClose(ContainerClose { container: second }));
+        assert_eq!(player.container_menu(game), Some(replacement));
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn disconnect_before_publication_preserves_a_stack_offered_to_the_pending_menu() {
+    with_owned_menu(false, |game, rx, key| {
+        let (window, current) = open(game, key);
+        let stack = ItemStack::new("minecraft:stick", 2);
+        game.lan.as_mut().unwrap().hub.update_guest(1, |guest| {
+            guest.inventory[0] = Some(stack.clone());
+        });
+        sent(&rx);
+
+        let player = game.player(123).unwrap();
+        let resource = ItemResource::of(&stack.clone().try_into_api().unwrap());
+        game.transaction(|host, _| {
+            let pending = player
+                .open_mod_menu(
+                    host,
+                    mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Pending")),
+                )
+                .unwrap()
+                .unwrap();
+            // Use the ordinary journal to offer a real extraction to the replacement.
+            // Until publication it has no installed owner, so the transfer rolls back.
+            let moved = host.transaction(|host, tx| {
+                let source = ItemPlace::PlayerSlot {
+                    player: 123,
+                    slot: 0,
+                };
+                assert_eq!(source.extract(host, tx, &resource, 2), Ok(2));
+                let accepted = ItemPlace::MenuSlot {
+                    menu: pending,
+                    slot: 1,
+                }
+                .insert(host, tx, &resource, 2);
+                if accepted == Ok(2) { Ok(2) } else { Err(()) }
+            });
+            assert_eq!(moved, Err(mod_api::TransactionError::Aborted(())));
+            assert!(
+                player
+                    .disconnect(host, mod_api::Text::literal("Leaving before publication"))
+                    .unwrap()
+            );
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+
+        let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+        assert!(guest.disconnect_pending);
+        assert_eq!(guest.next_window, window);
+        assert_eq!(guest.inventory[0], Some(stack));
+        assert_eq!(player.container_menu(game), Some(current));
+        assert!(!sent(&rx).iter().any(|p| matches!(p, C::OpenScreen(_))));
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn reentrant_open_during_travel_close_opens_after_change_level() {
+    use crate::game::Dim;
+    with_owned_menu(false, |game, rx, key| {
+        let (_window, old) = open(game, key);
+        sent(&rx);
+        CLOSE_TRACE.with(|trace| trace.borrow_mut().clear());
+        RECORD_CLOSE.set(true);
+        REOPEN_ON_REMOVED.set(true);
+        game.start_server_trip(1, Dim::Nether, None);
+        RECORD_CLOSE.set(false);
+        CLOSE_TRACE.with(|trace| {
+            assert_eq!(
+                trace.borrow().as_slice(),
+                [
+                    "menu_removed",
+                    "removed continued",
+                    "player_container_close",
+                    "player_container_open"
+                ]
+            )
+        });
+        let packets = sent(&rx);
+        let respawn_pos = packets
+            .iter()
+            .position(|packet| matches!(packet, C::Respawn(_)))
+            .expect("travel sent Respawn");
+        let (open_pos, next) = packets
+            .iter()
+            .enumerate()
+            .find_map(|(idx, packet)| match packet {
+                C::OpenScreen(open) => Some((idx, open.container)),
+                _ => None,
+            })
+            .expect("replacement opened after travel");
+        assert!(
+            respawn_pos < open_pos,
+            "replacement OpenScreen must follow Respawn"
+        );
+        assert!(
+            !packets
+                .iter()
+                .any(|packet| matches!(packet, C::ContainerClose(_))),
+            "travel close relies on Respawn without a close packet"
+        );
+        assert_eq!(old.container_id(game), None);
+        game.enter_level(Dim::Nether).unwrap();
+        let player = game.player(123).unwrap();
+        let replacement = player.container_menu(game).unwrap();
+        assert_eq!(
+            replacement.container_id(game),
+            Some(next),
+            "change_level must not retire the reentrant replacement"
+        );
+        CLOSE_TRACE.with(|trace| trace.borrow_mut().clear());
+        LAST_CLOSE_DIMENSION.with(|dimension| *dimension.borrow_mut() = None);
+        RECORD_CLOSE.set(true);
+        assert!(replacement.close_container(game));
+        RECORD_CLOSE.set(false);
+        CLOSE_TRACE.with(|trace| {
+            assert_eq!(trace.borrow().as_slice(), ["player_container_close"]);
+        });
+        LAST_CLOSE_DIMENSION
+            .with(|dimension| assert_eq!(dimension.borrow().as_deref(), Some(Dim::Nether.id())));
+        assert_eq!(replacement.container_id(game), None);
+    });
+}
+
+/// A replacement the closing listener asks for while the player's menus close for a save stays
+/// unpublished through the save: nothing real can reach a transient slot the save omits. A
+/// leaving player never gets it; otherwise it publishes once the save is done.
+#[test]
+#[ignore = "daily"]
+fn an_open_asked_during_a_save_close_publishes_only_after_the_save_if_the_player_stays() {
+    for leaving in [true, false] {
+        with_owned_menu(false, |game, rx, key| {
+            open(game, key);
+            sent(&rx);
+            REOPEN_ON_REMOVED.set(true);
+            let hold = game.guest_close_menus_for_save(1);
+            assert!(
+                !sent(&rx).iter().any(|p| matches!(p, C::OpenScreen(_))),
+                "the replacement stays unpublished through the save"
+            );
+            if leaving {
+                game.discard_menu_opens(hold);
+            } else {
+                game.resume_menu_opens(hold);
+            }
+            let opened = sent(&rx)
+                .iter()
+                .filter(|p| matches!(p, C::OpenScreen(_)))
+                .count();
+            assert_eq!(opened, usize::from(!leaving));
+        });
+    }
+}
+
+/// A player leaves from a level the server cannot enter: owner cleanup still runs, and the
+/// listener that heard the menu open hears its matching close before the menu is forgotten.
+#[test]
+#[ignore = "daily"]
+fn a_departure_from_an_unenterable_level_still_closes_the_heard_menu() {
+    let previous_extra = crate::game::EXTRA_DIMS.read().unwrap().clone();
+    with_owned_menu(false, |game, rx, key| {
+        open(game, key);
+        sent(&rx);
+        crate::game::Dim::add_extra("test:unenterable");
+        let mut host = game.lan.take().unwrap();
+        let mut gone = host.hub.guests.remove(0);
+        gone.dimension = "test:unenterable".to_owned();
+        CLOSE_TRACE.with(|trace| trace.borrow_mut().clear());
+        RECORD_CLOSE.set(true);
+        game.lan = game.lan_process_events(
+            host,
+            [sunrise_client::lan::hub::HostEvent::Left(Box::new(gone))],
+            &[],
+            [0.5, 64.0, 0.5],
+        );
+        RECORD_CLOSE.set(false);
+        let trace = CLOSE_TRACE.with(|trace| trace.borrow().clone());
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|t| **t == "player_container_close")
+                .count(),
+            1,
+            "one close for the open that was heard: {trace:?}"
+        );
+    });
+    *crate::game::EXTRA_DIMS.write().unwrap() = previous_extra;
 }
 
 #[derive(Clone, Copy)]
@@ -1080,9 +2265,10 @@ impl MenuPart for ProcessingPart {
                     1,
                 )
                 .unwrap();
-                // The write settles with the click's own transaction.
+                // Under P3-11 `menu_clicked` runs directly on the live menu and opens its own
+                // transaction when editing container slots.
                 let inserted = host
-                    .current_transaction(|host, tx| {
+                    .transaction(|host, tx| {
                         ItemPlace::MenuSlot { menu, slot: 0 }.insert(
                             host,
                             tx,
@@ -1091,7 +2277,7 @@ impl MenuPart for ProcessingPart {
                         )
                     })
                     .expect("click transaction");
-                assert_eq!(inserted, Ok(1));
+                assert_eq!(inserted, 1);
                 Flow::Cancel
             }
         }
@@ -1183,6 +2369,10 @@ impl MenuPart for ProcessingPart {
             }
         }
     }
+
+    fn menu_removed(&self, _: &mut dyn ServerHost, event: &mut MenuRemovedEvent<'_>) {
+        CLOSED_OWNED_LEN.set(Some(event.owned_slots.len()));
+    }
 }
 
 struct ProcessingMod;
@@ -1190,10 +2380,6 @@ struct ProcessingMod;
 impl Hooks for ProcessingMod {
     fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
         r.menu_part(MOD_MENU, ProcessingPart);
-    }
-
-    fn menu_closed(&self, _: &mut dyn ServerHost, event: &mut MenuClosedEvent<'_>) {
-        CLOSED_OWNED_LEN.set(Some(event.owned_slots.len()));
     }
 }
 
@@ -1260,7 +2446,7 @@ fn raw_click(game: &mut Game<'_>, conn: u32, window: i32, slot: i16, button: i8,
 fn processing_owned_menu_computes_results_via_slot_changed_and_rejects_invalid_writes() {
     with_processing_owned_menu(|game, rx, key| {
         let player = game.player(123).unwrap();
-        let window = game
+        let menu = game
             .as_guest(1, |game| {
                 let mut req = mod_api::ModMenuOpen::new(key, mod_api::Text::literal("Processor"));
                 req.pos = Some([5, 64, 5]);
@@ -1269,6 +2455,7 @@ fn processing_owned_menu_computes_results_via_slot_changed_and_rejects_invalid_w
             .unwrap()
             .unwrap()
             .unwrap();
+        let window = menu.container_id(game).unwrap();
         sent(&rx);
 
         let stick = |n| Some(ItemStack::new("minecraft:stick", n));
@@ -1366,7 +2553,7 @@ fn processing_owned_menu_computes_results_via_slot_changed_and_rejects_invalid_w
 fn owned_menu_slot_changed_fires_on_item_place_writes_and_deduplicates_per_transaction() {
     with_processing_owned_menu(|game, rx, key| {
         let player = game.player(123).unwrap();
-        let window = game
+        let menu = game
             .as_guest(1, |game| {
                 player.open_mod_menu(
                     game,
@@ -1376,7 +2563,7 @@ fn owned_menu_slot_changed_fires_on_item_place_writes_and_deduplicates_per_trans
             .unwrap()
             .unwrap()
             .unwrap();
-        let menu = game.player_container_menu(player).unwrap();
+        let window = menu.container_id(game).unwrap();
         sent(&rx);
 
         let stick_api = ItemStack::new("minecraft:stick", 1).try_into_api().unwrap();
@@ -1479,8 +2666,8 @@ fn owned_menu_slot_changed_fires_on_item_place_writes_and_deduplicates_per_trans
             [stick(1), dirt(2), stone(2)]
         );
 
-        // 4. Invalid output write inside menu_slot_changed during Flow::Cancel rolls back
-        // menu_clicked's ItemPlace write too.
+        // 4. Invalid output write inside menu_slot_changed during Flow::Cancel aborts the
+        // listener's outputs while menu_clicked's committed transaction stands.
         game.transaction(|host, tx| {
             assert_eq!(
                 ItemPlace::MenuSlot { menu, slot: 0 }.extract(
@@ -1498,8 +2685,8 @@ fn owned_menu_slot_changed_fires_on_item_place_writes_and_deduplicates_per_trans
         click(game, window, 0);
         assert_eq!(
             game.lan.as_ref().unwrap().hub.guest(1).unwrap().native_menu,
-            [None, dirt(2), None],
-            "failed menu_slot_changed must roll back Flow::Cancel menu_clicked edits"
+            [stick(1), dirt(2), None],
+            "failed menu_slot_changed aborts its own outputs while menu_clicked's committed write stands"
         );
     });
 }
@@ -1509,7 +2696,7 @@ fn owned_menu_slot_changed_fires_on_item_place_writes_and_deduplicates_per_trans
 fn owned_menu_slot_changed_batches_multi_slot_drag_and_covers_swap_throw_pickup_all() {
     with_processing_owned_menu(|game, _rx, key| {
         let player = game.player(123).unwrap();
-        let window = game
+        let menu = game
             .as_guest(1, |game| {
                 player.open_mod_menu(
                     game,
@@ -1519,6 +2706,7 @@ fn owned_menu_slot_changed_batches_multi_slot_drag_and_covers_swap_throw_pickup_
             .unwrap()
             .unwrap()
             .unwrap();
+        let window = menu.container_id(game).unwrap();
         let stick = |n| Some(ItemStack::new("minecraft:stick", n));
         let dirt = |n| Some(ItemStack::new("minecraft:dirt", n));
         let stone = |n| Some(ItemStack::new("minecraft:stone", n));
@@ -1592,7 +2780,7 @@ fn owned_menu_slot_changed_batches_multi_slot_drag_and_covers_swap_throw_pickup_
 fn owned_menu_slot_changed_rolls_back_listener_item_place_writes_on_invalid_output_or_panic() {
     with_processing_owned_menu(|game, rx, key| {
         let player = game.player(123).unwrap();
-        let window = game
+        let menu = game
             .as_guest(1, |game| {
                 player.open_mod_menu(
                     game,
@@ -1602,6 +2790,7 @@ fn owned_menu_slot_changed_rolls_back_listener_item_place_writes_on_invalid_outp
             .unwrap()
             .unwrap()
             .unwrap();
+        let window = menu.container_id(game).unwrap();
         let stick = |n| Some(ItemStack::new("minecraft:stick", n));
         for bad in [
             ChangeMode::WriteItemPlaceThenInvalid,
@@ -2180,8 +3369,8 @@ fn processing_owned_menu_returns_inputs_on_close_drops_overflow_and_discards_res
         let stone = |n| Some(ItemStack::new("minecraft:stone", n));
 
         // 1. Live close with room in inventory: returns non-result inputs, discards result slot 2,
-        // and delivers empty owned_slots to menu_closed so items cannot be duplicated.
-        let window = game
+        // and delivers empty owned_slots to menu_removed so items cannot be duplicated.
+        let menu = game
             .as_guest(1, |game| {
                 player.open_mod_menu(
                     game,
@@ -2191,6 +3380,7 @@ fn processing_owned_menu_returns_inputs_on_close_drops_overflow_and_discards_res
             .unwrap()
             .unwrap()
             .unwrap();
+        let window = menu.container_id(game).unwrap();
         game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
             g.inventory.fill(None);
             g.carried = None;
@@ -2226,7 +3416,7 @@ fn processing_owned_menu_returns_inputs_on_close_drops_overflow_and_discards_res
         assert!(game.dropped.is_empty());
 
         // 2. Live close with full inventory: drops overflow inputs at player and discards results.
-        let window = game
+        let menu = game
             .as_guest(1, |game| {
                 player.open_mod_menu(
                     game,
@@ -2236,6 +3426,7 @@ fn processing_owned_menu_returns_inputs_on_close_drops_overflow_and_discards_res
             .unwrap()
             .unwrap()
             .unwrap();
+        let window = menu.container_id(game).unwrap();
         game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
             for slot in g.inventory.iter_mut() {
                 *slot = Some(ItemStack::new("minecraft:cobblestone", 64));

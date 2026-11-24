@@ -11,7 +11,7 @@ pub fn update_with_item(
 ) -> Result<(), TransactionError<&'static str>> {
     tick.transaction(|tick, _| {
         if !item
-            .set_stack(tick.host(), replacement)
+            .set_stack(tick.host(), Some(replacement))
             .map_err(|_| "invalid stack")?
         {
             return Err("dropped-item write was refused");

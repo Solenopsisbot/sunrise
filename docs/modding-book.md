@@ -2,7 +2,7 @@
 
 The modding book (`docs/modding`, published at <https://playsunrise.net/docs/modding>: `src/<path>.md` is served at `/docs/modding/<path>`, and `introduction.md` at `/docs/modding` itself) is the manual for mod
 authors: it describes what the game does on main, nothing else. Designs, proposals, plans, trackers and coverage
-ledgers live in [`docs/design/`](design/) (mod API designs in [`docs/design/mod-api/`](design/mod-api/)), and
+ledgers live in issues and PRs, and
 notes for people working on Sunrise itself in [`docs/mod-api/`](mod-api/). The book build refuses a page whose
 title reads as a design, a plan or a work list.
 

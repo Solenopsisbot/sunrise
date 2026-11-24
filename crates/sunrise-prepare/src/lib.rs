@@ -45,8 +45,8 @@ pub type Log<'a> = &'a dyn Fn(&str);
 pub type Progress<'a> = &'a dyn Fn(f32);
 
 /// The stages of `steps`, each opened by `Run::stage`: what the fraction counts.
-const STAGES: u32 = 20;
-const SERVER_STAGES: u32 = STAGES - 3;
+const STAGES: u32 = 21;
+const SERVER_STAGES: u32 = STAGES - 4;
 
 /// The exporter bundle side, and the worker index that runs it (a Prism install has no server
 /// jar, so the client jar is the server side; the sides still compile and run separately).
@@ -63,10 +63,10 @@ pub use sunrise_core::prepared_profile::SCHEMA;
 /// the preparer and fails when the output is not the one output-versions.txt gives this number
 /// (`python3 tools/prepare_output.py check`). The launcher reads this line from the version
 /// folder's sources: keep it on one line, as it is.
-pub const OUTPUT_VERSION: u32 = 8;
+pub const OUTPUT_VERSION: u32 = 9;
 
 /// Independent output pin for the dedicated server profile.
-pub const SERVER_OUTPUT_VERSION: u32 = 1;
+pub const SERVER_OUTPUT_VERSION: u32 = 2;
 
 // The checked literals above remain readable by older launchers and output-history tooling.
 const _: () = {
@@ -1207,6 +1207,19 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
                 &[],
                 "entity-model-export.log",
             )?;
+            // The two built-in render pipeline locations registries, for mod registration.
+            run.stage();
+            let render_pipelines = single(
+                "render pipelines",
+                "render-pipelines.json",
+                &["VanillaRenderPipelineExporter.java"],
+                "render_pipeline_exporters_sha256",
+                "client_sha256",
+                "render-pipelines/classes",
+                "512M",
+                &[],
+                "render-pipeline-export.log",
+            )?;
             // Keyframe animation definitions from the client jar.
             run.stage();
             let mob_animations = single(
@@ -1223,6 +1236,7 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
             run.close_worker(CLIENT_SIDE);
             entries.extend([
                 ("entity_model_exporters_sha256", entity_models),
+                ("render_pipeline_exporters_sha256", render_pipelines),
                 ("mob_animations_exporters_sha256", mob_animations),
             ]);
         }
@@ -1400,6 +1414,10 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
         (
             "entity_model_exporters_sha256".into(),
             entry("entity_model_exporters_sha256"),
+        ),
+        (
+            "render_pipeline_exporters_sha256".into(),
+            entry("render_pipeline_exporters_sha256"),
         ),
         (
             "creative_exporters_sha256".into(),

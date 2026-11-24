@@ -22,6 +22,24 @@ with the line to write instead:
 | `registry`, `registry-index`, `branch`, `tag`, `rev` or `workspace` | It does not name the SDK. |
 | `{ path = "…" }` anywhere else | The path must be the pinned SDK the tool fetches. |
 
+## Cargo dependencies in a native build
+
+A registry build checks the staged mod's `Cargo.toml` and each local crate it reaches, including
+build, dev and target-specific dependencies. Keep authored path dependencies inside the mod and
+under its packaged source tree, and use `package = "…"` if the dependency's alias differs from
+its package name. The generated `sunrise-internals` facade uses the alias `internals` unless you
+name it differently. If the alias is already used in `[dependencies]`, the registry build reports
+the conflict. Give one dependency a different alias with `package = "…"` and use that alias in Rust
+imports. To link another mod, declare it in `sunrise-mod.toml`; the builder adds the Cargo path to
+its staged library. Don't put that path in your own `Cargo.toml`.
+
+The builder takes the API and internals from the pinned SDK, not from crates.io. For other registry
+crates, use crates.io and keep the mod's `Cargo.lock` up to date with
+[`native-lock`](08-native-build.md#native-discover-and-native-lock). Only the SDK may supply patches.
+Mod crates cannot declare `[patch]`, `[replace]` or `[workspace]`. The build and lock commands
+run Cargo from their own staging workspace without using your project's Cargo configuration
+or rewriting your `Cargo.toml` files.
+
 ## The pin
 
 The build a native mod is made for is its pin, a full commit SHA in `[native] sunrise` in
@@ -53,7 +71,7 @@ Wherever a build is given (`new --sunrise`, `pin`, `sdk diff`, `check --build`),
 | A Stable tag such as `26.3-0.1.0` | That release's build. |
 | A Dev tag `dev-YYYY-MM-DD-<short sha>` | That Dev build's; the build must start with the short SHA. |
 | 40 hex digits | That build. |
-| 7 to 39 hex digits | The one SDK whose build id starts with them, among the releases listed: this repository's 100 newest on GitHub, or a folder base's entries. Another URL base takes the full sha only. |
+| 7 to 39 hex digits | The one SDK whose build id starts with them, among the releases listed: this repository's 100 newest on GitHub, or a folder base's entries. Another URL base has no listing, so it has no short-SHA lookup; it still serves release names and full SHAs. |
 
 A release name is read from `<base>/<name>/sdk.json`. A Stable or Dev release's `sdk.json` must match its
 `SHA256SUMS`, signed with Sunrise's release key for exactly that tag (a Dev build's `SHA256SUMS.v2.sig`), so a mirror
@@ -87,10 +105,10 @@ A Stable or Dev tag's folder also holds that release's `SHA256SUMS` and its sign
 Every SDK base is checked the same way, against Sunrise's signature. For a [local SDK built from a
 checkout](../../how-to/native-mods/07-local-developer-builds.md), a debug build of the mod tool can also check
 against the public key set in `SUNRISE_SDK_TRUSTED_KEY`. The launcher's own copies are described in
-[Cache and disk](../../how-to/native-mods/10-cache-and-disk.md).
+[Cache and disk](../../how-to/native-mods/04-what-the-launcher-does.md#cache-and-disk).
 
 `internals add` and pin changes that need catalogs read `internals.json` from the pinned build's signed SDK.
 The tool unpacks `build-data.tar.xz` into `.sunrise/cache/<build id>/build-data/`. `internals sync` checks
 pinned game source instead, as does `internals add` when the mod declares `[[native.module]]` rows. Source
 discovery uses the Rust named by the signed SDK, but does not need its compiled game slices.
-See [Native dependency tools](../registry-index.md#native-dependency-tools).
+See [Native dependency tools](05-commands.md#native-dependency-tools).

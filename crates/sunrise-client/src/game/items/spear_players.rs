@@ -6,7 +6,7 @@
 //! hub is back (`lan_pvp`), and the attacker's side of a landed stab
 //! (`attackVisualEffects`, `itemAttackInteraction`, `damageStatsAndHearts`,
 //! the exhaustion, and the hit's feedback) follows as the attacker again.
-use super::{Game, lan_pvp::Victim};
+use super::Game;
 use sunrise_client::{health::HurtSource, spear::Kinetic, text::Text};
 use sunrise_core::geometry::{Aabb, Vec3};
 
@@ -39,7 +39,6 @@ pub(super) struct PlayerStab {
     knockback: (f32, f64, f64),
     disable_blocking: f32,
     item: Option<Text>,
-    ignite: f32,
 }
 
 /// The stabs of one charge tick or one jab on players.
@@ -89,11 +88,7 @@ impl Game<'_> {
             return Vec::new();
         };
         let board = &self.score.board;
-        let Some(attacker) = host.hub.guest(actor).filter(|_| {
-            self.ui
-                .rules
-                .bool_at(sunrise_client::gamerules::vanilla::PVP)
-        }) else {
+        let Some(attacker) = host.hub.guest(actor) else {
             return Vec::new();
         };
         let own_team = board.players_team(&attacker.name);
@@ -109,9 +104,11 @@ impl Game<'_> {
                     && !g.dead
                     && !g.spectator()
                     && (own_vehicle.is_none() || g.vehicle != own_vehicle)
-                    && sunrise_client::scoreboard::teams_allow_damage(
-                        board.players_team(&g.name),
+                    && self.player_may_harm(
+                        attacker.entity_id,
+                        g.entity_id,
                         own_team,
+                        board.players_team(&g.name),
                     )
             })
             .map(|g| {
@@ -163,7 +160,12 @@ impl Game<'_> {
         let (xd, zd) = self.extra_knockback_direction();
         let strength = if deals_knockback {
             // causeExtraKnockback: the attacker stops sprinting.
-            let (strength, _) = self.extra_knockback("minecraft:player", 0.0);
+            let (strength, _) = self.extra_knockback(
+                "minecraft:player",
+                self.stab_players[target].entity_id as u32,
+                0.0,
+                Some("minecraft:spear"),
+            );
             self.stop_sprint_after_extra_knockback();
             strength
         } else {
@@ -188,7 +190,6 @@ impl Game<'_> {
             knockback: (strength, xd, zd),
             disable_blocking,
             item: self.main_hand_custom_name(),
-            ignite: self.weapon_ignite_seconds(),
         })
     }
 
@@ -227,7 +228,6 @@ impl Game<'_> {
     /// `stabAttack`'s hurt, pushes and dismount on the victim, then
     /// `awardKillScore` and the victim's thorns. None when the victim has gone.
     fn land_player_stab(&mut self, attacker: u32, s: &PlayerStab) -> Option<Landed> {
-        let victim = Victim::Guest(s.victim);
         let host = self.lan.as_ref()?;
         let g = host.hub.guest(s.victim).filter(|g| !g.dead)?;
         let id = g.entity_id;
@@ -267,12 +267,6 @@ impl Game<'_> {
                         );
                     }
                 }
-                if hurt
-                    && s.ignite > 0.0
-                    && let Some(p) = g.player.as_mut()
-                {
-                    let _ = p.ignite_for_ticks((s.ignite * 20.0) as i32);
-                }
                 // `Player.stabAttack`: a type in `cannot_be_dismounted_by_item_usage` stays seated.
                 let dismounted = s.dismounts
                     && g.riding.is_some()
@@ -283,7 +277,6 @@ impl Game<'_> {
                 if dismounted {
                     g.stop_riding();
                 }
-                let thorns = if hurt { g.thorns_damage() } else { Vec::new() };
                 let (feet, width, height) = g.player.as_ref().map_or(([0.0; 3], 0.6, 1.8), |p| {
                     (
                         [p.position.x, p.position.y, p.position.z],
@@ -291,7 +284,7 @@ impl Game<'_> {
                         f64::from(p.dimensions.height),
                     )
                 });
-                let landed = Landed {
+                Landed {
                     contact: s.contact,
                     hurt,
                     magic: s.magic,
@@ -301,13 +294,10 @@ impl Game<'_> {
                     feet,
                     width,
                     height,
-                };
-                (landed, thorns)
+                }
             })
         };
-        let (landed, thorns) = self.guest_struck_by(s.victim, land)?;
-        self.pvp_aftermath(victim, Some(attacker), thorns);
-        Some(landed)
+        self.guest_struck_by(s.victim, land)
     }
 
     /// The attacker's side of the stabs that affected their victims
@@ -332,7 +322,12 @@ impl Game<'_> {
             if let Some(stack) = self.held().cloned() {
                 self.award_stat("used", &stack.item, 1);
                 if l.hurt {
-                    self.post_attack_bursts(&stack, "minecraft:player");
+                    self.post_player_melee(
+                        l.id as u32,
+                        "minecraft:player",
+                        "minecraft:spear",
+                        Some(&stack),
+                    );
                 }
                 self.weapon_wear(&stack);
             }

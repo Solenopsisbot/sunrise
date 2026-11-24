@@ -91,7 +91,7 @@ impl Game<'_> {
             r.cart_lerps.remove(&p.id);
             r.lerps.remove(&p.id);
         }
-        if !self.spawn_remote_object(p.id, &kind, p.position, (rotation[0], rotation[1]), p.data) {
+        if !self.spawn_remote_object(p.id, &kind, p.position, rotation, p.data) {
             self.spawn_added_projectile(&p, &kind, (rotation[0], rotation[1]), replace);
         }
         // Entity.recreateFromPacket: objects must exist before applying motion.
@@ -225,7 +225,7 @@ impl Game<'_> {
         if let Some(o) = orb_at {
             let mut r = sunrise_client::random_source::create();
             let pitch = (r.next_float() - r.next_float()) * 0.35 + 0.9;
-            self.audio.play(
+            self.play_audio(
                 "minecraft:entity.experience_orb.pickup",
                 Some([o.x, o.y, o.z]),
                 0.1,
@@ -234,8 +234,7 @@ impl Game<'_> {
         } else if let Some(at) = at {
             let mut r = sunrise_client::random_source::create();
             let pitch = ((r.next_float() - r.next_float()) * 0.7 + 1.0) * 2.0;
-            self.audio
-                .play("minecraft:entity.item.pickup", Some(at), 0.2, pitch);
+            self.play_audio("minecraft:entity.item.pickup", Some(at), 0.2, pitch);
         }
         // ItemPickupParticle toward the collector (this player, another one or a mob).
         let collector = if self
@@ -274,9 +273,22 @@ impl Game<'_> {
                 collector,
             );
         }
-        // An orb stays: the server may still hold merged ones in it.
+        // An orb stays: the server may still hold merged ones in it. An item shrinks by the
+        // amount taken and goes only when its stack is empty, so a survivor stays in view.
         if !orb {
-            self.remove_entity(p.item);
+            let remaining = self
+                .dropped
+                .iter_mut()
+                .find(|d| d.id == p.item as u32)
+                .map(|item| {
+                    if item.stack.count > 0 {
+                        item.stack.count = item.stack.count.saturating_sub(p.amount.max(0) as u32);
+                    }
+                    item.stack.count
+                });
+            if remaining.is_none_or(|count| count == 0) {
+                self.remove_entity(p.item);
+            }
         }
     }
 

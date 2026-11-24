@@ -110,6 +110,14 @@ pub trait PlayerSessionBackend {
     /// `None` when there is none. Refuses with `PlayerWorldRefusal`: `Client`,
     /// and `Stale` for a stale or offline player.
     fn player_nickname(&self, player: PlayerRef) -> Result<Option<&str>, PlayerWorldRefusal>;
+    /// Side: server.
+    /// `ServerPlayer.getPostEffects`: the ordered list of post-effect identifiers currently
+    /// active on this player (shared with `/posteffect`, persisted with playerdata, and synced
+    /// to their client via `ClientboundPostEffectsPacket`). Works for parked, acting, displaced
+    /// and fake players. Refuses with `PlayerWorldRefusal`: `Client` on a client, and `Stale`
+    /// for a stale or offline player.
+    fn player_post_effects(&self, player: PlayerRef)
+    -> Result<Vec<Identifier>, PlayerWorldRefusal>;
 }
 /// The handles' writes of the `player_session` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -182,4 +190,35 @@ pub trait PlayerSessionBackendMut {
         key: &JavaString,
         value: Option<&Tag>,
     ) -> Result<(), PlayerPersistentDataError>;
+    /// Side: server.
+    /// `ServerPlayer.addPostEffect`: appends `effect` to the player's active post-effect list
+    /// if not already present, marks the list dirty so the server sends
+    /// `ClientboundPostEffectsPacket` at the end of the player's tick, and returns `Ok(true)`.
+    /// Returns `Ok(false)` without marking dirty when `effect` is already active. Works for
+    /// parked, acting, displaced and fake players; shares state with `/posteffect`. Refuses
+    /// with `PlayerWorldRefusal`: `Client` on a client, and `Stale` for a stale or offline
+    /// player.
+    fn player_add_post_effect(
+        &mut self,
+        player: PlayerRef,
+        effect: &Identifier,
+    ) -> Result<bool, PlayerWorldRefusal>;
+    /// Side: server.
+    /// `ServerPlayer.removePostEffect`: removes `effect` from the player's active post-effect
+    /// list, marks the list dirty for `ClientboundPostEffectsPacket` at the end of the player's
+    /// tick, and returns `Ok(true)`. Returns `Ok(false)` without marking dirty when `effect`
+    /// was not active. Works for parked, acting, displaced and fake players. Refuses with
+    /// `PlayerWorldRefusal`: `Client` on a client, and `Stale` for a stale or offline player.
+    fn player_remove_post_effect(
+        &mut self,
+        player: PlayerRef,
+        effect: &Identifier,
+    ) -> Result<bool, PlayerWorldRefusal>;
+    /// Side: server.
+    /// `ServerPlayer.clearPostEffects`: clears every active post effect on the player, marks
+    /// the list dirty for `ClientboundPostEffectsPacket` at the end of the player's tick, and
+    /// returns `Ok(true)`. Returns `Ok(false)` without marking dirty when the list was already
+    /// empty. Works for parked, acting, displaced and fake players. Refuses with
+    /// `PlayerWorldRefusal`: `Client` on a client, and `Stale` for a stale or offline player.
+    fn player_clear_post_effects(&mut self, player: PlayerRef) -> Result<bool, PlayerWorldRefusal>;
 }

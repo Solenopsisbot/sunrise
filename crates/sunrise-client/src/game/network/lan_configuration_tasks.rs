@@ -223,7 +223,7 @@ impl Game<'_> {
         let task = match task {
             SpawnTask::Start(player) => {
                 let host = self.lan.as_ref().ok_or("Server closed")?;
-                let shapes = host.hub.config.levels;
+                let shapes = host.hub.config.levels.clone();
                 let owner = host
                     .owner
                     .as_ref()

@@ -389,7 +389,7 @@ impl Game<'_> {
             self.inv_clicks.skip_release();
             let page = self.creative_screen.page as i64 + step;
             if (0..self.creative_screen.pages() as i64).contains(&page) {
-                self.audio.play_button_click();
+                self.play_audio_button_click();
                 self.creative_screen.set_page(page as u32);
                 self.refresh_saved_hotbars();
             }

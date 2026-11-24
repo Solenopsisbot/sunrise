@@ -2745,3 +2745,122 @@ fn controller_activates_the_selected_mount_and_edits_its_field() {
         });
     });
 }
+
+/// NeoForge's `IConfigScreenFactory`: the Mods screen's Config opens the mod's own screen over
+/// the Mods screen, in a world and on the title, and closing it (Escape's `close_mod_screen`)
+/// returns there. A factory answering `false` keeps the Mods screen; a mod without one keeps
+/// its settings page.
+#[test]
+#[ignore = "daily"]
+fn config_opens_the_mods_own_screen_and_closing_it_returns_to_the_mods_screen() {
+    use sunrise_client::options_ui::{Event, Page};
+    if run_fresh_cases(
+        "game::native_hooks::base::screen_widgets_tests::config_opens_the_mods_own_screen_and_closing_it_returns_to_the_mods_screen",
+        "SUNRISE_CONFIG_SCREEN_CHILD",
+        &["window"],
+    ) {
+        return;
+    }
+    struct ConfigScreen {
+        open: Arc<AtomicBool>,
+        asked: Arc<AtomicUsize>,
+    }
+    #[mod_api::__subscriptions]
+    impl Hooks for ConfigScreen {
+        fn register(
+            &self,
+            registrar: &mut dyn mod_api::Registrar,
+            _: &mod_api::RegistrationContext,
+        ) {
+            let (open, asked) = (self.open.clone(), self.asked.clone());
+            registrar
+                .register_config_screen(Arc::new(move |_: &dyn ClientHost| {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    open.load(Ordering::SeqCst)
+                }))
+                .unwrap();
+            let refused = registrar.register_config_screen(Arc::new(|_: &dyn ClientHost| true));
+            assert_eq!(
+                refused,
+                Err("mod configured registers a second config screen".into())
+            );
+        }
+    }
+    struct NoScreen;
+    #[mod_api::__subscriptions]
+    impl Hooks for NoScreen {}
+
+    let open = Arc::new(AtomicBool::new(true));
+    let asked = Arc::new(AtomicUsize::new(0));
+    let mods = vec![
+        ModEntry::new(
+            "configured",
+            Box::new(ConfigScreen {
+                open: open.clone(),
+                asked: asked.clone(),
+            }),
+        ),
+        ModEntry::new("plain", Box::new(NoScreen)),
+    ];
+    with_mods(mods.into(), || {
+        with_client_game(|game| {
+            let (_event_loop, _) = attach_offscreen_window(game);
+            assert!(mod_api::__private::has_config_screen("configured"));
+            assert!(!mod_api::__private::has_config_screen("plain"));
+            game.settings.mods.installed = ["configured", "plain"]
+                .map(|id| sunrise_client::mod_list::Installed {
+                    id: id.into(),
+                    title: id.into(),
+                    description: String::new(),
+                    problem: None,
+                    dev: false,
+                    native: Some(sunrise_client::mod_list::NativePage {
+                        own_screen: mod_api::__private::has_config_screen(id),
+                        ..Default::default()
+                    }),
+                })
+                .into();
+            let config = |game: &mut Game<'_>| {
+                game.handle_option_events(vec![Event::ModConfigScreen(0)])
+                    .unwrap();
+            };
+            let on_mods = |game: &Game<'_>| {
+                assert_eq!(game.screen, Screen::Options);
+                assert_eq!(game.ui.options.page(), Page::Mods);
+            };
+
+            // In a world: over the pause menu's Options > Mods.
+            game.open_options_at(false, Page::Mods);
+            config(game);
+            assert_eq!(asked.load(Ordering::SeqCst), 1);
+            assert_eq!(game.screen, Screen::Mod);
+            assert_eq!(game.mod_screen(), Some("configured"));
+            game.close_mod_screen();
+            on_mods(game);
+            assert_eq!(game.mod_screen(), None);
+
+            // Declined: the Mods screen stays.
+            open.store(false, Ordering::SeqCst);
+            config(game);
+            assert_eq!(asked.load(Ordering::SeqCst), 2);
+            on_mods(game);
+
+            // On the title: closing returns to the Mods screen, not the title.
+            open.store(true, Ordering::SeqCst);
+            let saves = std::env::temp_dir().join("sunrise-config-screen-test-no-saves");
+            game.title = Some(game.new_title(saves));
+            game.open_options_at(true, Page::Mods);
+            config(game);
+            assert_eq!(game.mod_screen(), Some("configured"));
+            game.close_mod_screen();
+            on_mods(game);
+            assert!(game.title.is_some());
+
+            // A mod screen opened another way still closes to the title.
+            assert!(game.mod_screen_open("configured"));
+            game.close_mod_screen();
+            assert_eq!(game.screen, Screen::Playing);
+            assert_eq!(game.mod_screen(), None);
+        });
+    });
+}

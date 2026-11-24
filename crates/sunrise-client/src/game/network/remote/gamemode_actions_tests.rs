@@ -13,7 +13,7 @@ use sunrise_protocol::packets::{
     play::{self, Clientbound as C, Serverbound as S},
 };
 
-fn add_entity(game: &mut Game<'_>, id: i32, kind: &str, position: [f64; 3]) {
+pub(super) fn add_entity(game: &mut Game<'_>, id: i32, kind: &str, position: [f64; 3]) {
     let kind = game
         .remote
         .as_ref()

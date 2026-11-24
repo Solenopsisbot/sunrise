@@ -11,7 +11,15 @@ impl ClientHost for FakeHost {}
 crate::impl_client_host_areas!(FakeHost);
 
 struct StubDraw;
-impl DrawContext for StubDraw {}
+impl DrawContext for StubDraw {
+    fn with_scissor(
+        &mut self,
+        _: [f32; 4],
+        _: &mut dyn FnMut(&mut dyn DrawContext),
+    ) -> Result<(), crate::GuiClipRefusal> {
+        unreachable!("widgets under test do not open a scissor")
+    }
+}
 
 #[test]
 fn button_builder_defaults_modifiers_and_callback_unpack() {

@@ -235,7 +235,7 @@ impl Game<'_> {
             self.debug,
             reduced,
         ) {
-            d.group(debug_entries::group_key(group), lines);
+            d.group(group, lines);
         }
     }
 

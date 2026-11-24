@@ -87,7 +87,7 @@ PrepareSpawnTask.keepAlive	skip:other		no preparing state to hold spawn chunks f
 PrepareSpawnTask.close	skip:other		no preparing state to cancel
 PrepareSpawnTask.Preparing.tick	missing		minor: no spawn-chunk load (radius 3) and no LOAD_PLAYER_CHUNKS progress before the join
 PrepareSpawnTask.Ready.keepAlive	skip:other		no waiting state to hold spawn chunks for
-PrepareSpawnTask.Ready.spawn	port	crates/sunrise-client/src/lan/hub.rs::Hub::place_new_player	the saved state is loaded in lan_guest_joined; placeNewPlayer is here
+PrepareSpawnTask.Ready.spawn	port	crates/sunrise-client/src/lan/hub.rs::Hub::begin_player_join	the saved state is loaded in lan_guest_joined; placeNewPlayer is here
 ServerResourcePackConfigurationTask.start	port	crates/sunrise-client/src/lan/conn.rs::offer_pack	sends ResourcePackPush; the answer is awaited
 SynchronizeRegistriesTask.sendRegistries	port	crates/sunrise-client/src/lan/data.rs::SyncData::registry_packets	registry data; the tags are sent by login_and_configure
 SynchronizeRegistriesTask.handleResponse	port	crates/sunrise-client/src/lan/conn.rs::login_and_configure	known-pack answer: only the core pack is offered, so it is all or the core pack

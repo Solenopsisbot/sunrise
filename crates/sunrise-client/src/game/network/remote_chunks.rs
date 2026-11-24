@@ -71,9 +71,11 @@ impl Game<'_> {
     pub(in crate::game) fn client_chunk_unload(&mut self, x: i32, z: i32, level_stays: bool) {
         self.forget_chunk_passages(x, z);
         if mod_api::__private::listened(mod_api::HookId::ClientChunkUnload)
-            && let Some(dimension) = self.client_chunk_dimension()
+            && let Some(level) = self.native_client_level()
         {
-            self.native_client_chunk_unload(&dimension, [x, z]);
+            // LevelEvent.Unload may already have been posted, but the columns
+            // still belong to the installed level until they are released.
+            self.native_client_chunk_unload(level.dimension_id(), [x, z]);
         }
         if level_stays && let Some(level) = self.native_client_level() {
             self.notify_chunk_block_entities_unloaded(level, (x, z));

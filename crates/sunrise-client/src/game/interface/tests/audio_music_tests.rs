@@ -205,7 +205,8 @@ fn music_selection_and_gain_follow_the_camera_across_a_biome_boundary() {
                 let biomes = game
                     .res
                     .biomes()
-                    .with_packs([("test:biome_a", &a), ("test:biome_b", &b)]);
+                    .with_packs([("test:biome_a", &a), ("test:biome_b", &b)])
+                    .unwrap();
                 for (x, name) in [(-20, "test:biome_a"), (20, "test:biome_b")] {
                     let mut chunk = Chunk::empty(x >> 4, 0);
                     chunk.set_biome_cell(

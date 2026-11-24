@@ -135,6 +135,7 @@ pub struct PoolElementRef {
     projection: Projection,
     ground_level_delta: i32,
     empty: bool,
+    template_location: Option<Identifier>,
 }
 impl std::fmt::Debug for PoolElementRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -143,6 +144,7 @@ impl std::fmt::Debug for PoolElementRef {
             .field("projection", &self.projection)
             .field("ground_level_delta", &self.ground_level_delta)
             .field("empty", &self.empty)
+            .field("template_location", &self.template_location)
             .finish_non_exhaustive()
     }
 }
@@ -159,6 +161,12 @@ impl PoolElementRef {
     /// and ends a jigsaw's attempts.
     pub fn is_empty(&self) -> bool {
         self.empty
+    }
+    /// `SinglePoolElement.getTemplateLocation`: the template a single or
+    /// legacy single element places, the name a layout rule such as a cap per
+    /// piece goes by. `None` for other element types.
+    pub fn template_location(&self) -> Option<&Identifier> {
+        self.template_location.as_ref()
     }
     /// The element as a mod's element of type `T`, when it is one. Vanilla's
     /// elements, and other types' elements, give `None`.
@@ -177,6 +185,7 @@ pub fn pool_element_ref(
     projection: Projection,
     ground_level_delta: i32,
     empty: bool,
+    template_location: Option<Identifier>,
 ) -> PoolElementRef {
     PoolElementRef {
         engine,
@@ -184,6 +193,7 @@ pub fn pool_element_ref(
         projection,
         ground_level_delta,
         empty,
+        template_location,
     }
 }
 
@@ -254,6 +264,46 @@ pub fn template_pool(
         templates,
         fallback,
         max_size,
+    }
+}
+
+/// The free space a jigsaw's children are placed in: `JigsawPlacement.Placer`'s
+/// `MutableObject<VoxelShape>`, a container box less the boxes already placed
+/// in it. A layout starts with one over its reach, less the start piece's box.
+/// A jigsaw whose attached piece would start inside its own piece's box places
+/// that child in a space of its own over that box instead, made once per
+/// piece.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+// no wire: a layout's working state on the worldgen worker.
+pub struct JigsawSpace {
+    container: BoundingBox,
+    placed: Vec<BoundingBox>,
+}
+impl JigsawSpace {
+    /// The whole of `container`, inclusive (`Shapes.create(AABB.of(box))`).
+    pub fn new(container: BoundingBox) -> Self {
+        Self {
+            container,
+            placed: Vec::new(),
+        }
+    }
+    /// Whether `bounding_box` lies wholly in the free space: vanilla's
+    /// `!Shapes.joinIsNotEmpty(free, Shapes.create(AABB.of(box).deflate(0.25)),
+    /// BooleanOp.ONLY_SECOND)`.
+    pub fn fits(&self, bounding_box: &BoundingBox) -> bool {
+        (0..3).all(|i| {
+            bounding_box.min[i] >= self.container.min[i]
+                && bounding_box.max[i] <= self.container.max[i]
+        }) && !self
+            .placed
+            .iter()
+            .any(|placed| placed.intersects(bounding_box))
+    }
+    /// Take `bounding_box` out of the free space
+    /// (`Shapes.joinUnoptimized(free, Shapes.create(AABB.of(box)), ONLY_FIRST)`).
+    pub fn remove(&mut self, bounding_box: BoundingBox) {
+        self.placed.push(bounding_box);
     }
 }
 
@@ -459,6 +509,7 @@ impl ElementPlacement {
 /// A registered API behaviour; the game builds its engine adapter at startup.
 pub(crate) struct PoolElementTypeInfo {
     pub(crate) id: Box<str>,
+    pub(crate) mod_id: &'static str,
     pub(crate) ty: Arc<dyn PoolElementType>,
 }
 
@@ -466,10 +517,10 @@ pub(crate) struct PoolElementTypeInfo {
 /// boundary.
 // hidden: the game's startup adapter reads the registered behaviours; mods declare them through the registrar.
 #[doc(hidden)]
-pub fn pool_element_type_declarations() -> Vec<(String, Arc<dyn PoolElementType>)> {
+pub fn pool_element_type_declarations() -> Vec<(String, &'static str, Arc<dyn PoolElementType>)> {
     crate::parts::installed_pool_element_type_list()
         .iter()
-        .map(|info| (info.id.to_string(), info.ty.clone()))
+        .map(|info| (info.id.to_string(), info.mod_id, info.ty.clone()))
         .collect()
 }
 

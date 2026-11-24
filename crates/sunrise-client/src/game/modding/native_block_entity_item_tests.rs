@@ -239,7 +239,7 @@ fn internal_slots_preserve_automation_limits_and_nested_transactions() {
             });
             assert_eq!(get(game, 0), Ok(Some(dirt)));
             game.native_lifecycle
-                .begin_open(mod_api::Authority::IntegratedServer);
+                .begin_open(Some(mod_api::Authority::IntegratedServer));
             assert_eq!(get(game, 0), Err(Error::Stale));
             assert!(game.transactions.is_empty());
         });

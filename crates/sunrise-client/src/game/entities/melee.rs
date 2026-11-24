@@ -70,8 +70,7 @@ impl Game<'_> {
         target: Option<(Aabb, mace::Spared)>,
         scale: f32,
     ) {
-        self.audio
-            .play("minecraft:entity.player.attack.sweep", from, 1.0, 1.0);
+        self.play_audio("minecraft:entity.player.attack.sweep", from, 1.0, 1.0);
         if let Some((area, mob)) = target {
             self.sweep_damage(area, mob, scale);
         }
@@ -114,16 +113,14 @@ impl Game<'_> {
         let player = self.player.as_ref();
         let from = player.map(|p| [p.position.x, p.position.y, p.position.z]);
         if full && player.is_some_and(|p| p.sprinting) {
-            self.audio
-                .play("minecraft:entity.player.attack.knockback", from, 1.0, 1.0);
+            self.play_audio("minecraft:entity.player.attack.knockback", from, 1.0, 1.0);
         }
         let crit = living.is_some() && crit;
         if let Some(at) = sweep {
             self.sweep_attack(at, from, Some((area, spared)), scale);
         }
         if crit {
-            self.audio
-                .play("minecraft:entity.player.attack.crit", from, 1.0, 1.0);
+            self.play_audio("minecraft:entity.player.attack.crit", from, 1.0, 1.0);
             if let Some(id) = living {
                 self.area_critical_hit(id, area, false);
             }
@@ -133,7 +130,7 @@ impl Game<'_> {
             } else {
                 "minecraft:entity.player.attack.weak"
             };
-            self.audio.play(sound, from, 1.0, 1.0);
+            self.play_audio(sound, from, 1.0, 1.0);
         }
         // Player.magicCrit: the enchantments added damage.
         if let Some(id) = magic {
@@ -273,7 +270,7 @@ impl Game<'_> {
         // Player.onAttack: the blow starts the attack strength again, hurt or not.
         self.attack_ticks = 0;
         if admitted {
-            if self.extra_knockback(kind, scale).1 {
+            if scale > 0.9 && self.player.as_ref().is_some_and(|p| p.sprinting) {
                 self.play_at_feet("minecraft:entity.player.attack.knockback");
             }
             self.sweep_decision(scale, false, kind);
@@ -302,12 +299,11 @@ impl Game<'_> {
             return;
         }
         let sweep = self.sweep_attack_position(scale, crit, &target_kind);
-        let (knockback, knockback_attack) = self.extra_knockback(&target_kind, scale);
+        let knockback_attack = scale > 0.9 && self.player.as_ref().is_some_and(|p| p.sprinting);
         let player = self.player.as_ref();
         let from = player.map(|p| [p.position.x, p.position.y, p.position.z]);
         if knockback_attack {
-            self.audio
-                .play("minecraft:entity.player.attack.knockback", from, 1.0, 1.0);
+            self.play_audio("minecraft:entity.player.attack.knockback", from, 1.0, 1.0);
         }
         let old_health = self.mobs[index].health;
         let source = match from {
@@ -315,14 +311,7 @@ impl Game<'_> {
             None => sunrise_client::mobs::Damage::of(sunrise_client::mobs::DamageKind::Generic),
         };
         let (id, join) = (self.mobs[index].id, self.mobs[index].join);
-        let (landed, killed) = self.hurt_by_player(index, amount, source);
-        if killed
-            && let Some(i) = self.mob_index.find(&self.mobs, id)
-            && self.mobs[i].join == join
-            && !self.mobs[i].removed
-        {
-            self.native_kill_event(i);
-        }
+        let (landed, _) = self.hurt_by_player(index, amount, source);
         let Some(index) = self
             .mob_index
             .find(&self.mobs, id)
@@ -359,10 +348,13 @@ impl Game<'_> {
             });
         }
         if landed {
+            let (knockback, _) = self.extra_knockback(&target_kind, id, scale, None);
             if knockback > 0.0 {
                 let (xd, zd) = self.extra_knockback_direction();
+                let aim = self.attacker_aim(source.attacker);
                 let plan = self.prepare_knockback_credit(self.mobs[index].id as i32, None, &attack);
                 let mut credit = plan.lend(&mut self.last_hurt_by_player);
+                self.mobs[index].attacker_aim = aim;
                 let level = crate::game::entity::damage_level_of!(self, &attack, &mut credit, None);
                 self.mobs[index].knockback_full(
                     level,
@@ -373,6 +365,7 @@ impl Game<'_> {
                     amount,
                     true,
                 );
+                self.mobs[index].attacker_aim = None;
                 self.stop_sprint_after_extra_knockback();
             }
             let mob = &self.mobs[index];
@@ -415,6 +408,7 @@ impl Game<'_> {
                     [0.1, 0.0, 0.1],
                     0.2,
                     (actual * 0.5) as u32,
+                    None,
                 );
                 // The players a server serves are sent them too.
                 self.lan_send_particles(lan_particles::QueuedParticle {
@@ -445,7 +439,7 @@ impl Game<'_> {
                 self.sweep_attack(at, from, Some(target), scale);
             }
             if crit || sweep.is_none() {
-                self.audio.play(sound, from, 1.0, 1.0);
+                self.play_audio(sound, from, 1.0, 1.0);
             }
             self.remember_player_target(Some(id));
             // The hurt or death sound the mob raised (getHurtSound / getDeathSound,
@@ -463,8 +457,7 @@ impl Game<'_> {
             for event in queued {
                 match event {
                     sunrise_client::mobs::MobEvent::Sound(s, at, volume, pitch) => {
-                        self.audio
-                            .play(&format!("minecraft:{s}"), Some(at), volume, pitch);
+                        self.play_audio(&format!("minecraft:{s}"), Some(at), volume, pitch);
                     }
                     sunrise_client::mobs::MobEvent::Infested { at, velocities } => {
                         infested.push((at, velocities))
@@ -482,7 +475,7 @@ impl Game<'_> {
                 && self.mobs[i].join == join
                 && !self.mobs[i].removed
             {
-                self.weapon_hit(i);
+                self.weapon_hit(i, source);
             }
             // Player.attack: causeFoodExhaustion(0.1F) only when the hit hurt
             // (inside `if (wasHurt)`), after damageStatsAndHearts.
@@ -492,8 +485,7 @@ impl Game<'_> {
                 p.cause_food_exhaustion(0.1);
             }
         } else {
-            self.audio
-                .play("minecraft:entity.player.attack.nodamage", from, 1.0, 1.0);
+            self.play_audio("minecraft:entity.player.attack.nodamage", from, 1.0, 1.0);
         }
     }
     /// `Player.attack`'s damage against `target_kind` (with the attack
@@ -530,7 +522,7 @@ impl Game<'_> {
         // enchantment damage: checked before the mace's smash bonus is added.
         let damaging = amount > 0.0 || enchant_bonus * scale > 0.0;
         // Item.getAttackDamageBonus (a mace's smash), before the critical hit.
-        amount += self.smash_damage_bonus(target_kind);
+        amount += self.smash_damage_bonus(target_kind, victim);
         let vanilla_crit = living && self.critical_attack(scale);
         let mut crit = vanilla_crit;
         let mut multiplier = if vanilla_crit { 1.5 } else { 1.0 };

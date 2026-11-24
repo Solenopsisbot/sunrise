@@ -154,7 +154,7 @@ mod tests {
             BlockUpdateFlags, ENERGY, ENTITY_ENERGY, ENTITY_FLUIDS, Holder, move_energy,
             resource_util::move_resources,
         };
-        use mod_platform::__private::part_tests::{ROBOT_FLUID, game_thread};
+        use mod_platform::__private::part_tests::{game_thread, robot_fluid_key};
         use sunrise_client::chunk::Chunk;
         use sunrise_client::containers::{ModBlockEntity, ModBlockEntityFields};
         use sunrise_client::entities::ArmorStand;
@@ -230,7 +230,9 @@ mod tests {
             });
             assert!(abort.is_err());
             assert_eq!((source.amount(host), target.amount(host)), (700, 100));
-            ROBOT_FLUID.set(host, Holder::Entity(14), 600).unwrap();
+            robot_fluid_key()
+                .set(host, Holder::Entity(14), 600)
+                .unwrap();
             let tank = stand.capability(host, &ENTITY_FLUIDS, None).unwrap();
             let from = other.capability(host, &ENTITY_FLUIDS, None).unwrap();
             assert_eq!(

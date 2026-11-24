@@ -57,11 +57,19 @@ fn help_lists_the_everyday_commands_and_each_command_says_its_usage() {
 #[test]
 #[ignore = "daily"]
 fn an_unknown_command_is_an_error() {
-    // Removed and renamed verbs get the ordinary refusal, before any work.
+    // Removed and renamed verbs get the ordinary refusal, before any work, with or without
+    // `--help`: the message, not just a failed exit, says the command is unknown.
     for name in ["frobnicate", "update", "fits", "publish", "registry"] {
-        let output = run(&[name]);
-        assert_eq!(output.status.code(), Some(1), "{name}");
-        assert!(output.stdout.is_empty(), "{name}");
+        for args in [&[name][..], &[name, "--help"][..]] {
+            let output = run(args);
+            assert_eq!(output.status.code(), Some(1), "{args:?}");
+            assert!(output.stdout.is_empty(), "{args:?}");
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains(&format!("{name:?} is not a cargo sunrise-mod command")),
+                "{args:?}: {error}"
+            );
+        }
     }
     let output = run(&["release", "frobnicate", "--help"]);
     assert!(!output.status.success());

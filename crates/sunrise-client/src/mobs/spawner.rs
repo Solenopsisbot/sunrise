@@ -679,9 +679,15 @@ impl SpawnerExt for Spawner {
                 mob.width as f32 * scale,
                 mob.height as f32 * scale,
             );
+            // `loadEntityRecursive` comes before the position check: the configured entity is
+            // loaded now, and the check reads it.
+            if !data.unconfigured() && !l.load_configured(&data.entity, &id, placed, yaw) {
+                self.delay(random, events);
+                return;
+            }
             let pending = spawn_selection::Pending {
                 yaw,
-                fresh: data.unconfigured(),
+                configured: (!data.unconfigured()).then_some(&data.entity),
             };
             let position_ok =
                 spawn_selection::position_ok(l, &id, Reason::Spawner, placed, pending, || {

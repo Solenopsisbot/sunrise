@@ -94,8 +94,9 @@ pub struct RenderAssets {
     pub(crate) sprite_names: Vec<Option<String>>,
     /// The layers of the texture files read on their own (emissive overlays), by raw name.
     pub file_layers: std::collections::BTreeMap<String, u32>,
-    /// OptiFine's emissive block overlays: base sprite and overlay sprite names.
-    pub emissive: Vec<(String, String)>,
+    /// Emissive block overlays resolved during bake/reload (mod-registered and OptiFine),
+    /// sorted by base sprite layer for `Globals.emissive_layers` and bound to [`Self::generation`].
+    pub emissive_layers: Vec<[u32; 4]>,
     pub translucent_layers: Vec<bool>,
     /// Each layer's `MipmapGenerator` settings.
     pub sprite_mips: Vec<crate::mipmap::Settings>,
@@ -132,7 +133,7 @@ impl RenderAssets {
             sprite_layers: Default::default(),
             sprite_names: Vec::new(),
             file_layers: Default::default(),
-            emissive: Vec::new(),
+            emissive_layers: Vec::new(),
             translucent_layers: Vec::new(),
             sprite_mips: Vec::new(),
             pbr_normals: Vec::new(),
@@ -366,6 +367,14 @@ impl Assets {
     pub fn reload(&self, root: &crate::resource_source::ResourceRoot) -> Result<RenderAssets> {
         RenderAssets::load(root, self)
     }
+    /// [`Assets::reload`] with mod-registered emissive overlays collected for this reload.
+    pub fn reload_with_emissive(
+        &self,
+        root: &crate::resource_source::ResourceRoot,
+        emissive_sprites: &[mod_api::Answered<mod_api::EmissiveSpriteRegistration>],
+    ) -> Result<RenderAssets> {
+        RenderAssets::load_with_parsed(root, self, true, None, emissive_sprites)
+    }
     /// [`Assets::reload`] with the model library already parsed.
     ///
     /// Parsing it reads every model file under `assets/`, which needs no
@@ -378,7 +387,17 @@ impl Assets {
         root: &crate::resource_source::ResourceRoot,
         parsed: crate::model_library::ParsedModels,
     ) -> Result<RenderAssets> {
-        RenderAssets::load_with_parsed(root, self, true, Some(parsed))
+        RenderAssets::load_with_parsed(root, self, true, Some(parsed), &[])
+    }
+    /// [`Assets::reload_with_models`] with mod-registered emissive overlays collected for this
+    /// resource load.
+    pub fn reload_with_models_and_emissive(
+        &self,
+        root: &crate::resource_source::ResourceRoot,
+        parsed: crate::model_library::ParsedModels,
+        emissive_sprites: &[mod_api::Answered<mod_api::EmissiveSpriteRegistration>],
+    ) -> Result<RenderAssets> {
+        RenderAssets::load_with_parsed(root, self, true, Some(parsed), emissive_sprites)
     }
     /// [`Assets::reload`] for a server, which has no sprites or baked models.
     pub fn reload_for_server(
@@ -398,7 +417,7 @@ impl RenderAssets {
         assets: &Assets,
         draws: bool,
     ) -> Result<Self> {
-        Self::load_with_parsed(root, assets, draws, None)
+        Self::load_with_parsed(root, assets, draws, None, &[])
     }
     /// `parsed`: the model library when a caller parsed it ahead of this
     /// (see [`Assets::reload_with_models`]); otherwise it is parsed here.
@@ -407,6 +426,7 @@ impl RenderAssets {
         assets: &Assets,
         draws: bool,
         parsed: Option<crate::model_library::ParsedModels>,
+        emissive_sprites: &[mod_api::Answered<mod_api::EmissiveSpriteRegistration>],
     ) -> Result<Self> {
         let registry = assets.registry;
         let mut sprites = if draws {
@@ -456,7 +476,9 @@ impl RenderAssets {
         };
         if draws {
             // Fluids are drawn by the fluid renderer, not block models; breaking
-            // progress uses the destroy-stage overlays.
+            // progress uses the destroy-stage overlays. Ensure the missing texture
+            // sprite is always present in the blocks atlas for missing-sprite fallbacks.
+            sprites.insert_in_blocks("minecraft:missingno")?;
             for name in [
                 "water_still",
                 "water_flow",
@@ -497,9 +519,7 @@ impl RenderAssets {
         } else {
             Default::default()
         };
-        let mut emissive = Vec::new();
         let mut connected = if draws {
-            crate::native_emissive::load(root.source(), &mut sprites);
             // A side's sprite, for rules that connect by tile: the first quad facing it.
             let catalog = &models.catalog;
             let mut found = Vec::new();
@@ -549,9 +569,11 @@ impl RenderAssets {
         }
         // After the connected tiles: a tile identical to a block shares its layer, and the
         // overlays skip shared layers.
-        if draws {
-            emissive = crate::native_emissive::load_optifine(root.source(), &mut sprites);
-        }
+        let emissive_layers = if draws {
+            crate::native_emissive::load_layers(root.source(), emissive_sprites, &mut sprites)
+        } else {
+            Vec::new()
+        };
         if draws {
             sprites.save_disk_cache();
             sprites.finish();
@@ -578,7 +600,7 @@ impl RenderAssets {
             sprite_layers: sprites.layers,
             sprite_names,
             file_layers: sprites.files,
-            emissive,
+            emissive_layers,
             translucent_layers: sprites.translucent,
             sprite_mips: sprites.mips,
             pbr_normals: sprites.normals,

@@ -68,10 +68,9 @@ pub trait PlayerModesBackendMut {
     /// Stores a server player's `Abilities` and tells their client
     /// (`ServerPlayer.onUpdateAbilities`). They stay as written until the
     /// player's game mode changes (`GameType.updatePlayerAbilities`), and are
-    /// saved with the player. A speed that is not finite refuses the write
-    /// (vanilla's setters take any float). Returns false for a
-    /// stale or unavailable player, a displaced outer player, and a speed
-    /// that is not finite.
+    /// saved with the player. The two speed values are stored as supplied, like
+    /// `Abilities.setFlyingSpeed` and `setWalkingSpeed`. Returns false for a stale,
+    /// unavailable or displaced outer player.
     fn player_set_abilities(&mut self, player: PlayerRef, abilities: PlayerAbilities) -> bool;
     /// Side: server.
     /// Changes a player's game mode as `ServerPlayer.setGameMode` and

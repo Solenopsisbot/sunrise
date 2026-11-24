@@ -667,75 +667,6 @@ impl Game<'_> {
 
     /// The menu `conn` has open as a `menu_slot_changed` target with its two snapshots, when it is
     /// a listening mod menu whose storage holds unreported changes.
-    fn click_slot_changed_target(
-        &self,
-        conn: u32,
-    ) -> Option<(
-        SlotChangedMenu,
-        Vec<Option<ItemStack>>,
-        Vec<Option<ItemStack>>,
-    )> {
-        let guest = self.lan.as_ref()?.hub.guest(conn)?;
-        let open = guest.menu.as_ref()?;
-        let layout = open.mod_type?;
-        if !mod_api::__private::menu_listens(mod_api::HookId::MenuSlotChanged, layout.id) {
-            return None;
-        }
-        let before = open
-            .slot_changed_seen
-            .clone()
-            .or_else(|| (!open.sent.is_empty()).then(|| resized_items(&open.sent, layout.slots)))?;
-        let (backing, after) = match open.slots {
-            Slots::Native if layout.owned_slots.is_some() => (
-                SlotChangedBacking::Owned {
-                    generation: guest.menu_generation,
-                },
-                resized_items(&guest.native_menu, layout.slots),
-            ),
-            Slots::Block(pos) => {
-                let Some(BlockEntity::Mod(entity)) = self.world.block_entities.get(&pos) else {
-                    return None;
-                };
-                (
-                    SlotChangedBacking::Block {
-                        pos,
-                        generation: self.world.block_entities.generation(&pos),
-                    },
-                    resized_items(&entity.items, layout.slots),
-                )
-            }
-            _ => return None,
-        };
-        let menu = SlotChangedMenu {
-            conn,
-            uuid: guest.uuid,
-            window: open.window,
-            layout,
-            backing,
-        };
-        Some((menu, before, after))
-    }
-
-    /// Reconcile the slot edits a `menu_clicked` override (`Flow::Cancel`) made before the click's
-    /// transaction settles. `false` rolls the click back and resends the menu.
-    pub(super) fn reconcile_click_slot_changes(&mut self, conn: u32) -> bool {
-        if !mod_api::__private::has_part_hook(mod_api::HookId::MenuSlotChanged) {
-            return true;
-        }
-        let Some((menu, before, after)) = self.click_slot_changed_target(conn) else {
-            return true;
-        };
-        if matches!(menu.backing, SlotChangedBacking::Owned { .. }) {
-            self.journal_guest_click(conn);
-            self.journal_menu_click(conn);
-        }
-        let snapshots = SlotSnapshots {
-            before: &before,
-            after: &after,
-        };
-        self.mod_menu_slot_changed(&menu, None, snapshots)
-    }
-
     /// `menu_slot_changed` for a blockless owned menu whose transient slots a committed
     /// transaction changed (`ItemPlace::MenuSlot`). The committed write stands: the listener's
     /// outputs share a transaction of their own, which a failure aborts.
@@ -1338,7 +1269,9 @@ mod tests {
             craft: None,
             links: Vec::new(),
             asks_still_valid: false,
+            opener_block: None,
             opening_item: None,
+            removed: false,
             slot_changed_seen: None,
         };
 

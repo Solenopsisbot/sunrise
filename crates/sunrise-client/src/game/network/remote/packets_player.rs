@@ -30,6 +30,7 @@ impl Game<'_> {
         // new LocalPlayer (slot 0, no effects, riding nothing: the server
         // pairs a vehicle again with ClientboundSetPassengersPacket).
         self.selected = 0;
+        self.player_score = 0;
         self.potions.effects.clear();
         // handleLogin creates a fresh LocalPlayer only when none exists yet.
         if self.remote.as_ref().is_none_or(|r| !r.logged_in) {
@@ -129,6 +130,7 @@ impl Game<'_> {
         }
         if p.keep & 2 == 0 {
             self.reset_remote_player_riding();
+            self.player_score = 0;
             // KEEP_ENTITY_DATA copies the old player's synched data
             // (its shared flags) to the new one; without it they reset.
             if let Some(r) = self.remote.as_mut() {
@@ -515,7 +517,7 @@ impl Game<'_> {
         let chat_tree = self.chat_tree_for(Some(&tree));
         if let Some(r) = self.remote.as_mut() {
             r.chat_tree = chat_tree;
-            r.chat_tree_received = true;
+            r.server_chat_tree = Some(tree);
         }
     }
 

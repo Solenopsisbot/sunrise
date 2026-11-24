@@ -210,9 +210,9 @@ pub struct BiomeModifier {
 #[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
 pub enum BiomeModifierError {
-    /// The modifier's own id is empty or in a namespace the declaring mod does not own.
+    /// The modifier's own id is empty or not a valid identifier.
     InvalidId,
-    /// Another modifier of the mod has the id.
+    /// Another modifier already uses the id.
     Duplicate,
     /// A list that must name something is empty.
     EmptyList,

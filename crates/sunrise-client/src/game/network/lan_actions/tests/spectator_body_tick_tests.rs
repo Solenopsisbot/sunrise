@@ -213,7 +213,7 @@ fn leftover_sleep_countdown_waits_at_the_unloaded_edge_then_resumes() {
             assert!(loaded.bed.is_none() && edge.bed.is_none());
             game.lan.as_mut().unwrap().hub.guests.extend([loaded, edge]);
             game.tick_guests();
-            let timers = |game: &Game<'_>| -> Vec<u32> {
+            let timers = |game: &Game<'_>| -> Vec<i32> {
                 game.lan
                     .as_ref()
                     .unwrap()

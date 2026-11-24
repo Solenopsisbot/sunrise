@@ -63,9 +63,14 @@ fn with_filter(test: impl FnOnce(&[ModEntry])) {
 fn fixture(test: impl FnOnce(&mut Game<'_>)) {
     with_filter(|_| {
         with_game(|game| {
-            game.world
-                .chunks
-                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            game.world.chunks.insert(
+                (0, 0),
+                Arc::new({
+                    let mut chunk = Chunk::empty(0, 0);
+                    chunk.lit = true; // a FULL read of a hand-made column finds it ready
+                    chunk
+                }),
+            );
             game.block_ticks
                 .add_empty_chunk(ChunkPos::new(0, 0))
                 .unwrap();
@@ -547,7 +552,7 @@ fn native_admission_allocates_only_when_preparing_subscribed_snapshots() {
         assert_eq!(next, Some(true));
         assert_eq!(reuse_allocs, 0);
 
-        *filtered.item_slot_mut(1).unwrap() = Some(ItemStack::new("minecraft:stone", 1));
+        *filtered.item_slot_mut(1) = Some(ItemStack::new("minecraft:stone", 1));
         attempt.wrote_entity();
         let (refreshed, refresh_allocs) =
             measure(|| black_box(attempt.ask(&world, TARGET, &filtered, 2, &stack)));

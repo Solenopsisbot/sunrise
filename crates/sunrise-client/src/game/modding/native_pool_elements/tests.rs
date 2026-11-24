@@ -82,7 +82,7 @@ impl PoolElementType for StiltedType {
     ) -> Result<Arc<dyn mod_api::PoolElement>, StructureError> {
         let inner_config = config
             .get("inner")
-            .ok_or_else(|| StructureError("no inner element".into()))?
+            .ok_or_else(|| StructureError::new(std::io::Error::other("no inner element")))?
             .clone();
         Ok(Arc::new(Stilted {
             inner: context.element(&inner_config)?,
@@ -104,6 +104,8 @@ fn a_mod_element_wraps_another_through_the_adapter() {
     let bindings = FeatureBlockBindings::new(resources.registry, Default::default()).unwrap();
     let config = serde_json::json!({"element_type": "test:stilted", "inner": link_element()});
     let decoded = ElementType {
+        id: "test:stilted",
+        mod_id: "test",
         inner: Arc::new(StiltedType),
     }
     .decode(&config, resources, &bindings)
@@ -242,7 +244,7 @@ fn a_mod_type_lays_a_chain_out_by_hand_from_a_pool() {
             let rotation = StructureRotation::None;
             let mut random = LegacyRandom::new(9);
             let mut draws = Draws(&mut random);
-            let elements = context.elements();
+            let (elements, _) = context.elements();
             let head = elements
                 .jigsaws(&start, origin, rotation, &mut draws)
                 .into_iter()
@@ -284,22 +286,27 @@ fn a_mod_type_lays_a_chain_out_by_hand_from_a_pool() {
             _: &dyn BlockMetadata,
             _: &Compound,
         ) -> Result<Arc<dyn StructurePiece>, StructureError> {
-            Err(StructureError("the type saves no piece of its own".into()))
+            Err(StructureError::new(std::io::Error::other(
+                "the type saves no piece of its own",
+            )))
         }
     }
     let inputs = link_inputs();
     let mut random = WorldgenRandom::new(LegacyRandom::new(0));
     random.set_large_feature_seed(0, 0, 0);
-    let (_, pieces) =
-        super::super::native_structure_types::Adapter::new("testmod:chain", Arc::new(Chain))
-            .find_generation_point(
-                &mut StubContext,
-                &inputs,
-                ChunkPos::new(0, 0),
-                &Arc::new(Tag::Compound(Compound::new())),
-                &mut random,
-            )
-            .expect("a start from the pool");
+    let (_, pieces) = super::super::native_structure_types::Adapter::new(
+        "testmod:chain",
+        "testmod",
+        Arc::new(Chain),
+    )
+    .find_generation_point(
+        &mut StubContext,
+        &inputs,
+        ChunkPos::new(0, 0),
+        &Arc::new(Tag::Compound(Compound::new())),
+        &mut random,
+    )
+    .expect("a start from the pool");
     let boxes: Vec<BoundingBox> = pieces
         .iter()
         .map(|piece| match piece {
@@ -312,6 +319,176 @@ fn a_mod_type_lays_a_chain_out_by_hand_from_a_pool() {
         BoundingBox::new([0, 66, 0], [0, 68, 0]),
     ];
     assert_eq!(boxes, [chain, chain].concat());
+}
+
+/// A structure type with a cap per piece name lays a pool out by hand with
+/// the jigsaw building blocks: `JigsawPlacement.Placer`'s loop around
+/// `attach_jigsaw` (every jigsaw here has placement priority 0, so the queue
+/// is first in, first out), skipping the candidates its cap refuses.
+/// Uncapped, it lays out the pieces `assemble_jigsaw` does from the same
+/// start and seed; with a cap of two links after the start, the chain stops
+/// there.
+#[test]
+fn a_mod_type_caps_a_named_piece_with_the_jigsaw_building_blocks() {
+    use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+    const MAX_DEPTH: i32 = 7;
+    enum Layout {
+        Assembled,
+        ByHand { cap: Option<usize> },
+    }
+    impl StructureType for Layout {
+        fn find_generation_point(
+            &self,
+            context: &mut dyn GenerationContext,
+        ) -> Option<FoundStructure> {
+            let settings =
+                mod_api::JigsawSettings::new(Identifier::parse("test:links").ok()?, MAX_DEPTH);
+            let cap = match self {
+                Layout::Assembled => {
+                    context.assemble_jigsaw(&settings, [0, 64, 0])?;
+                    return Some(FoundStructure::default());
+                }
+                Layout::ByHand { cap } => *cap,
+            };
+            let link = Identifier::parse("test:link").ok()?;
+            // JigsawPlacement.addPieces: a random rotation, the start drawn
+            // from its pool, its ground level at the start height.
+            use mod_api::StructureRotation as R;
+            let rotation = [
+                R::None,
+                R::Clockwise90,
+                R::Clockwise180,
+                R::Counterclockwise90,
+            ][context.random().next_int_bound(4) as usize];
+            let start = context
+                .template_pool(&settings.start_pool)?
+                .random_template(context.random())?
+                .clone();
+            let ground = start.ground_level_delta();
+            let origin = [0, 64 - ground, 0];
+            let (elements, _) = context.elements();
+            let start_box = elements.bounding_box(&start, origin, rotation);
+            let mut pieces = vec![PoolPiece::new(
+                start,
+                origin,
+                ground,
+                rotation,
+                start_box,
+                settings.liquid_settings,
+            )];
+            // The reach: 80 across from the start's centre, the level's height.
+            let mut space = mod_api::JigsawSpace::new(BoundingBox::new(
+                [-80, context.min_y(), -80],
+                [80, context.max_y(), 80],
+            ));
+            space.remove(start_box);
+            let mut queue = VecDeque::from([(0, Rc::new(RefCell::new(space)), 0)]);
+            let mut links = 0;
+            while let Some((index, space, depth)) = queue.pop_front() {
+                let source = pieces[index].clone();
+                let (elements, random) = context.elements();
+                let jigsaws =
+                    elements.jigsaws(&source.element, source.position, source.rotation, random);
+                let mut own_space = None;
+                'jigsaws: for jigsaw in jigsaws {
+                    let Some(pool) = context.template_pool(&jigsaw.pool) else {
+                        continue;
+                    };
+                    let Some(fallback) = context.template_pool(pool.fallback()) else {
+                        continue;
+                    };
+                    let step = jigsaw.front.normal();
+                    let ahead = std::array::from_fn(|i| jigsaw.pos[i] + step[i]);
+                    let space = if source.bounding_box.is_inside(ahead) {
+                        own_space
+                            .get_or_insert_with(|| {
+                                Rc::new(RefCell::new(mod_api::JigsawSpace::new(
+                                    source.bounding_box,
+                                )))
+                            })
+                            .clone()
+                    } else {
+                        space.clone()
+                    };
+                    let mut candidates = if depth == MAX_DEPTH {
+                        Vec::new()
+                    } else {
+                        pool.shuffled_templates(context.random())
+                    };
+                    candidates.extend(fallback.shuffled_templates(context.random()));
+                    for candidate in candidates {
+                        if candidate.is_empty() {
+                            break;
+                        }
+                        let is_link = candidate.template_location() == Some(&link);
+                        if is_link && cap.is_some_and(|cap| links >= cap) {
+                            continue;
+                        }
+                        let Some(child) = context.attach_jigsaw(
+                            &mut pieces[index],
+                            &jigsaw,
+                            candidate,
+                            &mut space.borrow_mut(),
+                            settings.use_expansion_hack,
+                        ) else {
+                            continue;
+                        };
+                        links += usize::from(is_link);
+                        pieces.push(child);
+                        if depth < MAX_DEPTH {
+                            queue.push_back((pieces.len() - 1, space, depth + 1));
+                        }
+                        continue 'jigsaws;
+                    }
+                }
+            }
+            Some(FoundStructure {
+                position: [0, 64, 0],
+                pool_pieces: pieces,
+                pieces: Vec::new(),
+            })
+        }
+        fn load_piece(
+            &self,
+            _: &dyn BlockMetadata,
+            _: &Compound,
+        ) -> Result<Arc<dyn StructurePiece>, StructureError> {
+            Err(StructureError::new(std::io::Error::other(
+                "the type saves no piece of its own",
+            )))
+        }
+    }
+    let inputs = link_inputs();
+    let lay_out = |layout: Layout| -> Vec<BoundingBox> {
+        let mut random = WorldgenRandom::new(LegacyRandom::new(0));
+        random.set_large_feature_seed(0, 0, 0);
+        let (_, pieces) = super::super::native_structure_types::Adapter::new(
+            "testmod:links",
+            "testmod",
+            Arc::new(layout),
+        )
+        .find_generation_point(
+            &mut StubContext,
+            &inputs,
+            ChunkPos::new(0, 0),
+            &Arc::new(Tag::Compound(Compound::new())),
+            &mut random,
+        )
+        .expect("a start from the pool");
+        pieces
+            .iter()
+            .map(|piece| match piece {
+                Piece::Pool(piece) => piece.bounding_box,
+                Piece::Legacy(_) => panic!("only pool pieces"),
+            })
+            .collect()
+    };
+    let chain: Vec<BoundingBox> = (0..=MAX_DEPTH)
+        .map(|i| BoundingBox::new([0, 63 + 3 * i, 0], [0, 65 + 3 * i, 0]))
+        .collect();
+    assert_eq!(lay_out(Layout::Assembled), chain);
+    assert_eq!(lay_out(Layout::ByHand { cap: None }), chain);
+    assert_eq!(lay_out(Layout::ByHand { cap: Some(2) }), chain[..3]);
 }
 
 /// A piece places a configured feature and a placed feature through the
@@ -337,7 +514,7 @@ fn a_piece_places_configured_and_placed_features() {
             chunk: ChunkPos::new(0, 0),
             reference: [8, 64, 8],
         };
-        let mut context = Placing::new(&mut engine).unwrap();
+        let mut context = Placing::new(&mut engine, "test", "test:type").unwrap();
         assert!(context.place_feature("test:tree", [1, 64, 1]).unwrap());
         assert!(
             context

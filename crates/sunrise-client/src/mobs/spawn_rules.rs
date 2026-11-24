@@ -933,7 +933,7 @@ mod light_draw_tests {
 mod mod_spawn_rule_tests {
     use super::super::spawn_selection::Heightmap as Surface;
     use super::*;
-    use crate::blocks::{RenderShape, Sounds, StateFacts};
+    use crate::blocks::{RenderShape, StateFacts};
     use data::Placement;
     use mod_api::__private::{SpawnPlacementDeclaration, parts_installation::entity_type_key};
     use mod_api::{
@@ -978,7 +978,7 @@ mod mod_spawn_rule_tests {
     }
 
     fn state(name: &str, full: bool) -> StateFacts {
-        let sound: Arc<str> = Arc::from("");
+        let sound = mod_api::SoundEventKey::parse("").unwrap();
         StateFacts {
             name: Arc::from(name),
             emission: 0,
@@ -1001,7 +1001,8 @@ mod mod_spawn_rule_tests {
             explosion_resistance: 1.0,
             item: Arc::from(name),
             pick_item: Arc::from(name),
-            sounds: Sounds {
+            sounds: mod_api::BlockSoundType {
+                identity: mod_api::BlockSoundTypeIdentity::Other,
                 volume: 1.0,
                 pitch: 1.0,
                 break_sound: sound.clone(),

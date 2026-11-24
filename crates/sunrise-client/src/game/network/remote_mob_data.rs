@@ -193,7 +193,7 @@ pub(super) fn apply(
             // SulfurCube.MAX_FUSE: onSyncedDataUpdated copies it into the fuse
             // the client ticks for swell / white flash (#4548); -1 is not primed.
             (Species::SulfurCube, 19, Value::Int(fuse)) => {
-                m.extra.counter2 = (*fuse).max(-1) + 1;
+                m.extra.sulfur_fuse = sunrise_client::mobs::sulfur_cube::Fuse::set(*fuse);
             }
             (Species::SulfurCube, 20, Value::Bool(from_bucket)) => {
                 m.extra.scratch[3] = i32::from(*from_bucket);
@@ -527,8 +527,7 @@ impl Game<'_> {
                 m.extra.ints[1] = code;
             }
             if let Some(at) = stare_sound {
-                self.audio
-                    .play_unshared("minecraft:entity.enderman.stare", Some(at), 2.5, 1.0);
+                self.play_audio_unshared("minecraft:entity.enderman.stare", Some(at), 2.5, 1.0);
             }
         }
     }
@@ -1609,26 +1608,95 @@ pub(in crate::game) mod tests {
         }
     }
 
-    /// #4548: SulfurCube.MAX_FUSE (19, after AbstractCubeMob.ID_SIZE) copies into
-    /// the fuse the client ticks for swell; its default, -1, is not primed
-    /// (`isPrimed`: fuse >= 0). FROM_BUCKET is 20 (#13721).
+    /// Vanilla 26.3 client witness (`VanillaSulfurCubeFuseOracle`, `tools/test_sulfur_cube_fuse_parity.py`).
     #[test]
+    #[ignore = "run by tools/test_sulfur_cube_fuse_parity.py"]
     fn sulfur_cube_max_fuse_sets_the_client_fuse() {
-        use sunrise_client::mobs::sulfur_cube::{fuse, primed};
-        let Some(mut m) = mob("minecraft:sulfur_cube") else {
-            return;
-        };
-        assert_eq!(m.extra.counter2, 0);
-        apply(&mut m, &[(19, s::INT, Value::Int(40))]);
-        assert_eq!(fuse(&m), 40);
-        assert!(primed(&m));
-        apply(&mut m, &[(19, s::INT, Value::Int(0))]);
-        // Last fuse tick: still primed at 0 until the server removes it.
-        assert_eq!(fuse(&m), 0);
-        apply(&mut m, &[(19, s::INT, Value::Int(-1))]);
-        assert!(!primed(&m));
-        apply(&mut m, &[(20, s::BOOLEAN, Value::Bool(true))]);
-        assert!(!primed(&m));
+        run_sulfur_cube_max_fuse_sets_the_client_fuse();
+    }
+
+    pub(in crate::game) fn run_sulfur_cube_max_fuse_sets_the_client_fuse() {
+        use sunrise_client::mobs::sulfur_cube::{client_tick, fuse, max_fuse, primed};
+        let dir = std::env::var_os("SUNRISE_SULFUR_CUBE_FUSE_WITNESS_DIR").unwrap_or_else(|| {
+            panic!(
+                "SUNRISE_SULFUR_CUBE_FUSE_WITNESS_DIR is unset; run tools/test_sulfur_cube_fuse_parity.py"
+            )
+        });
+        let path = std::path::PathBuf::from(dir).join("sulfur_cube_fuse_client.txt");
+        let witness = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "failed to read witness {} (run tools/test_sulfur_cube_fuse_parity.py): {e}",
+                    path.display()
+                )
+            })
+            .replace("\r\n", "\n");
+        let root =
+            std::env::temp_dir().join(format!("sunrise-sulfur-receive-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("entity-types.json"),
+            r#"{"minecraft:sulfur_cube":{"width":0.52,"height":0.52,"eye_height":0.325,"category":"monster","fire_immune":false,"attributes":{"minecraft:max_health":4.0}}}"#,
+        )
+        .unwrap();
+        let attributes =
+            &sunrise_world::attributes::entity::Catalog::from_json(&serde_json::json!({
+                "data_version": sunrise_world::DATA_VERSION,
+                "attributes": [],
+                "entities": {},
+            }))
+            .unwrap();
+        let types = sunrise_client::mobs::MobTypes::load_for_server(&root, attributes).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let kind = std::sync::Arc::new(types.types["minecraft:sulfur_cube"].clone());
+        let mut m = None;
+        let mut rows = vec![format!("# minecraft {}", sunrise_core::VANILLA_VERSION)];
+        for line in witness.lines().filter(|line| !line.starts_with('#')) {
+            let (op, _) = line
+                .split_once(" -> ")
+                .unwrap_or_else(|| panic!("bad witness row: {line}"));
+            let parts: Vec<&str> = op.split_whitespace().collect();
+            match parts.as_slice() {
+                ["init"] => {
+                    let mut mob = Mob::new(
+                        1,
+                        std::sync::Arc::clone(&kind),
+                        sunrise_core::geometry::Vec3::ZERO,
+                        0.0,
+                    );
+                    client_defaults(&mut mob);
+                    m = Some(mob);
+                }
+                ["sync", id, "int", value] => {
+                    let id: u8 = id.parse().unwrap();
+                    let value: i32 = value.parse().unwrap();
+                    apply(m.as_mut().unwrap(), &[(id, s::INT, Value::Int(value))]);
+                }
+                ["sync", id, "bool", value] => {
+                    let id: u8 = id.parse().unwrap();
+                    let value: bool = value.parse().unwrap();
+                    apply(m.as_mut().unwrap(), &[(id, s::BOOLEAN, Value::Bool(value))]);
+                }
+                ["tick"] => {
+                    client_tick(m.as_mut().unwrap());
+                }
+                _ => panic!("unknown witness op: {op}"),
+            }
+            let mob = m.as_ref().unwrap();
+            rows.push(format!(
+                "{op} -> {} {} {} {}",
+                fuse(mob),
+                max_fuse(mob),
+                primed(mob),
+                mob.extra.scratch[3] != 0,
+            ));
+        }
+        let actual = rows.join("\n") + "\n";
+        if let Some(path) = std::env::var_os("SUNRISE_SULFUR_CUBE_CLIENT_FUSE_OUTPUT") {
+            std::fs::write(path, &actual).unwrap();
+        }
+        assert!(rows.len() > 1, "empty witness");
+        assert_eq!(actual, witness);
     }
 
     /// `Pig.onSyncedDataUpdated` and `Strider.onSyncedDataUpdated`: a synced

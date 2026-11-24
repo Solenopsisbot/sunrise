@@ -271,6 +271,16 @@ pub(super) fn walk(source: &ResourceSource, directory: &str, out: &mut Vec<Strin
             .filter(|name| name.ends_with(".png")),
     );
 }
+/// `MissingTextureAtlasSprite.generateMissingImage`: 16x16, magenta and black quarters.
+pub(super) fn missing_image() -> (u32, u32, Vec<u8>) {
+    let pixels = (0..256)
+        .flat_map(|i| match (i / 16 < 8) ^ (i % 16 < 8) {
+            true => [248, 0, 248, 255],
+            false => [0, 0, 0, 255],
+        })
+        .collect();
+    (16, 16, pixels)
+}
 pub(crate) fn decode_resource(source: &ResourceSource, name: &str) -> Result<(u32, u32, Vec<u8>)> {
     decode_bytes(&source.read(name)?)
 }
@@ -336,8 +346,25 @@ pub(super) fn first_frame(
 }
 /// `image` inside a one-texel border copied from its opposite edges, the
 /// texels repeat addressing reads past each edge.
-pub(super) fn wrap_border((name, w, h, data): &PackedImage) -> PackedImage {
-    (name.clone(), w + 2, h + 2, wrap_border_pixels(data, *w, *h))
+pub(super) fn wrap_border((name, w, h, data): &PackedImage) -> Result<PackedImage> {
+    let invalid = "sprite border exceeds the RGBA8 address space";
+    let (bw, bh) = (
+        w.checked_add(2).ok_or(invalid)?,
+        h.checked_add(2).ok_or(invalid)?,
+    );
+    let len = rgba_len([bw, bh]).ok_or(invalid)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)?;
+    let w = *w as usize;
+    let h = *h as usize;
+    for y in 0..bh as usize {
+        let row = (y + h - 1) % h * w;
+        for x in 0..bw as usize {
+            let at = (row + (x + w - 1) % w) * 4;
+            out.extend_from_slice(&data[at..at + 4]);
+        }
+    }
+    Ok((name.clone(), bw, bh, out))
 }
 
 /// Raw RGBA8 `w x h` image padded by a 1-texel wrap border copied from opposite edges.
@@ -357,13 +384,26 @@ pub(super) fn wrap_border_pixels(data: &[u8], w: u32, h: u32) -> Vec<u8> {
 /// `image` inside a one-texel border clamped from its own edge texels, matching
 /// vanilla 26.3's `Stitcher` padding + `ANIMATE_SPRITE_BLIT` `CLAMP_TO_EDGE` so
 /// boundary UV samples on GPUs never read the transparent atlas gutter and discard.
-pub(super) fn clamp_border((name, w, h, data): &PackedImage) -> PackedImage {
-    (
-        name.clone(),
-        w + 2,
-        h + 2,
-        clamp_border_pixels(data, *w, *h),
-    )
+pub(super) fn clamp_border((name, w, h, data): &PackedImage) -> Result<PackedImage> {
+    let invalid = "sprite border exceeds the RGBA8 address space";
+    let (bw, bh) = (
+        w.checked_add(2).ok_or(invalid)?,
+        h.checked_add(2).ok_or(invalid)?,
+    );
+    let len = rgba_len([bw, bh]).ok_or(invalid)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)?;
+    let w = *w as usize;
+    let h = *h as usize;
+    for y in 0..bh as usize {
+        let row = y.saturating_sub(1).min(h - 1) * w;
+        for x in 0..bw as usize {
+            let col = x.saturating_sub(1).min(w - 1);
+            let at = (row + col) * 4;
+            out.extend_from_slice(&data[at..at + 4]);
+        }
+    }
+    Ok((name.clone(), bw, bh, out))
 }
 
 /// Raw RGBA8 `w x h` image padded by a 1-texel clamp-to-edge border on all four sides.

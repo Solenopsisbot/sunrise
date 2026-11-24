@@ -6,6 +6,14 @@ const BUILD: &str = "0123456789abcdef0123456789abcdef01234567";
 /// A release folder `sdk-<BUILD>` under a base folder, signed with a fresh key: the base and the
 /// key.
 fn release(nightly: Option<&str>) -> (tempfile::TempDir, PublicKey) {
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    let key: PublicKey = pair.public_key().as_ref().try_into().unwrap();
+    (release_signed_by(nightly, &pair), key)
+}
+
+/// [`release`], its `SHA256SUMS` signed by `pair`.
+fn release_signed_by(nightly: Option<&str>, pair: &Ed25519KeyPair) -> tempfile::TempDir {
     let base = tempfile::tempdir().unwrap();
     let folder = base.path().join(format!("sdk-{BUILD}"));
     fs::create_dir_all(&folder).unwrap();
@@ -31,8 +39,6 @@ fn release(nightly: Option<&str>) -> (tempfile::TempDir, PublicKey) {
         &[sdk::INDEX, SURFACE, API_SOURCE].map(|name| (name.to_owned(), digest(name))),
     );
     fs::write(folder.join(sunrise_release_sign::SUMS), &sums).unwrap();
-    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
-    let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
     let message = sunrise_release_sign::message(&format!("sdk-{BUILD}"), sums.as_bytes());
     use base64::Engine;
     let signature = base64::engine::general_purpose::STANDARD.encode(pair.sign(&message).as_ref());
@@ -41,8 +47,7 @@ fn release(nightly: Option<&str>) -> (tempfile::TempDir, PublicKey) {
         signature + "\n",
     )
     .unwrap();
-    let key: PublicKey = pair.public_key().as_ref().try_into().unwrap();
-    (base, key)
+    base
 }
 
 #[test]
@@ -252,10 +257,7 @@ fn a_build_is_named_by_sha_short_sha_or_a_release_tag() {
     )
     .unwrap();
     let stable = "26.3-0.1.0";
-    let dev = format!(
-        "{}-2026-11-21-0123456",
-        sunrise_release_sign::Channel::Dev.tag()
-    );
+    let dev = "dev-2026-11-21-0123456";
     let v2 = sunrise_release_sign::SIGNATURE_V2;
     tag_release(
         base.path(),
@@ -266,11 +268,11 @@ fn a_build_is_named_by_sha_short_sha_or_a_release_tag() {
         sunrise_release_sign::SIGNATURE,
         &pair,
     );
-    tag_release(base.path(), &dev, &index, None, &dev, v2, &pair);
+    tag_release(base.path(), dev, &index, None, dev, v2, &pair);
     let base = Base::Folder(base.path().to_owned());
     assert_eq!(resolve(&base, &keys, BUILD).unwrap(), BUILD);
     assert_eq!(resolve(&base, &keys, "0123456").unwrap(), BUILD);
-    for tag in ["nightly-2026-11-13", stable, &dev] {
+    for tag in ["nightly-2026-11-13", stable, dev] {
         assert_eq!(resolve(&base, &keys, tag).unwrap(), BUILD, "{tag}");
     }
     let error = resolve(&base, &keys, "nightly").unwrap_err();
@@ -294,7 +296,6 @@ fn a_release_tag_resolves_only_through_its_own_signed_index() {
     let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
     let keys: [PublicKey; 1] = [pair.public_key().as_ref().try_into().unwrap()];
     let older = "89abcdef0123456789abcdef0123456789abcdef";
-    let channel = sunrise_release_sign::Channel::Dev.tag();
     let v1 = sunrise_release_sign::SIGNATURE;
     let v2 = sunrise_release_sign::SIGNATURE_V2;
     // Another build's index served under the tag, the tag's sums listing the real one.
@@ -318,22 +319,71 @@ fn a_release_tag_resolves_only_through_its_own_signed_index() {
         &pair,
     );
     // A Dev tag whose signed index names a build that its short sha does not start.
-    let dev = format!("{channel}-2026-11-21-0123456");
-    tag_release(base.path(), &dev, &index_of(older), None, &dev, v2, &pair);
+    let dev = "dev-2026-11-21-0123456";
+    tag_release(base.path(), dev, &index_of(older), None, dev, v2, &pair);
     // A Dev build signed only for its channel.
-    let unsigned = format!("{channel}-2026-11-22-0123456");
+    let unsigned = "dev-2026-11-22-0123456";
     tag_release(
         base.path(),
-        &unsigned,
+        unsigned,
         &index_of(BUILD),
         None,
-        channel,
+        "dev",
         v1,
         &pair,
     );
+    // Sums signed for the tag that are not a sums list.
+    let malformed = "26.3-0.1.2";
+    tag_release(
+        base.path(),
+        malformed,
+        &index_of(BUILD),
+        None,
+        malformed,
+        v1,
+        &pair,
+    );
+    let folder = base.path().join(malformed);
+    let sums = b"not a checksum list\n";
+    fs::write(folder.join(sunrise_release_sign::SUMS), sums).unwrap();
+    let message = sunrise_release_sign::message(malformed, sums);
+    use base64::Engine;
+    let signed = base64::engine::general_purpose::STANDARD.encode(pair.sign(&message).as_ref());
+    fs::write(folder.join(v1), signed + "\n").unwrap();
     let base = Base::Folder(base.path().to_owned());
-    for tag in ["26.3-0.1.0", "26.3-0.1.1", &dev, &unsigned] {
-        assert!(resolve(&base, &keys, tag).is_err(), "{tag}");
+    for tag in ["26.3-0.1.0", "26.3-0.1.1", dev, unsigned, malformed] {
+        let error = resolve(&base, &keys, tag).unwrap_err();
+        assert!(
+            error.starts_with(&format!("Release {tag}")),
+            "{tag}: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_release_tag_signed_only_by_a_local_sdk_key_is_refused() {
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    let local: PublicKey = pair.public_key().as_ref().try_into().unwrap();
+    let root = release_signed_by(None, &pair);
+    let index = index_of(BUILD);
+    let (stable, dev) = ("26.3-0.1.0", "dev-2026-11-21-0123456");
+    let (v1, v2) = (
+        sunrise_release_sign::SIGNATURE,
+        sunrise_release_sign::SIGNATURE_V2,
+    );
+    tag_release(root.path(), stable, &index, None, stable, v1, &pair);
+    tag_release(root.path(), dev, &index, None, dev, v2, &pair);
+    let base = Base::Folder(root.path().to_owned());
+    let mut sdk_keys = release_keys();
+    sdk_keys.push(local);
+    // The local key is trusted for the SDK, and the tags are otherwise valid.
+    let project = tempfile::tempdir().unwrap();
+    fetch(&base, &sdk_keys, BUILD, &project.path().join(DIR), true).unwrap();
+    for tag in [stable, dev] {
+        assert_eq!(resolve(&base, &sdk_keys, tag).unwrap(), BUILD, "{tag}");
+        let error = resolve(&base, &release_keys(), tag).unwrap_err();
+        assert!(error.contains("signature doesn't match"), "{tag}: {error}");
     }
 }
 

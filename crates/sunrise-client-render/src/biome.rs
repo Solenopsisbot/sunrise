@@ -2,6 +2,7 @@
 //! (`Biome.getGrassColor`/`getFoliageColor`/..., `BlockTintSources`).
 use crate::Result;
 pub use mod_api::world::biome::{BiomeColors, SpawnEntry};
+use mod_api::{__private::parse_registered_biome_key, BiomeKey};
 use serde_json::Value;
 use std::{
     borrow::Cow,
@@ -178,6 +179,9 @@ impl BiomeInfo {
 pub struct Biomes {
     pub list: Vec<BiomeInfo>,
     pub index: HashMap<String, u16>,
+    /// The registered keys in slot order, excluding save placeholders. The mesher shares this
+    /// immutable table with section-visibility snapshots, which keep only the slots they read.
+    registered_keys: Arc<[BiomeKey]>,
     info_noise: SimplexNoise,
     colormaps: Arc<Colormaps>,
     /// The built-in biomes, the first of `list` unless packs replaced them.
@@ -192,6 +196,10 @@ pub struct Biomes {
     /// plains, but a chunk saves its name back unchanged. Shared by clones (recoloured
     /// copies keep the ids); a table rebuilt with other packs starts empty.
     placeholders: Arc<Mutex<Vec<String>>>,
+    /// Biomes a server's registry names that carry no data and this game does not define: each
+    /// has a slot after the others, plays as plains and keeps its key, so what reads the stored
+    /// biome reports the server's identity and never plains.
+    unresolved: Arc<BTreeSet<String>>,
     exhausted: Arc<std::sync::atomic::AtomicBool>,
 }
 /// The grass, foliage and dry foliage colormaps.
@@ -362,7 +370,7 @@ impl Biomes {
             foliage: colormap(root.source(), "foliage")?,
             dry: colormap(root.source(), "dry_foliage")?,
         };
-        Self::load_with_colormaps(root, maps)
+        Self::load_with_colormaps(root, maps, true)
     }
     /// Loads biome definitions for a logical server without opening the client
     /// `textures/colormap/{grass,foliage,dry_foliage}.png` textures (`GrassColorReloadListener`,
@@ -370,24 +378,44 @@ impl Biomes {
     /// Server-side biome JSON data (water colour, climate, spawns, features and attributes) is
     /// loaded identically to [`Self::load`].
     pub fn load_for_server(root: &ResourceRoot) -> Result<Self> {
-        Self::load_with_colormaps(root, Colormaps::default())
+        Self::load_with_colormaps(root, Colormaps::default(), true)
     }
-    fn load_with_colormaps(root: &ResourceRoot, maps: Colormaps) -> Result<Self> {
+    /// The prepared base biome snapshot, before any world registry admits mod or pack entries.
+    pub fn load_vanilla_for_server(root: &ResourceRoot) -> Result<Self> {
+        Self::load_with_colormaps(root, Colormaps::default(), false)
+    }
+
+    fn load_with_colormaps(
+        root: &ResourceRoot,
+        maps: Colormaps,
+        include_mods: bool,
+    ) -> Result<Self> {
         let mut list = Vec::new();
         let mut files_by_name = BTreeMap::new();
         // The folder's own files (not its subfolders'), by file name: through `json_folder`,
         // from the prepared data file when there is one.
-        let folder = sunrise_world::json_folder::read(
+        let folder = match sunrise_world::json_folder::read(
             &root.prepared().join("data/minecraft/worldgen/biome"),
-        )?;
+        ) {
+            Ok(folder) => Some(folder),
+            Err(error) if !include_mods && error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
         let mut files: Vec<_> = folder
-            .files
             .iter()
+            .flat_map(|folder| &folder.files)
             .filter(|f| !f.name.contains('/'))
             .collect();
         files.sort_by_cached_key(|f| format!("{}.json", f.name));
         for file in files {
             let v: Value = sunrise_world::json_file::parse(&file.path, file.bytes()?)?;
+            if !include_mods && v.get("neoforge:conditions").is_some() {
+                return Err(std::io::Error::other(format!(
+                    "biome minecraft:{} requires the world's admitted biome table",
+                    file.name
+                ))
+                .into());
+            }
             list.push(BiomeInfo::from_json(
                 format!("minecraft:{}", file.name),
                 &v,
@@ -396,63 +424,152 @@ impl Biomes {
             files_by_name.insert(format!("minecraft:{}", file.name), v);
         }
         // Content mods' own biomes follow the built-in ones, so the built-in ids never move.
-        for (name, v) in mod_biome_files(root.prepared()) {
-            list.push(BiomeInfo::from_json(name.clone(), &v, &maps));
-            files_by_name.insert(name, v);
+        if include_mods {
+            for (name, v) in mod_biome_files(root.prepared()) {
+                list.push(BiomeInfo::from_json(name.clone(), &v, &maps));
+                files_by_name.insert(name, v);
+            }
         }
         let index = list
             .iter()
             .enumerate()
             .map(|(i, b)| (b.name.clone(), i as u16))
             .collect();
+        let registered_keys = list
+            .iter()
+            .map(|biome| {
+                parse_registered_biome_key(&biome.name)
+                    .map_err(|error| format!("biome registry entry {:?}: {error}", biome.name))
+            })
+            .collect::<std::result::Result<_, _>>()?;
         Ok(Self {
             builtin: Arc::new(list.clone()),
             list,
             index,
+            registered_keys,
             colormaps: Arc::new(maps),
             packs: BTreeMap::new(),
             files: Arc::new(files_by_name),
             info_noise: SimplexNoise::with_skipped_offsets(&mut LegacyRandom::new(2345), true),
             placeholders: Default::default(),
+            unresolved: Default::default(),
             exhausted: Default::default(),
         })
+    }
+    /// This table with a slot for each of `names` it lacks: a biome the server's registry names
+    /// without data. It renders as plains; its key is the server's.
+    pub fn with_unresolved<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Result<Self> {
+        let mut out = self.clone();
+        out.placeholders = Arc::default();
+        out.exhausted = Arc::default();
+        let mut keys = out.registered_keys.to_vec();
+        let mut unresolved = (*out.unresolved).clone();
+        let plains = out.get(out.id("minecraft:plains")).clone();
+        for name in names {
+            if out.index.contains_key(name) {
+                continue;
+            }
+            let key = parse_registered_biome_key(name)
+                .map_err(|error| format!("biome registry entry {name:?}: {error}"))?;
+            if out.list.len() >= usize::from(u16::MAX) {
+                break;
+            }
+            out.index.insert(name.to_owned(), out.list.len() as u16);
+            out.list.push(BiomeInfo {
+                name: name.to_owned(),
+                ..plains.clone()
+            });
+            keys.push(key);
+            unresolved.insert(name.to_owned());
+        }
+        out.registered_keys = keys.into();
+        out.unresolved = Arc::new(unresolved);
+        Ok(out)
+    }
+    /// Whether biome `name` is one a server's registry named without data this game has.
+    pub fn is_unresolved(&self, name: &str) -> bool {
+        self.unresolved.contains(name)
     }
     /// The built-in biomes with a world's data packs' biome files (id →
     /// JSON) over them, as `RegistryDataLoader` builds the registry: a file
     /// for a built-in biome replaces it, keeping its id, and new biomes join
     /// after the built-in ones, in registry order. Starts from the built-in
     /// table whatever packs `self` has.
-    pub fn with_packs<'a>(&self, files: impl IntoIterator<Item = (&'a str, &'a Value)>) -> Self {
+    pub fn with_packs<'a>(
+        &self,
+        files: impl IntoIterator<Item = (&'a str, &'a Value)>,
+    ) -> Result<Self> {
         let mut out = self.builtin_only();
         out.placeholders = Arc::default();
         out.exhausted = Arc::default();
+        let mut keys = out.registered_keys.to_vec();
         let mut files: Vec<(&str, &Value)> = files.into_iter().collect();
         files.sort_by(|a, b| identifier_order(a.0, b.0));
         for (name, json) in files {
             let info = BiomeInfo::from_json(name.to_owned(), json, &out.colormaps);
-            match out.index.get(name) {
-                Some(&id) => out.list[usize::from(id)] = info,
-                None if out.list.len() < usize::from(u16::MAX) => {
-                    out.index.insert(name.to_owned(), out.list.len() as u16);
-                    out.list.push(info);
+            if let Some(&id) = out.index.get(name) {
+                out.list[usize::from(id)] = info;
+            } else {
+                let key = parse_registered_biome_key(name)
+                    .map_err(|error| format!("biome registry entry {name:?}: {error}"))?;
+                if out.list.len() >= usize::from(u16::MAX) {
+                    continue;
                 }
-                None => continue,
+                out.index.insert(name.to_owned(), out.list.len() as u16);
+                out.list.push(info);
+                keys.push(key);
             }
             out.packs.insert(name.to_owned(), Arc::new(json.clone()));
         }
-        out
+        out.registered_keys = keys.into();
+        Ok(out)
     }
+    /// Build a world's table after RegistryDataLoader has admitted the winners.
+    /// A false winning file leaves no holder, even when it replaced a built-in biome.
+    pub fn with_admitted_packs<'a>(
+        &self,
+        files: impl IntoIterator<Item = (&'a str, &'a Value)>,
+        omitted: &std::collections::BTreeSet<String>,
+    ) -> Result<Self> {
+        if omitted.is_empty() {
+            return self.with_packs(files);
+        }
+        let mut base = self.builtin_only();
+        base.registered_keys = base
+            .registered_keys
+            .iter()
+            .zip(&base.list)
+            .filter(|(_, biome)| !omitted.contains(&biome.name))
+            .map(|(key, _)| key.clone())
+            .collect();
+        base.list.retain(|biome| !omitted.contains(&biome.name));
+        base.builtin = Arc::new(base.list.clone());
+        base.index = base
+            .list
+            .iter()
+            .enumerate()
+            .map(|(id, biome)| (biome.name.clone(), id as u16))
+            .collect();
+        base.with_packs(files)
+    }
+
     /// The built-in biomes alone: this table without what packs gave it.
     pub fn builtin_only(&self) -> Self {
         let mut out = self.clone();
-        if self.packs.is_empty() {
+        if self.packs.is_empty() && self.unresolved.is_empty() {
             return out;
         }
+        out.unresolved = Arc::default();
         out.list = self.builtin.to_vec();
         let builtin = out.list.len();
         out.index.retain(|_, id| usize::from(*id) < builtin);
+        out.registered_keys = Arc::from(&self.registered_keys[..builtin]);
         out.packs.clear();
         out
+    }
+    /// Registered biome identities by local slot, with no entry for a save placeholder.
+    pub fn registered_keys(&self) -> &Arc<[BiomeKey]> {
+        &self.registered_keys
     }
     /// The file a world's biome `name` came from, if a pack added or replaced it or a content
     /// mod added it (a mod's biome is no built-in: no client has its file).
@@ -484,6 +601,10 @@ impl Biomes {
             .or_else(|| self.index.get("minecraft:plains"))
             .copied()
             .unwrap_or(0)
+    }
+    /// Exact biome table index for `name`, or `None` when the table does not contain it.
+    pub fn try_id(&self, name: &str) -> Option<u16> {
+        self.index.get(name).copied()
     }
     /// Whether the game has the biome `name`.
     pub fn contains(&self, name: &str) -> bool {
@@ -585,6 +706,10 @@ impl Biomes {
         self.list
             .get(usize::from(id))
             .map_or("minecraft:plains", |b| b.name.as_str())
+    }
+    /// Exact canonical name of biome `id`, or `None` when `id` is past this table.
+    pub fn try_name(&self, id: u16) -> Option<&str> {
+        self.list.get(usize::from(id)).map(|b| b.name.as_str())
     }
     /// A biome's natural spawners by category, sorted by category name; None for a name this
     /// table lacks.
@@ -721,10 +846,11 @@ pub fn gaussian_weights(
             let wx = weight(0, x);
             for y in 0..6 {
                 let wy = weight(1, y);
+                // A position far outside the world's grid saturates at the edge of `i32`.
                 let biome = biome_at_quart(
-                    integral[0] - 2 + x as i32,
-                    integral[1] - 2 + y as i32,
-                    integral[2] - 2 + z as i32,
+                    integral[0].saturating_add(x as i32 - 2),
+                    integral[1].saturating_add(y as i32 - 2),
+                    integral[2].saturating_add(z as i32 - 2),
                 );
                 let w = wx * wy * wz;
                 match weights.iter_mut().find(|(b, _)| *b == biome) {
@@ -763,30 +889,8 @@ mod pack_tests {
 
     /// A built-in table of `names` (no colormaps: sampled colours fall back).
     fn builtin(names: &[&str]) -> Biomes {
-        let maps = Colormaps {
-            grass: Vec::new(),
-            foliage: Vec::new(),
-            dry: Vec::new(),
-        };
-        let list: Vec<BiomeInfo> = names
-            .iter()
-            .map(|n| BiomeInfo::from_json((*n).to_owned(), &json!({}), &maps))
-            .collect();
-        Biomes {
-            builtin: Arc::new(list.clone()),
-            index: list
-                .iter()
-                .enumerate()
-                .map(|(i, b)| (b.name.clone(), i as u16))
-                .collect(),
-            list,
-            info_noise: SimplexNoise::with_skipped_offsets(&mut LegacyRandom::new(2345), true),
-            placeholders: Default::default(),
-            exhausted: Default::default(),
-            colormaps: Arc::new(maps),
-            packs: BTreeMap::new(),
-            files: Arc::default(),
-        }
+        let entries: Vec<_> = names.iter().map(|&name| (name, json!({}))).collect();
+        Biomes::from_jsons(&entries)
     }
 
     #[test]
@@ -812,7 +916,7 @@ mod pack_tests {
             ("minecraft:molten_peaks", &hot),
             ("minecraft:river", &red),
         ];
-        let world = base.with_packs(files);
+        let world = base.with_packs(files).unwrap();
         // The built-in ids stay; the river takes the pack's values.
         assert_eq!(world.id("minecraft:plains"), 1);
         assert_eq!(world.id("minecraft:river"), 2);
@@ -851,11 +955,23 @@ mod pack_tests {
             ]
         );
         // Another world starts again from the built-in biomes.
-        let other = world.with_packs([]);
+        let other = world.with_packs([]).unwrap();
         assert_eq!(other.list.len(), 3);
         assert!(!other.contains("minecraft:molten_peaks"));
         assert_eq!(other.get(2).water, 0x3F76E4);
         assert!(!other.has_packs());
+    }
+
+    #[test]
+    fn invalid_biome_identifier_refuses_a_pack_table() {
+        let base = builtin(&["minecraft:plains"]);
+        let biome = json!({});
+        let result = base.with_packs([("example:marsh", &biome), ("example:zEbra", &biome)]);
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "biome registry entry \"example:zEbra\": invalid biome identifier"
+        );
+        assert_eq!(base.registry_order(), ["minecraft:plains"]);
     }
 
     /// A column keeps the ids of the table it was decoded with. When a
@@ -865,7 +981,7 @@ mod pack_tests {
     #[test]
     fn an_id_past_the_table_names_plains() {
         let next = builtin(&["minecraft:meadow", "minecraft:plains", "minecraft:river"]);
-        let last = next.with_packs([("limbo:void", &json!({}))]);
+        let last = next.with_packs([("limbo:void", &json!({}))]).unwrap();
         let stale = last.id("limbo:void");
         assert_eq!((stale, last.name(stale)), (3, "limbo:void"));
         assert_eq!(next.name(stale), "minecraft:plains");
@@ -894,9 +1010,14 @@ impl Biomes {
                 .enumerate()
                 .map(|(i, b)| (b.name.clone(), i as u16))
                 .collect(),
+            registered_keys: list
+                .iter()
+                .map(|b| parse_registered_biome_key(&b.name).unwrap())
+                .collect(),
             list,
             info_noise: SimplexNoise::with_skipped_offsets(&mut LegacyRandom::new(2345), true),
             placeholders: Default::default(),
+            unresolved: Default::default(),
             exhausted: Default::default(),
             colormaps: Arc::new(maps),
             packs: BTreeMap::new(),
@@ -936,7 +1057,9 @@ mod precipitation_tests {
             thread.spawn(|| assert_eq!(biomes.get(0).snows_at(pos, 120), Some(false)));
         });
 
-        let replaced = biomes.with_packs([("test:taiga", &json!({"temperature": 0.25}))]);
+        let replaced = biomes
+            .with_packs([("test:taiga", &json!({"temperature": 0.25}))])
+            .unwrap();
         assert_eq!(replaced.get(0).snows_at(pos, 120), Some(false));
     }
 }
@@ -947,39 +1070,15 @@ mod color_tests {
     use serde_json::json;
 
     fn biomes() -> Biomes {
-        let maps = Colormaps {
-            grass: Vec::new(),
-            foliage: Vec::new(),
-            dry: Vec::new(),
-        };
-        let effects = |grass: u32, modifier: &str| {
-            json!({"effects": {"grass_color": grass, "foliage_color": 0x112233,
+        let effects = |modifier: &str| {
+            json!({"effects": {"grass_color": 0x91BD59, "foliage_color": 0x112233,
                 "dry_foliage_color": 0x445566, "water_color": 0x3F76E4,
                 "grass_color_modifier": modifier}})
         };
-        let list = vec![
-            BiomeInfo::from_json("minecraft:plains".into(), &effects(0x91BD59, "none"), &maps),
-            BiomeInfo::from_json(
-                "minecraft:dark_forest".into(),
-                &effects(0x91BD59, "dark_forest"),
-                &maps,
-            ),
-        ];
-        Biomes {
-            builtin: Arc::new(list.clone()),
-            index: list
-                .iter()
-                .enumerate()
-                .map(|(i, b)| (b.name.clone(), i as u16))
-                .collect(),
-            list,
-            info_noise: SimplexNoise::with_skipped_offsets(&mut LegacyRandom::new(2345), true),
-            placeholders: Default::default(),
-            exhausted: Default::default(),
-            colormaps: Arc::new(maps),
-            packs: BTreeMap::new(),
-            files: Arc::default(),
-        }
+        Biomes::from_jsons(&[
+            ("minecraft:plains", effects("none")),
+            ("minecraft:dark_forest", effects("dark_forest")),
+        ])
     }
 
     #[test]
@@ -1032,6 +1131,16 @@ mod blend_tests {
         assert_eq!(blend_rgb(&weights, |_| [0.2, 0.4, 0.6]), [0.2, 0.4, 0.6]);
     }
 
+    /// A camera far outside the representable quart grid samples without overflowing.
+    #[test]
+    fn a_position_beyond_the_grid_samples_the_edge_cells() {
+        for position in [[-1e30, 0.0, 1e30], [1e30, -1e30, 0.0]] {
+            let weights = gaussian_weights(position, |_, _, _| 4);
+            assert_eq!(weights.len(), 1);
+            assert_eq!(weights[0].0, 4);
+        }
+    }
+
     #[test]
     fn colour_changes_gradually_across_a_boundary() {
         // Biome 1 for quart x >= 0 (block x >= 0), biome 0 below.
@@ -1056,23 +1165,7 @@ mod blend_tests {
     /// panic on `get`: before the fix, `list.len() - 1` underflowed.
     #[test]
     fn get_on_empty_biome_table_returns_default_instead_of_panicking() {
-        use std::sync::Arc;
-
-        let empty = Biomes {
-            builtin: Arc::new(Vec::new()),
-            files: Arc::default(),
-            index: HashMap::new(),
-            list: Vec::new(),
-            info_noise: SimplexNoise::with_skipped_offsets(&mut LegacyRandom::new(2345), true),
-            colormaps: Arc::new(Colormaps {
-                grass: Vec::new(),
-                foliage: Vec::new(),
-                dry: Vec::new(),
-            }),
-            packs: BTreeMap::new(),
-            placeholders: Default::default(),
-            exhausted: Default::default(),
-        };
+        let empty = Biomes::from_jsons(&[]);
         // Any id returns the shared default plains biome, no panic.
         let b = empty.get(0);
         assert_eq!(b.name, "minecraft:plains");
@@ -1365,7 +1458,7 @@ mod placeholder_tests {
         // A recoloured copy keeps the ids; a table rebuilt from packs does not share them.
         let recolored = biomes.with_colors(|_, c| c.water = 3).unwrap();
         assert_eq!(recolored.saved_name(gone), "gone_mod:highland");
-        let rebuilt = biomes.with_packs([]);
+        let rebuilt = biomes.with_packs([]).unwrap();
         assert_eq!(rebuilt.saved_name(gone), "minecraft:plains");
     }
 }

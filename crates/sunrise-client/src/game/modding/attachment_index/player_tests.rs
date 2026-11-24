@@ -16,7 +16,7 @@ const VALUE: AttachmentType<i32> = AttachmentType {
         },
     }),
     copy_on_death: true,
-    sync: false,
+    sync_codec: None,
 };
 
 fn snapshot(

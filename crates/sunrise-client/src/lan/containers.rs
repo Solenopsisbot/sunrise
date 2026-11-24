@@ -5,7 +5,7 @@ use super::{
     menu::{self, Menu, NativeMenuEvent, Rules, Slots, View},
 };
 use crate::{
-    containers::{BlockEntity, ModContainerInsertRule},
+    containers::{BlockEntity, ModContainerInsertRule, ModMenuType},
     items::ItemStack,
     world::World,
 };
@@ -408,11 +408,33 @@ impl Hub {
         items: Vec<Option<ItemStack>>,
         extra: Option<Vec<u8>>,
     ) -> Option<i32> {
-        let kind = self
-            .sync
-            .builtin
-            .get("minecraft:menu")
-            .and_then(|m| m.id(menu_kind))?;
+        self.open_menu_window_at(
+            conn,
+            menu_kind,
+            title,
+            pos,
+            slots,
+            items,
+            extra,
+            crate::containers::mod_menu_type(menu_kind),
+        )
+    }
+
+    /// Install a window and allocate its next vanilla protocol id (`1..=100`).
+    /// Stock displays have no mod menu type, even if a part listens to their clicks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_menu_window_at(
+        &mut self,
+        conn: u32,
+        menu_kind: &str,
+        title: Tag,
+        pos: Option<(i32, i32, i32)>,
+        slots: Slots,
+        items: Vec<Option<ItemStack>>,
+        extra: Option<Vec<u8>>,
+        mod_type: Option<&'static ModMenuType>,
+    ) -> Option<i32> {
+        let kind = self.registry_id("minecraft:menu", menu_kind)?;
         let i = self.guests.iter().position(|g| g.conn == conn)?;
         let encoded_extra = match extra {
             Some(data) => {
@@ -449,7 +471,7 @@ impl Hub {
                 menu: kind,
                 title,
             }));
-            let mod_type = crate::containers::mod_menu_type(menu_kind);
+            let mod_type = mod_type.or_else(|| crate::containers::mod_menu_type(menu_kind));
             let slot_changed_seen = mod_type.map(|t| {
                 let mut seen = items.clone();
                 seen.resize(t.slots, None);
@@ -474,6 +496,8 @@ impl Hub {
                 links: Vec::new(),
                 asks_still_valid: super::menu::asks_still_valid(mod_type, menu_kind),
                 opening_item: None,
+                opener_block: None,
+                removed: false,
                 slot_changed_seen,
             });
             window
@@ -494,48 +518,17 @@ impl Hub {
         mut items: Vec<Option<ItemStack>>,
     ) -> Option<i32> {
         let rows = rows.clamp(1, 6);
-        let kind = self
-            .sync
-            .builtin
-            .get("minecraft:menu")
-            .and_then(|m| m.id(&format!("minecraft:generic_9x{rows}")))?;
-        let i = self.guests.iter().position(|g| g.conn == conn)?;
-        self.close_container_at(i);
-        let size = usize::from(rows) * 9;
-        items.resize(size, None);
-        let window = self.guests.update(i, |g| {
-            g.native_menu = items.clone();
-            let window = g.next_menu_window();
-            g.send(&C::OpenScreen(play::OpenScreen {
-                container: window,
-                menu: kind,
-                title,
-            }));
-            g.menu = Some(Menu {
-                window,
-                kind,
-                registry_id: format!("minecraft:generic_9x{rows}").into_boxed_str(),
-                pos: None,
-                slots: Slots::Native,
-                size,
-                state: 0,
-                sent: Vec::new(),
-                drag: None,
-                sent_data: Vec::new(),
-                reported_unsent_data_len: None,
-                blockless_data: Vec::new(),
-
-                mod_type: None,
-                craft: None,
-                links: Vec::new(),
-                asks_still_valid: false,
-                opening_item: None,
-                slot_changed_seen: None,
-            });
-            window
-        });
-        self.send_menu_content(i, items);
-        Some(window)
+        items.resize(usize::from(rows) * 9, None);
+        self.open_menu_window_at(
+            conn,
+            &format!("minecraft:generic_9x{rows}"),
+            title,
+            None,
+            Slots::Native,
+            items,
+            None,
+            None,
+        )
     }
 
     /// Replaces what the guest's open native menu `window` shows with `items` (padded to its
@@ -616,7 +609,8 @@ impl Hub {
         }))
     }
 
-    fn send_menu_content(&mut self, i: usize, mut items: Vec<Option<ItemStack>>) {
+    /// Send the resolved guest's container slots, inventory and cursor without reopening.
+    pub fn send_menu_content(&mut self, i: usize, mut items: Vec<Option<ItemStack>>) {
         let Some(menu) = &self.guests[i].menu else {
             return;
         };
@@ -691,10 +685,10 @@ impl Hub {
         window: i32,
     ) -> Option<(ClosedHubMenu, Option<NativeMenuEvent>)> {
         self.guests.update(i, |g| {
-            let menu = g.menu.take_if(|m| m.window == window)?;
+            let mut menu = g.menu.take_if(|m| m.window == window)?;
             let carried = g.close_menu_cursor(menu.window);
             let processing_inputs = menu.take_processing_inputs(&mut g.native_menu);
-            let closed = menu.native_closed(g.uuid, g.menu_generation, &mut g.native_menu);
+            let closed = menu.native_removed(g.uuid, g.menu_generation, &mut g.native_menu, false);
             Some((
                 ClosedHubMenu {
                     carried,
@@ -703,6 +697,58 @@ impl Hub {
                 closed,
             ))
         })
+    }
+
+    /// `AbstractContainerMenu.removed` for a guest's active container window without yet
+    /// resetting `containerMenu` to the player's inventory menu, so `PlayerContainerEvent.Close`
+    /// still sees a live `MenuRef` before [`Self::finish_close_container`] clears it.
+    pub fn remove_container_menu(
+        &mut self,
+        conn: u32,
+        window: i32,
+    ) -> Option<(ClosedHubMenu, Option<NativeMenuEvent>)> {
+        let i = self.guests.connection_index(conn)?;
+        self.guests.update(i, |g| {
+            let matches = g
+                .menu
+                .as_ref()
+                .is_some_and(|m| m.window == window && !m.removed);
+            if !matches {
+                return None;
+            }
+            let carried = g.close_menu_cursor(window);
+            let uuid = g.uuid;
+            let generation = g.menu_generation;
+            let (processing_inputs, closed) = if let Some(menu) = g.menu.as_mut() {
+                let processing_inputs = menu.take_processing_inputs(&mut g.native_menu);
+                let closed = menu.native_removed(uuid, generation, &mut g.native_menu, true);
+                (processing_inputs, closed)
+            } else {
+                (Vec::new(), None)
+            };
+            Some((
+                ClosedHubMenu {
+                    carried,
+                    processing_inputs,
+                },
+                closed,
+            ))
+        })
+    }
+
+    /// Completes `ServerPlayer.doCloseContainer` (`this.containerMenu = this.inventoryMenu`)
+    /// after `PlayerContainerEvent.Close`, clearing `g.menu` only if `generation` is still
+    /// installed (leaving any replacement opened by a close listener intact).
+    pub fn finish_close_container(&mut self, conn: u32, generation: u64) {
+        let Some(i) = self.guests.connection_index(conn) else {
+            return;
+        };
+        self.guests.update(i, |g| {
+            if g.menu_generation == generation && g.menu.is_some() {
+                g.menu = None;
+                g.native_menu.clear();
+            }
+        });
     }
 
     fn close_container_at(&mut self, i: usize) {
@@ -1179,7 +1225,14 @@ impl Hub {
     /// `AbstractContainerMenu.setSelectedBundleItemIndex` on the guest's open
     /// menu: a container's own slots, or the inventory's. A bundle's selection
     /// lives on the server's stack until the click that takes from it.
-    pub fn select_bundle_item(&mut self, conn: u32, slot: usize, index: i32, world: &mut World) {
+    pub fn select_bundle_item(
+        &mut self,
+        conn: u32,
+        slot: usize,
+        index: i32,
+        world: &mut World,
+        catalog: &crate::items::Items,
+    ) {
         let _ = self.update_guest(conn, |g| {
             let open = g.menu.as_ref().map(|m| (m.size, m.slot_count(), m.slots));
             let mut items = match open {
@@ -1205,7 +1258,7 @@ impl Hub {
                 },
             };
             if let Some(stack) = stack {
-                crate::bundle::toggle_selected(stack, index);
+                crate::bundle::toggle_selected(catalog, stack, index);
             }
             if let (Some((_, _, source)), Some(items)) = (open, items) {
                 source.write(world, g, items);
@@ -1415,18 +1468,24 @@ impl Hub {
     }
 
     /// Slot changes of open containers (AbstractContainerMenu.broadcastChanges).
-    pub fn sync_containers(&mut self, world: &World) {
+    pub fn sync_containers(&mut self, world: &World) -> Vec<super::hub::HostEvent> {
+        let mut events = Vec::new();
         for i in 0..self.guests.len() {
             let Some(menu) = self.guests[i]
                 .menu
                 .as_ref()
-                .filter(|_| self.here(&self.guests[i]))
+                .filter(|menu| !menu.removed && self.here(&self.guests[i]))
             else {
                 continue;
             };
             let (total, window, slots) = (menu.slot_count(), menu.window, menu.slots);
             if !slots.valid(world) {
-                self.close_container_at(i);
+                let guest = &self.guests[i];
+                events.push(super::hub::HostEvent::CloseInvalidContainer {
+                    conn: guest.conn,
+                    window,
+                    generation: guest.menu_generation,
+                });
                 continue;
             }
             for slot in 0..total {
@@ -1460,6 +1519,7 @@ impl Hub {
             // Then the data slots, as broadcastChanges does.
             self.sync_container_data(i, world);
         }
+        events
     }
 }
 

@@ -15,22 +15,6 @@ pub trait BlockEntitiesHost {
     /// data reads find nothing until the row is put back.
     fn block_entity_identity(&self, level: LevelRef, pos: [i32; 3]) -> Option<BlockEntityRef>;
 }
-/// The server host's methods of the `block_entities` area, implemented by the game and reached through [`ServerHost`].
-#[sunrise_mod_api_macros::host_area]
-pub trait BlockEntitiesServerHost {
-    /// Side: server.
-    /// Sends clients the block at `pos` and its block entity's update tag
-    /// (`block_entity_update_tag`) again, as `Level.sendBlockUpdated`
-    /// does: with the level's other block changes, to the players who see its
-    /// chunk, once however often it is called before then. Changes made in a
-    /// block entity's tick go out at the start of the next tick, as vanilla's
-    /// do (`ServerLevel.tick` broadcasts chunks before it ticks block
-    /// entities). Call it when what clients show changed (a machine started),
-    /// not for every tick's progress: a menu's data slots carry that. Nothing
-    /// happens for an unloaded block. It also sends the one-shot fields of
-    /// `BlockEntityView::set_client_update_fields`.
-    fn block_entity_sync(&mut self, pos: [i32; 3]);
-}
 /// The handles' reads of the `block_entities` area, implemented by the game and reached through [`Backend`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
 #[doc(hidden)]
@@ -45,6 +29,24 @@ pub trait BlockEntitiesBackend {
     /// Side: both.
     /// The block entity's level.
     fn block_entity_level(&self, entity: BlockEntityRef) -> Option<LevelRef>;
+    /// Side: server.
+    /// The block entities of the named open server level, active or parked, whose positions lie
+    /// in the box from `min` (inclusive) to `max` (exclusive) on each axis and within the level's
+    /// build height (`LevelHeightAccessor.isInsideBuildHeight`), in no order. Only chunks
+    /// already loaded are read (`ServerChunkCache.getChunkNow`), from their live entries
+    /// (`LevelChunk.getBlockEntities`): nothing is loaded or generated, and saved entries not
+    /// yet made live are not listed. A moving piston's (`minecraft:piston`) is listed, and one taken
+    /// out for its tick is still listed with its own type. Empty for a box
+    /// with no block entity, including one of zero volume, one outside the build height and one
+    /// that meets no loaded chunk; any corners are valid, `i32::MIN` and `i32::MAX` included,
+    /// and there is no cap on the chunks a box covers. None for reversed bounds (`min` above
+    /// `max` on an axis), a stale handle, or on a client.
+    fn level_block_entities(
+        &self,
+        level: LevelRef,
+        min: [i32; 3],
+        max: [i32; 3],
+    ) -> Option<Vec<BlockEntityAt>>;
     /// Side: both.
     /// An owned snapshot of the data saved without identity or position metadata
     /// (`BlockEntity.saveWithoutMetadata`). The save payload is assembled on request.
@@ -88,6 +90,14 @@ pub trait BlockEntitiesBackend {
 #[doc(hidden)]
 #[sunrise_mod_api_macros::host_area]
 pub trait BlockEntitiesBackendMut {
+    /// Side: server.
+    /// `ServerLevel.sendBlockUpdated`: send the holder's block and update tag
+    /// (including one-shot client update fields) on its level's next block broadcast.
+    /// Requests before that broadcast coalesce. Call when the display changes, not
+    /// for progress carried by a menu's data slots. Works during the holder's own tick
+    /// and in parked levels. Returns `Stale` after replacement or unload, or
+    /// `Unavailable` when server world access is unavailable.
+    fn block_entity_sync(&mut self, entity: BlockEntityRef) -> Result<(), LevelWriteError>;
     /// Side: server.
     /// Change the lock through the same storage used by container opening and saving.
     /// The lock belongs to this block entity, not to the position or its previous occupant.

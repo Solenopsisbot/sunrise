@@ -75,7 +75,7 @@ mod prepared_model;
 pub use prepared_model::fail_next_prepared_upload;
 pub use prepared_model::{
     PreparedInstanceBuilder, PreparedModelDraw, PreparedModelInstance, PreparedModelVertex,
-    PreparedModels, camera_matrix,
+    PreparedModels, camera_matrix, prepared_instance_room_for,
 };
 #[cfg(feature = "test-support")]
 pub use prepared_model::{
@@ -106,18 +106,13 @@ use cull::occlusion_culling_requested;
 use entity_batch::EntityBatch;
 pub use entity_batch::{
     ADDITIVE_PARTICLE_OVERLAY, BANNER_PATTERN_OVERLAY, DISSOLVE_OVERLAY, DRAGON_RAYS_OVERLAY,
-    ENERGY_SWIRL_OVERLAY, GLINT_ONLY_OVERLAY, SHADOW_OVERLAY, TRANSLUCENT_GLINT_ITEM_OVERLAY,
-    TRANSLUCENT_ITEM_OVERLAY, TRANSLUCENT_PARTICLE_OVERLAY,
-};
-pub use entity_batch::{
-    FLUID_OVERLAY, TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY, TERRAIN_MODEL_CUTOUT_OVERLAY,
-    TERRAIN_MODEL_SOLID_OVERLAY, TERRAIN_MODEL_TRANSLUCENT_OVERLAY, WATER_MASK_OVERLAY,
-    is_native_terrain,
-};
-pub use entity_batch::{
-    OIT_ENTITY, TEXT_NORMAL_SOLID_OVERLAY, TEXT_POLYGON_OFFSET_OVERLAY,
-    TEXT_POLYGON_OFFSET_SOLID_OVERLAY, TRANSLUCENT_DRAW_FLIP, WORLD_TEXT_OVERLAY,
-    WORLD_TEXT_POLYGON_OFFSET_OVERLAY, mark_oit,
+    ENERGY_SWIRL_OVERLAY, EntityQuadCapacity, EntityQuadScope, FLUID_OVERLAY, GLINT_ONLY_OVERLAY,
+    OIT_ENTITY, SHADOW_OVERLAY, TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY, TERRAIN_MODEL_CUTOUT_OVERLAY,
+    TERRAIN_MODEL_SOLID_OVERLAY, TERRAIN_MODEL_TRANSLUCENT_OVERLAY, TEXT_NORMAL_SOLID_OVERLAY,
+    TEXT_POLYGON_OFFSET_OVERLAY, TEXT_POLYGON_OFFSET_SOLID_OVERLAY, TRANSLUCENT_DRAW_FLIP,
+    TRANSLUCENT_GLINT_ITEM_OVERLAY, TRANSLUCENT_ITEM_OVERLAY, TRANSLUCENT_PARTICLE_OVERLAY,
+    WATER_MASK_OVERLAY, WORLD_TEXT_OVERLAY, WORLD_TEXT_POLYGON_OFFSET_OVERLAY, is_native_terrain,
+    mark_oit,
 };
 use external::{shadow_box, shadow_runs};
 pub use frustum::{Cull, Frusta, JoinedFrusta, ShadowCull};
@@ -228,6 +223,7 @@ mod hdr_stats;
 pub(crate) mod hud_coverage;
 mod in_flight;
 mod sourced_geometry;
+mod terrain_normals;
 use display_watch::DisplayWatch;
 #[cfg(test)]
 use display_watch::{macos_hdr, os_reported};
@@ -870,8 +866,18 @@ impl Renderer {
             );
         }
     }
+    /// Device `max_buffer_size`, for instance-room checks while `Renderer` is borrowed by `render`.
+    pub fn max_buffer_size(&self) -> u64 {
+        self.device.limits().max_buffer_size
+    }
+    /// Render `frame`, optionally driving mod world-render hooks (`FrameHooks`) at the renderer's
+    /// real visibility, sky, prepare, pass-stage, and post-world boundaries.
     #[sunrise_mod_api_macros::replaceable]
-    pub fn render(&mut self, frame: &Frame) -> Result<bool> {
+    pub fn render(
+        &mut self,
+        frame: &Frame,
+        hooks: Option<&mut dyn world_primitives::FrameHooks>,
+    ) -> Result<bool> {
         // A lost device cannot accept uploads either. Leave recovery to the
         // owner instead of submitting atlas patches to the invalid device.
         if self.device_lost() {
@@ -883,8 +889,8 @@ impl Renderer {
         }
         let scaled = self.screenshot_size();
         let rendered = match scaled {
-            Some(size) => self.draw_scaled_frame(frame, size),
-            None => self.draw_frame(frame, None, self.output),
+            Some(size) => self.draw_scaled_frame(frame, size, hooks),
+            None => self.draw_frame(frame, None, self.output, hooks),
         };
         self.finish_prepared_frame();
         // A frame that was not drawn still submits the section copies and
@@ -1063,6 +1069,41 @@ pub(crate) struct PackLoading {
     >,
     label: String,
     started: std::time::Instant,
+    /// What its terrain and shadow programs will draw from the game's sections, as the built
+    /// pack's `has_terrain` and `has_shadow` will say (`PackLoading::draws_of`), for the layouts
+    /// the frames drawn meanwhile keep (`Renderer::pack_pending`).
+    draws: PackDraws,
+}
+
+/// What a pack's programs will draw, as the built pack's `has_terrain`, `has_shadow` and
+/// `draws_sections` will say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PackDraws {
+    pub(crate) terrain: bool,
+    pub(crate) shadow: bool,
+    pub(crate) sections: bool,
+}
+
+impl PackLoading {
+    /// What `post`'s programs draw once built, with terrain geometry (`atlas`, the pack's block
+    /// atlas) or without: `PackPost::has_terrain` (a solid or cutout terrain program, built with
+    /// that geometry, or terrain the pack leaves undrawn), `has_shadow` (the shadow pass, with a
+    /// terrain or translucent shadow program built with it) and `draws_sections` (a solid,
+    /// cutout or translucent terrain program, or that shadow pass). A program the device then
+    /// refuses to build is not foreseen: the layouts follow the built pack once it runs.
+    pub(crate) fn draws_of(post: &sunrise_shaders::Post, atlas: bool) -> PackDraws {
+        let shadow = atlas
+            && post.shadow_pass
+            && (post.shadow.is_some()
+                || post.shadow_water.is_some()
+                || post.shadow_water_plain.is_some());
+        let programs = post.terrain.is_some() || post.terrain_cutout.is_some();
+        PackDraws {
+            terrain: atlas && programs || post.terrain_undrawn,
+            shadow,
+            sections: atlas && (programs || post.water.is_some()) || shadow,
+        }
+    }
 }
 
 /// Sets its flag when dropped: `PackLoading`'s cancel, which `PackPost::new` checks per program.

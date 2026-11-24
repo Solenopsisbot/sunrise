@@ -102,6 +102,7 @@ pub(super) fn context_param(hook: &Hook) -> Option<HostParam> {
             PhaseContext::ClientSetup => "&mut dyn ClientSetupContext",
             PhaseContext::ClientIdentity => "&dyn ClientIdentityHost",
             PhaseContext::PackDiscovery => "&mut dyn PackDiscoveryContext",
+            PhaseContext::ItemAbility => "&ItemAbilityContext<'_>",
         }
         .into(),
         call: "context",
@@ -122,6 +123,7 @@ pub(super) fn phase_engine_type(phase: PhaseContext) -> &'static str {
         PhaseContext::ClientSetup => "&mut dyn mod_api::ClientSetupContext",
         PhaseContext::ClientIdentity => "&dyn mod_api::ClientIdentityHost",
         PhaseContext::PackDiscovery => "&mut dyn mod_api::PackDiscoveryContext",
+        PhaseContext::ItemAbility => "&mod_api::ItemAbilityContext<'_>",
     }
 }
 
@@ -209,6 +211,7 @@ mod tests {
             ),
             (PhaseContext::ClientSetup, "&mut dyn ClientSetupContext"),
             (PhaseContext::PackDiscovery, "&mut dyn PackDiscoveryContext"),
+            (PhaseContext::ItemAbility, "&ItemAbilityContext<'_>"),
         ] {
             let hook = Hook {
                 context: Some(kind),

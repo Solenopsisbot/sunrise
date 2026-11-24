@@ -1,6 +1,8 @@
 //! Owned and borrowed item values. Registry-dependent validation belongs to the game's write boundary.
 #[path = "item_stack_text.rs"]
 mod text;
+#[path = "item_stack_wear.rs"]
+mod wear;
 
 use crate::ItemKey;
 use component_edits::{ComponentEdit, ItemComponentEdits};
@@ -57,11 +59,11 @@ impl From<&Components> for Compound {
 /// of two stacks that still share it is a pointer comparison. An absent patch allocates nothing.
 ///
 /// An untouched mutable stack hook argument retains its engine value without
-/// write validation, even when the engine value exceeds effective maxima. Equality
-/// with the snapshot passed to the listener determines whether it changed; a changed
-/// argument is validated in full before committing any hook outputs.
-/// A refused hook output retains its captured engine value. The clicked-slot bridge also
-/// stages the slot, cursor and cancellation flags together. Independent host effects,
+/// write validation, even when the engine value exceeds effective maxima. Ordinary changed
+/// hook outputs are validated independently when the listener returns. A refused output
+/// keeps its last accepted value. A [`crate::HookList`] checks each edit that supplies a
+/// stack and leaves other edits intact on refusal. Atomic operations such as a stacked-item
+/// click still validate and apply their proposals together. Independent host effects,
 /// including storage writes, commands and messages, are not undone by output validation.
 // no wire: decoding rejects zero counts through new and validates component patches through set_components; damage is applied through set_damage.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,11 +77,15 @@ pub struct ItemStack {
 
 type StackMetadata = (ItemKey, NonZeroU32, Option<u32>);
 type StackProjector<'a> = dyn Fn(StackMetadata) -> Option<ItemStack> + 'a;
+type StackComponentReader<'a> = dyn Fn(&str) -> Option<Tag> + 'a;
+type LootStackProjector =
+    fn(&dyn crate::__private::LootStackAccess, StackMetadata) -> Option<ItemStack>;
 type SlotMetadata<'a> = dyn Fn(u32) -> Option<StackMetadata> + 'a;
 type SlotProjector<'a> = dyn Fn(u32, StackMetadata) -> Option<ItemStack> + 'a;
 
 /// A read-only loan of a nonempty stack. Reading its scalars does not copy the stack or
-/// encode its components. Use [`Self::project`] to retain an owned value or read its patch.
+/// encode its components. Use [`Self::get`] to read one override and [`Self::project`]
+/// to retain an owned value or read the whole patch.
 // no wire: borrows a call-scoped stack or projection callable.
 #[non_exhaustive]
 pub struct ItemStackView<'a> {
@@ -90,7 +96,12 @@ pub struct ItemStackView<'a> {
 enum StackProjection<'a> {
     Borrowed(&'a ItemStack),
     Resident(&'a StackProjector<'a>),
+    ResidentComponents(&'a StackProjector<'a>, &'a StackComponentReader<'a>),
     Slot(u32, &'a SlotProjector<'a>),
+    Loot(
+        &'a dyn crate::__private::LootStackAccess,
+        LootStackProjector,
+    ),
     PreparedDrop(
         usize,
         &'a dyn crate::block::prepared_drops::PreparedBlockDropsAccess,
@@ -114,6 +125,33 @@ impl<'a> ItemStackView<'a> {
         Self {
             metadata,
             projection: StackProjection::Resident(project),
+        }
+    }
+
+    /// Lend a resident stack with direct access to individual component overrides.
+    // hidden: the engine lends resident storage and lazy single-component lookup using metadata it has checked.
+    #[doc(hidden)]
+    pub fn resident_with_components(
+        metadata: StackMetadata,
+        project: &'a StackProjector<'a>,
+        read_override: &'a StackComponentReader<'a>,
+    ) -> Self {
+        Self {
+            metadata,
+            projection: StackProjection::ResidentComponents(project, read_override),
+        }
+    }
+
+    // hidden: the loot bridge lends the queried stack without materializing its patch.
+    #[doc(hidden)]
+    pub fn queried_loot(
+        metadata: StackMetadata,
+        source: &'a dyn crate::__private::LootStackAccess,
+        project: LootStackProjector,
+    ) -> Self {
+        Self {
+            metadata,
+            projection: StackProjection::Loot(source, project),
         }
     }
 
@@ -155,13 +193,33 @@ impl<'a> ItemStackView<'a> {
         self.metadata.2
     }
 
+    /// Read a stored component override with its typed descriptor, without consulting item
+    /// defaults. An inherited or removed component has no value to decode. If the source
+    /// cannot read individual overrides, this may project an owned stack.
+    pub fn get<C: Component>(&self, component: &C) -> Option<C::Value> {
+        let id = component.id();
+        if id == "minecraft:damage" {
+            return component.decode(&unsigned_tag(self.damage_component()?));
+        }
+        match self.projection {
+            StackProjection::Borrowed(stack) => stack.get(component),
+            StackProjection::ResidentComponents(_, read) => component.decode(&read(id)?),
+            StackProjection::Resident(_)
+            | StackProjection::Slot(..)
+            | StackProjection::Loot(..)
+            | StackProjection::PreparedDrop(..) => self.project()?.get(component),
+        }
+    }
+
     /// Copy this stack into an owned API value, including its normalized component patch.
     /// Returns `None` if the source cannot be represented as an owned [`ItemStack`].
     pub fn project(&self) -> Option<ItemStack> {
         let mut stack = match self.projection {
             StackProjection::Borrowed(stack) => stack.clone(),
-            StackProjection::Resident(project) => project(self.metadata)?,
+            StackProjection::Resident(project)
+            | StackProjection::ResidentComponents(project, _) => project(self.metadata)?,
             StackProjection::Slot(slot, project) => project(slot, self.metadata)?,
+            StackProjection::Loot(source, project) => project(source, self.metadata)?,
             StackProjection::PreparedDrop(index, access) => {
                 access.project_stack(index, self.metadata)?
             }
@@ -1023,6 +1081,17 @@ mod tests {
         fn encode(&self, value: i32) -> Tag {
             Tag::Int(value)
         }
+    }
+
+    #[test]
+    fn resident_stack_view_reads_one_override_without_projecting() {
+        let view = ItemStackView::resident_with_components(
+            (ItemKey(3), NonZeroU32::MIN, None),
+            &|_| panic!("component reads must not project the stack"),
+            &|id| (id == "test:number").then_some(Tag::Int(42)),
+        );
+        assert_eq!(view.get(&Number), Some(42));
+        assert_eq!(view.get(&Other), None);
     }
 
     #[test]

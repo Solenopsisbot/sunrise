@@ -681,6 +681,7 @@ impl Conn {
                 super::conn::frame_body(&mut self.writer, &body.body, &mut self.out)
             };
             if let Err(e) = result {
+                log::warn!("[lan] failed to frame outgoing packet: {e}");
                 self.end(now, e.to_string());
                 return false;
             }

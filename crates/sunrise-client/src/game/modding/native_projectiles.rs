@@ -118,7 +118,7 @@ impl Game<'_> {
     }
 
     /// Dispatch a hit for a projectile ticked outside the shared projectile list.
-    /// The caller checks the server opt-in gate and exposes the live projectile
+    /// The caller checks `native_hears_impacts` and exposes the live projectile
     /// before calling; misses never dispatch.
     pub(super) fn native_separate_projectile_impact(
         &mut self,
@@ -171,16 +171,12 @@ impl Game<'_> {
     }
 
     /// Whether this game is a server that flies projectiles for the mods (the
-    /// server thread or a dedicated server, never a client) and a mod asked to hear their impacts
-    /// (`native_hears_projectile_impacts`). Without one, the tick keeps no copy
+    /// server thread or a dedicated server, never a client) and an enabled mod
+    /// subscribes to `projectile_impact`. Without one, the tick keeps no copy
     /// of its projectiles: it costs nothing.
     pub(super) fn native_hears_impacts(&self) -> bool {
-        if self.serving.is_none() && self.options.dedicated.is_none() {
-            return false;
-        }
-        let mut hears = false;
-        self.native_hears_projectile_impacts(&mut hears);
-        hears
+        (self.serving.is_some() || self.options.dedicated.is_some())
+            && mod_api::__private::enabled_listened(mod_api::HookId::ProjectileImpact)
     }
 
     /// The entity id of the one who shot `p`: a mob's, a player's, else 0.
@@ -329,6 +325,9 @@ impl Game<'_> {
     }
 
     pub(super) fn native_projectile_impact_canceled(&mut self, p: &Projectile, hit: Hit) -> bool {
+        if !self.native_hears_impacts() {
+            return false;
+        }
         let (entity, entity_kind, block, face, at) = match hit {
             Hit::Block { pos, at, face } => (None, String::new(), pos, face, at),
             Hit::Entity { who, at } => {
@@ -624,7 +623,7 @@ impl Game<'_> {
     /// `p`, as it was before its tick, flown that tick through what it hit
     /// (`Projectile::tick_through`, `arrows::tick_through`): the projectile after
     /// it, whether it stays, and the arrow events it made.
-    fn native_projectile_through(
+    pub(super) fn native_projectile_through(
         &self,
         mut p: Projectile,
     ) -> (Projectile, bool, Vec<(Vec3, ArrowEvent)>) {

@@ -314,20 +314,17 @@ fn a_held_pad_toolbar_action_counts_as_the_toolbar_key() {
 
 #[test]
 #[ignore = "daily"]
-fn the_pads_attack_and_use_reach_what_the_mouse_tells_mods() {
+fn the_pads_attack_and_use_reach_the_vanilla_key_mappings() {
     playing(|game| {
         game.options.execution_role = ExecutionRole::Client;
         let attack_mapping = game.vanilla_key_mapping("key.attack").unwrap();
         let use_mapping = game.vanilla_key_mapping("key.use").unwrap();
-        assert_eq!(game.native_clicks(), (0, 0));
         pad_press(game, Button::RightTrigger, "key.attack");
         assert!(attack_mapping.is_down(game).unwrap());
-        assert_eq!(game.native_clicks(), (1, 0));
         pad_release(game, Button::RightTrigger);
         assert!(!attack_mapping.is_down(game).unwrap());
         pad_press(game, Button::LeftTrigger, "key.use");
         assert!(use_mapping.is_down(game).unwrap());
-        assert_eq!(game.native_clicks(), (1, 1));
     });
 }
 

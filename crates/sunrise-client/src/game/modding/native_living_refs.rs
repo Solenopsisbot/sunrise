@@ -4,25 +4,27 @@
 //! is tamed. Reads return `None`, writes false, for a stale handle or on a
 //! client; the exception is the reads marked side `both` (`living`, `with_equipment`,
 //! `with_hand_item`, `health`, `max_health`, `attribute_value`, `attribute_base`,
-//! `attributes` and `attribute_modifiers`), which on a client answer for the
-//! local player from the client's own copy; and `effect`/`effects`.
+//! `visit_attributes` and `visit_attribute_modifiers`), which on a client answer for the
+//! local player from the client's own copy; and `effect`/`visit_effects`. Visitor reads
+//! refuse with a typed error rather than returning `None`.
 use super::Game;
-use super::api_values::{StackReadMetadata, project_stack, stack_read_metadata};
+use super::api_values::{StackReadMetadata, projected_stack, stack_read_metadata};
 use super::commands::{Target, items::Owner};
 use super::living_attributes::AttributeWrite;
 use crate::mobs::Who;
 use mod_api::client::first_person::Hand;
 use mod_api::{
-    AttributeModifier, AttributeOperation, Direction, EntityRef, EquipmentSlot, Identifier,
-    ItemStackView, LivingRef, ModifierLifetime,
+    AttributeModifier, AttributeModifierView, AttributeOperation, Direction, EntityReadError,
+    EntityRef, EquipmentSlot, Identifier, ItemStackView, LivingRef, ModifierLifetime,
 };
+use std::{ops::ControlFlow, sync::Arc};
 use sunrise_client::health::{Attack, DamageLevel, HitEffects, Hurting, Knock, NO_ATTACK};
 use sunrise_client::items::{EntityTypeTags, ItemStack};
 use sunrise_client::mobs::{
     Mob,
     finalize::{self, EquipmentRead},
 };
-use sunrise_world::attributes::{Modifier, Operation};
+use sunrise_world::attributes::{Modifier, Operation, entity::Catalog};
 
 /// A player's armour slots (`armor`, head first) by equipment slot.
 fn armor_index(slot: EquipmentSlot) -> Option<usize> {
@@ -36,7 +38,7 @@ fn armor_index(slot: EquipmentSlot) -> Option<usize> {
 }
 
 /// A player's stack in `slot`, from its inventory, armour and off hand.
-fn player_slot<'a>(
+pub(super) fn player_slot<'a>(
     inventory: &'a [Option<ItemStack>],
     selected: usize,
     armor: &'a [Option<ItemStack>; 4],
@@ -58,7 +60,7 @@ pub(super) fn lend_equipment(
     read: &mut dyn for<'a> FnMut(ItemStackView<'a>),
 ) -> Option<()> {
     let metadata = stack_read_metadata(stack.base()).ok()?;
-    with_equipment_view(&stack, metadata, read);
+    with_equipment_view(&stack, metadata, |view, _| read(view));
     Some(())
 }
 
@@ -66,10 +68,33 @@ pub(super) fn lend_equipment(
 pub(super) fn with_equipment_view<R>(
     stack: &EquipmentRead<'_>,
     metadata: StackReadMetadata,
-    read: impl for<'a> FnOnce(ItemStackView<'a>) -> R,
+    read: impl for<'a> FnOnce(ItemStackView<'a>, &'a dyn Fn(&str) -> Option<mod_api::Tag>) -> R,
 ) -> R {
-    let project = |metadata| project_stack(&stack.project(), metadata).ok();
-    read(ItemStackView::resident(metadata, &project))
+    use sunrise_core::nbt::{JavaString, Tag};
+    let read_override = |id: &str| {
+        // The dye is read on the render path: its typed field and removal marker answer
+        // directly, without encoding a patch compound to read one integer back.
+        match id {
+            "minecraft:dyed_color" => {
+                return stack.base().extra.as_ref()?.dyed_color.map(Tag::Int);
+            }
+            "!minecraft:dyed_color" => {
+                return stack.base().extra.as_ref()?.other(id).cloned();
+            }
+            _ => {}
+        }
+        let bare = id.strip_prefix('!').unwrap_or(id);
+        let Tag::Compound(mut patch) = stack.extra_components_matching(|name| name == bare)? else {
+            return None;
+        };
+        patch.remove(&JavaString::from(id))
+    };
+    let project =
+        |metadata| projected_stack(metadata, stack.extra_components_matching(|_| true)).ok();
+    read(
+        ItemStackView::resident_with_components(metadata, &project, &read_override),
+        &read_override,
+    )
 }
 
 /// The equipment slot of a hand (`LivingEntity.getItemInHand`/`setItemInHand`).
@@ -118,36 +143,43 @@ fn equipment_stack(stack: Option<ItemStack>) -> Option<ItemStack> {
     stack.filter(|s| s.count > 0 && &*s.item != "minecraft:air")
 }
 
-/// The map's modifiers as the API's, in their order. Their ids are canonical
-/// (`Modifier` normalizes them), so none is dropped.
-fn attribute_modifiers(list: Vec<Modifier>) -> Vec<AttributeModifier> {
-    list.iter().filter_map(api_modifier).collect()
+/// Project each modifier without copying its canonical id out of the live map.
+pub(super) fn visit_attribute_modifiers(
+    modifiers: &[Modifier],
+    visit: &mut dyn FnMut(AttributeModifierView<'_>) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    modifiers.iter().try_for_each(|m| {
+        visit(mod_api::__private::game::attribute_modifier_view(
+            m.id(),
+            m.amount(),
+            match m.operation() {
+                Operation::AddValue => AttributeOperation::AddValue,
+                Operation::AddMultipliedBase => AttributeOperation::AddMultipliedBase,
+                Operation::AddMultipliedTotal => AttributeOperation::AddMultipliedTotal,
+            },
+        ))
+    })
 }
 
-/// One map modifier as the API's.
-fn api_modifier(m: &Modifier) -> Option<AttributeModifier> {
-    Some(AttributeModifier::new(
-        Identifier::parse(m.id()).ok()?,
-        m.amount(),
-        match m.operation() {
-            Operation::AddValue => AttributeOperation::AddValue,
-            Operation::AddMultipliedBase => AttributeOperation::AddMultipliedBase,
-            Operation::AddMultipliedTotal => AttributeOperation::AddMultipliedTotal,
-        },
-    ))
+/// Use the mob's saved-attribute seed if its map has not been built yet.
+pub(super) fn mob_attribute_modifiers<'a>(
+    mob: &'a Mob,
+    catalog: &Arc<Catalog>,
+    name: &str,
+) -> Option<&'a [Modifier]> {
+    mob.extra.live.modifiers(catalog, &mob.kind.id, name, || {
+        sunrise_client::entity_nbt::attribute_entries(mob)
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect()
+    })
 }
 
 impl Game<'_> {
     /// What a living handle names now: a player, a mob, an armor stand or the dragon.
     pub(super) fn native_living_target(&self, living: LivingRef) -> Option<Target> {
-        match self.native_entity_target(living.entity())? {
-            t @ (Target::Player
-            | Target::Guest(_)
-            | Target::Mob(_)
-            | Target::Stand(_)
-            | Target::Dragon(_)) => Some(t),
-            _ => None,
-        }
+        self.native_entity_target(living.entity())
+            .filter(|t| t.is_living())
     }
     /// A direct, non-damaging call to the short `LivingEntity.knockback` entry.
     pub(super) fn living_knockback(
@@ -198,11 +230,9 @@ impl Game<'_> {
                 let mut credit = plan.lend(&mut self.last_hurt_by_player);
                 let level =
                     crate::game::entity::damage_level_of!(self, &NO_ATTACK, &mut credit, None);
-                level.through_short_knockback(|level| {
-                    self.dragon
-                        .as_mut()
-                        .is_some_and(|d| d.knockback(level, knock, SOURCE, resistance))
-                })
+                self.dragon
+                    .as_mut()
+                    .is_some_and(|d| d.knockback(level, knock, SOURCE, resistance))
             }
             _ => false,
         }
@@ -257,15 +287,13 @@ impl Game<'_> {
             self.native_lifecycle.epoch(),
             None,
         ));
-        let velocity = level.through_short_knockback(|level| {
-            super::creatures::knockback::player_knockback_velocity(
-                player,
-                &mut random,
-                level,
-                knock,
-                source,
-            )
-        });
+        let velocity = super::creatures::knockback::player_knockback_velocity(
+            player,
+            &mut random,
+            &mut level,
+            knock,
+            source,
+        );
         // The retries drew from the victim's own random, landed or not.
         self.write_player_random(target, random);
         let velocity = velocity?;
@@ -309,7 +337,7 @@ impl Game<'_> {
         let mut credit = plan.lend(&mut self.last_hurt_by_player);
         let level = crate::game::entity::damage_level_of!(self, attack, &mut credit, None);
         let pushed = Hurting::ArmorStand(id as i32, source);
-        if level.through_short_knockback(|level| level.knockback_canceled(pushed, &mut knock)) {
+        if level.knockback_canceled(pushed, &mut knock) {
             return false;
         }
         let stand = &mut self.armor_stands[index];
@@ -364,38 +392,92 @@ impl Game<'_> {
         self.native_living_attribute(living, id, sunrise_world::attribute_map::ValueKind::Base)
     }
 
-    /// The ids of the attributes the entity's type has
-    /// (`AttributeMap`'s holder's attribute set), in registry order: the same
-    /// set the value and base reads answer for. None for a stale handle or an
-    /// unavailable entity; on a client, for any entity but the local player
-    /// (the client keeps no attribute map of another entity's, only the few
-    /// fields it draws).
-    pub(super) fn living_attributes(&self, living: LivingRef) -> Option<Vec<Identifier>> {
-        let catalog = &self.motion.attributes;
-        let entity = self.native_living_attribute_entity(living)?;
-        Some(
-            catalog
-                .attributes()
-                .filter(|(id, _)| catalog.default_base(entity, *id).is_some())
-                // The catalog's names are canonical, so none is dropped.
-                .filter_map(|(_, a)| Identifier::parse(&a.name).ok())
-                .collect(),
-        )
+    /// Resolve the visitor's target. Only the local player has these reads on the client.
+    pub(super) fn native_living_visit_target(
+        &self,
+        living: LivingRef,
+    ) -> Result<Target, EntityReadError> {
+        let target = self.native_entity_visit_target(living.entity())?;
+        if !matches!(target, Target::Player) && !self.is_logical_server() {
+            return Err(EntityReadError::Unavailable);
+        }
+        Ok(target)
     }
 
-    /// The modifiers on the entity's attribute `id`
-    /// (`AttributeInstance.getModifiers`), in the order they were added: a
-    /// mod's transient and permanent ones, the saved list's, and what the
-    /// worn and held items grant. An attribute no modifier is on answers an
-    /// empty list; None for an attribute the entity type does not have, a
-    /// stale handle, or on a client for any entity but the local player,
-    /// whose copy of the synced instances it reads.
-    pub(super) fn living_attribute_modifiers(
+    /// Lend the entity type's attribute ids in registry order.
+    pub(super) fn living_visit_attributes(
+        &self,
+        living: LivingRef,
+        visit: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, EntityReadError> {
+        let entity = match self.native_living_visit_target(living)? {
+            Target::Player | Target::Guest(_) => "minecraft:player",
+            Target::Mob(id) => self
+                .mobs
+                .iter()
+                .find(|m| m.id == id && !m.removed)
+                .ok_or(EntityReadError::Stale)?
+                .kind
+                .id
+                .as_str(),
+            Target::Stand(_) => "minecraft:armor_stand",
+            Target::Dragon(_) => "minecraft:ender_dragon",
+            _ => return Err(EntityReadError::Unavailable),
+        };
+        Ok(self
+            .motion
+            .attributes
+            .attribute_names_for(entity)
+            .try_for_each(visit))
+    }
+
+    /// Lend resident modifiers from the same attribute instances the value reads use.
+    pub(super) fn living_visit_attribute_modifiers(
         &self,
         living: LivingRef,
         id: &str,
-    ) -> Option<Vec<AttributeModifier>> {
-        self.native_target_attribute_modifiers(self.native_living_read_target(living)?, id)
+        visit: &mut dyn FnMut(AttributeModifierView<'_>) -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, EntityReadError> {
+        let catalog = &self.motion.attributes;
+        let modifiers = match self.native_living_visit_target(living)? {
+            Target::Player => self
+                .player
+                .as_ref()
+                .ok_or(EntityReadError::Unavailable)?
+                .attributes
+                .modifiers(id),
+            Target::Guest(conn) => self
+                .command_guest(conn)
+                .and_then(|guest| guest.motion.as_deref())
+                .ok_or(EntityReadError::Unavailable)?
+                .attributes
+                .modifiers(id),
+            Target::Mob(mob) => {
+                let m = self
+                    .mobs
+                    .iter()
+                    .find(|m| m.id == mob && !m.removed)
+                    .ok_or(EntityReadError::Stale)?;
+                mob_attribute_modifiers(m, catalog, id)
+            }
+            Target::Stand(stand) => self
+                .armor_stands
+                .iter()
+                .find(|a| a.id == stand)
+                .ok_or(EntityReadError::Stale)?
+                .live
+                .modifiers(catalog, "minecraft:armor_stand", id, Vec::new),
+            Target::Dragon(dragon) => self
+                .dragon
+                .as_ref()
+                .filter(|d| d.id == dragon)
+                .ok_or(EntityReadError::Stale)?
+                .live
+                .modifiers(catalog, "minecraft:ender_dragon", id, Vec::new),
+            _ => None,
+        }
+        .ok_or(EntityReadError::Unavailable)?;
+        Ok(visit_attribute_modifiers(modifiers, visit))
     }
 
     /// Adds an attribute modifier (`AttributeInstance.addTransientModifier`
@@ -451,7 +533,20 @@ impl Game<'_> {
         attribute: &str,
         base: f64,
     ) -> bool {
-        base.is_finite() && self.native_living_write(living, attribute, AttributeWrite::Base(base))
+        base.is_finite()
+            && self.native_living_write(
+                living,
+                attribute,
+                AttributeWrite::Base(self.mod_base_in_range(attribute, base)),
+            )
+    }
+
+    /// A mod's base clamped to the attribute's range, which `/attribute base set` and the entity's own code skip.
+    pub(in crate::game) fn mod_base_in_range(&self, attribute: &str, base: f64) -> f64 {
+        self.motion
+            .attributes
+            .definition(attribute)
+            .map_or(base, |d| d.sanitize(base))
     }
 
     fn native_living_add_modifier(
@@ -504,85 +599,6 @@ impl Game<'_> {
         kind: sunrise_world::attribute_map::ValueKind,
     ) -> Option<f64> {
         self.native_target_attribute(self.native_living_read_target(living)?, name, kind)
-    }
-
-    /// The entity's type key, for the catalog's attribute defaults: the same
-    /// set the value and base reads answer for. On a client only the local
-    /// player resolves (`native_living_read_target`).
-    fn native_living_attribute_entity(&self, living: LivingRef) -> Option<&str> {
-        match self.native_living_read_target(living)? {
-            Target::Player | Target::Guest(_) => Some("minecraft:player"),
-            Target::Mob(id) => self
-                .mobs
-                .iter()
-                .find(|m| m.id == id && !m.removed)
-                .map(|m| m.kind.id.as_str()),
-            Target::Stand(_) => Some("minecraft:armor_stand"),
-            Target::Dragon(_) => Some("minecraft:ender_dragon"),
-            _ => None,
-        }
-    }
-
-    /// The modifiers of `name` on `target`'s attribute map, as
-    /// `native_target_attribute` reads its value.
-    fn native_target_attribute_modifiers(
-        &self,
-        target: Target,
-        name: &str,
-    ) -> Option<Vec<AttributeModifier>> {
-        let catalog = &self.motion.attributes;
-        let player = match target {
-            Target::Player => self.player.as_ref()?,
-            Target::Guest(conn) => self.command_guest(conn)?.motion.as_deref()?,
-            Target::Mob(id) => {
-                let m = self.mobs.iter().find(|m| m.id == id && !m.removed)?;
-                return m
-                    .extra
-                    .live
-                    .modifiers(catalog, &m.kind.id, name, || {
-                        sunrise_client::entity_nbt::attribute_entries(m)
-                            .into_iter()
-                            .map(|(_, entry)| entry)
-                            .collect()
-                    })
-                    .map(attribute_modifiers);
-            }
-            Target::Stand(id) => {
-                let a = self.armor_stands.iter().find(|a| a.id == id)?;
-                return a
-                    .live
-                    .modifiers(catalog, "minecraft:armor_stand", name, Vec::new)
-                    .map(attribute_modifiers);
-            }
-            Target::Dragon(id) => {
-                let d = self.dragon.as_ref().filter(|d| d.id == id)?;
-                return d
-                    .live
-                    .modifiers(catalog, "minecraft:ender_dragon", name, Vec::new)
-                    .map(attribute_modifiers);
-            }
-            _ => return None,
-        };
-        // The base read's own None: an attribute the type does not have.
-        let key = player.attributes.key(name)?;
-        player
-            .attributes
-            .value(
-                Some(key.clone()),
-                sunrise_world::attribute_map::ValueKind::Base,
-            )
-            .ok()?;
-        Some(
-            player
-                .attributes
-                .lookup(Some(&key))
-                .and_then(|handle| player.attributes.instance(&handle).ok())
-                .map(|instance| instance.modifiers())
-                .unwrap_or_default()
-                .iter()
-                .filter_map(api_modifier)
-                .collect(),
-        )
     }
 
     pub(super) fn native_target_attribute(
@@ -1297,7 +1313,7 @@ impl Game<'_> {
         ctx: sunrise_client::sculk::Context,
     ) {
         if let Some(sound) = sound {
-            self.audio.play(&sound, Some(at), 1.0, 1.0);
+            self.play_audio(&sound, Some(at), 1.0, 1.0);
         }
         self.post_game_event(
             if equips {
@@ -1416,6 +1432,73 @@ pub(in crate::game) mod tests {
     use super::super::api_values::TryIntoApi;
     use super::*;
     use sunrise_core::geometry::Vec3;
+
+    /// A worn item's dye answers from its typed field, its removal marker and absence, and
+    /// every other component still reads through the patch.
+    #[test]
+    fn a_worn_items_dye_override_reads_without_a_patch_projection() {
+        use mod_api::{Tag, prelude::ItemsHost};
+        use std::num::NonZeroU32;
+
+        let mut host = mod_api::testing::FakeHost::new();
+        let id = mod_api::Identifier::parse("armor_test:chest").unwrap();
+        host.registries.resolve_items([id.clone()]).unwrap();
+        let item = host.item_key(&id).unwrap();
+        let metadata = (item, NonZeroU32::MIN, None);
+        let probe = |stack: &ItemStack, ids: &[&str]| {
+            with_equipment_view(&EquipmentRead::resident(stack), metadata, |_, read| {
+                ids.iter().map(|id| read(id)).collect::<Vec<_>>()
+            })
+        };
+        let dyed_id = ["minecraft:dyed_color", "!minecraft:dyed_color"];
+        let mut stack = ItemStack::new("minecraft:leather_chestplate", 1);
+        assert_eq!(probe(&stack, &dyed_id), [None, None], "absence");
+        stack.data_mut().dyed_color = Some(0x12_34_56);
+        assert_eq!(
+            probe(&stack, &dyed_id),
+            [Some(Tag::Int(0x12_34_56)), None],
+            "the typed field"
+        );
+        let mut removed = ItemStack::new("minecraft:leather_chestplate", 1);
+        removed.data_mut().set_other(
+            "!minecraft:dyed_color",
+            Some(Tag::Compound(Default::default())),
+        );
+        assert_eq!(
+            probe(&removed, &dyed_id),
+            [None, Some(Tag::Compound(Default::default()))],
+            "the removal marker"
+        );
+    }
+
+    /// The mod API keeps a written base in range; vanilla's own `setBaseValue` (`/attribute base set`) does not.
+    #[test]
+    #[ignore = "daily"]
+    fn a_mod_base_write_stays_in_range_and_a_vanilla_one_does_not() {
+        super::super::native_entity_refs::tests::with_game(|game| {
+            for (id, entity) in [(55, "minecraft:pig"), (56, "minecraft:slime")] {
+                let ty = game.res.mob_types().get(entity).unwrap().clone();
+                game.mobs.push(Mob::new(id, ty, Vec3::ZERO, 0.0));
+                let living = game.living(game.entity(id).unwrap()).unwrap();
+                assert!(game.living_set_attribute_base(living, "minecraft:max_health", 2000.0));
+                assert_eq!(
+                    game.living_attribute_base(living, "minecraft:max_health"),
+                    Some(1024.0),
+                    "{entity}: the mod's write"
+                );
+                let write = AttributeWrite::Base(2000.0);
+                assert_eq!(
+                    game.write_attribute(Target::Mob(id), "minecraft:max_health", write),
+                    Some(true)
+                );
+                assert_eq!(
+                    game.living_attribute_base(living, "minecraft:max_health"),
+                    Some(2000.0),
+                    "{entity}: /attribute base set"
+                );
+            }
+        });
+    }
 
     #[test]
     #[ignore = "daily"]
@@ -1686,6 +1769,7 @@ pub(in crate::game) mod tests {
     #[test]
     #[ignore = "daily"]
     fn a_handle_lists_its_attributes_and_reads_its_modifiers() {
+        use crate::game::native_entity_refs::tests::fixture_resident_column;
         use mod_api::{AttributeOperation, AttributeOperation::*, Identifier, ModifierLifetime::*};
         use sunrise_client::entities::ArmorStand;
         use sunrise_client::mobs::Mob;
@@ -1696,6 +1780,7 @@ pub(in crate::game) mod tests {
             AttributeModifier::new(Identifier::parse(id).unwrap(), amount, operation)
         };
         super::super::native_entity_refs::tests::with_game(|game| {
+            fixture_resident_column(&mut game.world, (0, 0));
             let zombie_kind = game
                 .res
                 .mob_types()
@@ -1707,31 +1792,72 @@ pub(in crate::game) mod tests {
             let zombie = game.living(game.entity(12).unwrap()).unwrap();
             let stand = game.living(game.entity(13).unwrap()).unwrap();
 
-            // The zombie's type has these attributes, and the stand's lacks
-            // attack damage.
-            let listed = |living: mod_api::LivingRef| living.attributes(game).unwrap();
-            for name in [
+            let read_names = |game: &dyn mod_api::Host, living: LivingRef| {
+                let mut names = Vec::new();
+                let result = living.visit_attributes(game, &mut |name| {
+                    names.push(name.to_owned());
+                    ControlFlow::Continue(())
+                });
+                assert_eq!(result, Ok(ControlFlow::Continue(())));
+                names
+            };
+            let read_modifiers = |game: &dyn mod_api::Host,
+                                  living: LivingRef,
+                                  name: &str|
+             -> Result<Vec<_>, EntityReadError> {
+                let mut modifiers = Vec::new();
+                assert_eq!(
+                    living.visit_attribute_modifiers(game, name, &mut |m| {
+                        modifiers.push((m.id.to_owned(), m.amount, m.operation));
+                        ControlFlow::Continue(())
+                    })?,
+                    ControlFlow::Continue(())
+                );
+                Ok(modifiers)
+            };
+            // Zombie.createAttributes supports these; Attributes registers them in this order.
+            let known = [
+                "minecraft:armor",
+                "minecraft:attack_damage",
                 "minecraft:max_health",
                 "minecraft:movement_speed",
-                "minecraft:attack_damage",
-            ] {
-                assert!(
-                    listed(zombie).contains(&Identifier::parse(name).unwrap()),
-                    "{name}"
-                );
-            }
+            ];
+            let names = read_names(game, zombie);
+            let matching: Vec<_> = names
+                .iter()
+                .map(String::as_str)
+                .filter(|id| known.contains(id))
+                .collect();
+            assert_eq!(matching, known);
+            let mut first_name = Vec::new();
+            assert_eq!(
+                zombie.visit_attributes(game, &mut |id| {
+                    first_name.push(id.to_owned());
+                    ControlFlow::Break(())
+                }),
+                Ok(ControlFlow::Break(()))
+            );
+            assert_eq!(first_name, ["minecraft:air_drag_modifier".to_owned()]);
             assert!(
-                !listed(stand).contains(&Identifier::parse("minecraft:attack_damage").unwrap())
+                !read_names(game, stand)
+                    .iter()
+                    .any(|id| id == "minecraft:attack_damage")
             );
 
-            // An attribute with no modifier answers an empty list, one the
-            // type lacks None.
+            // A known attribute with no modifiers completes; an unknown or unsupported one refuses.
             let speed = "minecraft:movement_speed";
-            assert_eq!(zombie.attribute_modifiers(game, speed), Some(Vec::new()));
-            assert_eq!(zombie.attribute_modifiers(game, "missing:attribute"), None);
+            assert_eq!(read_modifiers(game, zombie, speed), Ok(Vec::new()));
             assert_eq!(
-                stand.attribute_modifiers(game, "minecraft:attack_damage"),
-                None
+                zombie.visit_attribute_modifiers(game, "missing:attribute", &mut |_| panic!(
+                    "unknown attribute visited"
+                )),
+                Err(EntityReadError::Unavailable)
+            );
+            assert_eq!(
+                stand.visit_attribute_modifiers(game, "minecraft:attack_damage", &mut |_| panic!(
+                    "unsupported attribute visited"
+                )),
+                Err(EntityReadError::Unavailable)
             );
 
             // The add, replace and remove writes the reads follow.
@@ -1748,12 +1874,25 @@ pub(in crate::game) mod tests {
                 Transient
             ));
             assert_eq!(
-                zombie.attribute_modifiers(game, speed),
-                Some(vec![
-                    modifier("test:fast", 1.0, AddMultipliedBase),
-                    modifier("test:boost", 0.5, AddMultipliedTotal)
+                read_modifiers(game, zombie, speed),
+                Ok(vec![
+                    ("test:fast".to_owned(), 1.0, AddMultipliedBase),
+                    ("test:boost".to_owned(), 0.5, AddMultipliedTotal),
                 ])
             );
+            let mut first_modifier = Vec::new();
+            assert_eq!(
+                zombie.visit_attribute_modifiers(game, speed, &mut |m| {
+                    first_modifier.push((m.id.to_owned(), m.amount, m.operation));
+                    ControlFlow::Break(())
+                }),
+                Ok(ControlFlow::Break(()))
+            );
+            assert_eq!(
+                first_modifier,
+                [("test:fast".to_owned(), 1.0, AddMultipliedBase)]
+            );
+
             // Replacing puts the new one at the end, its lifetime changed.
             assert!(zombie.replace_attribute_modifier(
                 game,
@@ -1764,27 +1903,24 @@ pub(in crate::game) mod tests {
             let boost = Identifier::parse("test:boost").unwrap();
             assert!(zombie.remove_attribute_modifier(game, speed, &boost));
             assert_eq!(
-                zombie.attribute_modifiers(game, speed),
-                Some(vec![modifier("test:fast", 2.0, AddValue)])
+                read_modifiers(game, zombie, speed),
+                Ok(vec![("test:fast".to_owned(), 2.0, AddValue)])
             );
 
             // A worn helmet's modifier is read off the stand's live map.
             game.armor_stands[0]
                 .equipment
                 .set(HEAD, Some(ItemStack::new("minecraft:diamond_helmet", 1)));
-            game.tick_equipment_attributes();
-            let armor = stand.attribute_modifiers(game, "minecraft:armor").unwrap();
-            assert!(
-                armor.iter().any(|m| (m.amount - 3.0).abs() < 1e-9),
-                "{armor:?}"
-            );
+            game.refresh_stand_and_dragon_equipment_attributes();
+            let armor = read_modifiers(game, stand, "minecraft:armor").unwrap();
+            assert!(armor.iter().any(|m| m.1 == 3.0), "{armor:?}");
 
             // A player's own map answers the same read.
             game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
             crate::game::native_entity_refs::tests::bind_local_player(game, 20, 123);
             let player = game.living(game.entity(20).unwrap()).unwrap();
             let health = "minecraft:max_health";
-            assert_eq!(player.attribute_modifiers(game, health), Some(Vec::new()));
+            assert_eq!(read_modifiers(game, player, health), Ok(Vec::new()));
             assert!(player.add_attribute_modifier(
                 game,
                 health,
@@ -1792,16 +1928,29 @@ pub(in crate::game) mod tests {
                 Permanent
             ));
             assert_eq!(
-                player.attribute_modifiers(game, health),
-                Some(vec![modifier("test:hearty", 0.5, AddMultipliedBase)])
+                read_modifiers(game, player, health),
+                Ok(vec![("test:hearty".to_owned(), 0.5, AddMultipliedBase)])
             );
 
-            // A stale handle reads None.
+            // A stale handle refuses before calling either visitor.
             game.mobs.clear();
             game.armor_stands.clear();
-            assert_eq!(zombie.attributes(game), None);
-            assert_eq!(zombie.attribute_modifiers(game, speed), None);
-            assert_eq!(stand.attribute_modifiers(game, "minecraft:armor"), None);
+            assert_eq!(
+                zombie.visit_attributes(game, &mut |_| panic!("stale attributes visited")),
+                Err(EntityReadError::Stale)
+            );
+            assert_eq!(
+                zombie.visit_attribute_modifiers(game, speed, &mut |_| panic!(
+                    "stale modifier visited"
+                )),
+                Err(EntityReadError::Stale)
+            );
+            assert_eq!(
+                stand.visit_attribute_modifiers(game, "minecraft:armor", &mut |_| panic!(
+                    "stale modifier visited"
+                )),
+                Err(EntityReadError::Stale)
+            );
         });
     }
 
@@ -2823,11 +2972,10 @@ pub(in crate::game) mod tests {
                 host: &mut dyn ServerHost,
                 event: &mut LivingEquipmentChangeEvent<'_>,
             ) {
-                if event.entity == 18 && event.slot == "mainhand" {
-                    let entity = host.entity(event.entity).unwrap();
-                    let living = host.living(entity).unwrap();
+                if event.entity.id() == 18 && event.slot == EquipmentSlot::MainHand {
                     assert!(
-                        living
+                        event
+                            .entity
                             .set_equipment(
                                 host,
                                 EquipmentSlot::Head,

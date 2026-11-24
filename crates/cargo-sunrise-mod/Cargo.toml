@@ -25,7 +25,7 @@ sunrise-mod-package = { path = "../sunrise-mod-package", default-features = fals
 sunrise-native-build = { path = "../sunrise-native-build" }
 # The uses scan, the fit test, the surface search and its diff, over the fetched SDK's `surface.json`.
 sunrise-mod-surface = { path = "../sunrise-mod-surface" }
-sunrise-shader-api = { path = "../sunrise-shader-api" }
+sunrise-mod-pipeline = { path = "../sunrise-mod-pipeline" }
 sunrise-release-sign = { path = "../sunrise-release-sign" }
 sunrise-port-pack = { path = "../sunrise-port-pack" }
 sunrise-proxy = { path = "../sunrise-proxy" }

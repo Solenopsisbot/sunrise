@@ -194,12 +194,12 @@ fn projectile_and_command_targets_classify_actual_direct_entity_families() {
         attacker: 7,
         ..Default::default()
     };
-    Game::set_projectile_attack(&mut large_attack, &large);
+    Game::set_projectile_source(&mut large_attack, &large);
     let mut small_attack = Attack {
         attacker: 7,
         ..Default::default()
     };
-    Game::set_projectile_attack(&mut small_attack, &small);
+    Game::set_projectile_source(&mut small_attack, &small);
     let fireball = Damage {
         kind: DamageKind::Fireball,
         attacker: Some(Who::Player),

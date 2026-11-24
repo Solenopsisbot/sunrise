@@ -1,6 +1,7 @@
 //! The window's first renderer and frames: the renderer built from the prepared textures, the
 //! boot screen's frame, and `start_game`, which turns the loaded resources into a `Game`.
 use super::*;
+use sunrise_client::gfx::RendererDevice;
 
 /// CPU mip chains for the block sprites and world border.
 pub(super) fn prepare_renderer_textures(
@@ -28,7 +29,7 @@ pub(super) fn build_renderer(
     offscreen: bool,
     pack: &PackResources,
     gui: &UiResources,
-    previous: Option<&Renderer>,
+    device: RendererDevice<'_>,
     prepared: Option<sunrise_client::gfx::PreparedTextures>,
     api: sunrise_client::graphics::GraphicsApi,
     translucent_batching: bool,
@@ -63,6 +64,7 @@ pub(super) fn build_renderer(
         &assets.sprite_mips,
         &assets.animations,
         (&atlas_pixels, atlas.width, atlas.height),
+        Some(atlas),
         (&atlas.glint.0, atlas.glint.1, atlas.glint.2),
         (
             &atlas.glint_armor.0,
@@ -72,7 +74,7 @@ pub(super) fn build_renderer(
         (&pack.forcefield.2, pack.forcefield.0),
         gui.panorama.clone(),
         prepared,
-        previous,
+        device,
         api,
         translucent_batching,
         (shader_pack.draws_flat, shader_pack.starts_wide),
@@ -169,12 +171,13 @@ pub(super) fn loading_renderer(
         &[],
         &[],
         (pixels, width, height),
+        atlas,
         (glint_pixels, glint_width, glint_height),
         (glint_pixels, glint_width, glint_height),
         (&FORCEFIELD[..], 1),
         panorama,
         None,
-        previous,
+        previous.map_or(RendererDevice::New, RendererDevice::Reuse),
         api,
         // It draws no terrain.
         false,
@@ -197,12 +200,14 @@ pub(super) fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         camera: glam::DVec3::new(0.5, 100.0, 0.5),
         yaw: 0.0,
         pitch: 10.0,
+        roll: 0.0,
         fov_degrees: 85.0,
         cull_fov_degrees: 85.0,
         eye: glam::DVec3::new(0.5, 100.0, 0.5),
         eye_rotation: [0.0, 10.0],
         first_person: true,
         bob: glam::Mat4::IDENTITY,
+        view_transform: glam::Mat4::IDENTITY,
         spin: glam::Mat4::IDENTITY,
         sky: sunrise_client::environment::Sky::default(),
         shadow_scene_revision: (0, 0),
@@ -215,6 +220,7 @@ pub(super) fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         water_plane: None,
         cave_culling: false,
         title: true,
+        sky_pass: false,
         sky_blocked: false,
         skybox: false,
         end_sky: false,

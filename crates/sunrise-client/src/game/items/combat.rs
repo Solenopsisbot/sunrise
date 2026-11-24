@@ -112,13 +112,11 @@ pub(super) struct CombatTracker {
     /// Player`), not a mob whose UUID the TNT's `owner` names.
     pub(super) blast_owner_player: bool,
     pub(super) projectile_attacker: Option<(u32, Text)>,
-    pub(super) enchantment_projectile_attacker: Option<u32>,
+    /// The player shooter identified before the victim took the acting slot.
+    pub(super) enchantment_projectile_attacker: Option<i32>,
     /// The projectile hitting the player now is another player's that
     /// `ServerPlayer.canHarmPlayer` refuses (the `pvp` rule, an ally).
     pub(super) refuse_player_hit: bool,
-    /// The hit on the player now runs its post-attack effects (thorns) only
-    /// if the player lives through it (`WitherSkull.onHitEntity`).
-    pub(super) post_attack_if_alive: bool,
     /// The mob whose swing is being applied, when the caller knows it. Without
     /// it the attacker is the mob nearest to where the hit came from, which
     /// walks every mob.
@@ -163,6 +161,9 @@ pub(super) struct CombatTracker {
     /// `blast_hit_list`'s ids as a set, so a walk's membership check stays
     /// constant time however large the list is.
     pub(super) blast_hit_ids: std::collections::HashSet<u32>,
+    /// The one list entry the blast is reaching now: while it is set, every pass that asks
+    /// [`Self::visits`] sees only that entity.
+    pub(super) blast_turn: Option<u32>,
     /// The blast's direct source is in water (`Explosion.getDirectSourceEntity`
     /// `.isInWater`): paintings, item frames and cushions ignore it
     /// (`BlockAttachedEntity.ignoreExplosion`).
@@ -204,7 +205,8 @@ impl CombatTracker {
     /// the walk, unless a listening `explosion_detonate` left a list, and
     /// then only what that list names is.
     pub(super) fn visits(&self, id: u32) -> bool {
-        self.blast_hit_list.is_none() || self.blast_hit_ids.contains(&id)
+        self.blast_turn.is_none_or(|turn| turn == id)
+            && (self.blast_hit_list.is_none() || self.blast_hit_ids.contains(&id))
     }
 
     /// The attack lent by the enclosing [`Game::with_attack`] (`damage_level_of!(game, game.combat.attack(), .., ..)`).
@@ -1062,7 +1064,8 @@ impl Game<'_> {
 
 /// Hits one mob's tick deals another, handled after the mob loop.
 impl Game<'_> {
-    /// A melee hit on another mob, then `postAttack`; whether it landed.
+    /// A melee hit on another mob, then `postAttack`: the victim's
+    /// equipment, then the attacker's weapon; whether it landed.
     pub(super) fn mob_attacks_mob(
         &mut self,
         target: u32,
@@ -1102,17 +1105,20 @@ impl Game<'_> {
             }
             return;
         }
+        let source = mob.and_then(|id| self.entity(id));
         match target {
             Who::Player => {
                 self.combat.stuck.add_stinger();
                 if poison_ticks > 0 {
-                    self.give_player_effect("minecraft:poison", poison_ticks, 0);
+                    self.give_player_effect_from("minecraft:poison", poison_ticks, 0, source);
                 }
             }
             Who::Mob(id) if poison_ticks > 0 => {
-                if let Some(t) = self.mobs.iter_mut().find(|m| m.id == id) {
-                    t.add_effect("minecraft:poison", poison_ticks, 0);
-                }
+                self.add_mob_effect(
+                    id,
+                    sunrise_client::effects::EffectInstance::new("poison", poison_ticks, 0),
+                    source,
+                );
             }
             Who::Mob(_) => {}
         }
@@ -1122,8 +1128,7 @@ impl Game<'_> {
         if let Some(b) = self.mobs.iter_mut().find(|m| m.id == mob)
             && sunrise_client::mobs::bee::sting_landed(b)
         {
-            self.audio
-                .play("minecraft:entity.bee.sting", Some(from), 1.0, 1.0);
+            self.play_audio("minecraft:entity.bee.sting", Some(from), 1.0, 1.0);
         }
     }
     /// Whether a hit from a mob's tick on `target`, handled after the mob

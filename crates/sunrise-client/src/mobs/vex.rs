@@ -241,11 +241,11 @@ pub fn travel(m: &mut Mob, w: &super::MobWorld) {
         w.section_writer.clone(),
     );
     let y = m.velocity.y - m.effective_gravity();
-    m.velocity = Vec3::new(
+    m.set_velocity(Vec3::new(
         m.velocity.x * f64::from(0.91_f32),
         y * f64::from(0.98_f32),
         m.velocity.z * f64::from(0.91_f32),
-    );
+    ));
     m.ground.on_ground = false;
 }
 /// `Vex.tick`: the limited life costs a heart a second once spent.

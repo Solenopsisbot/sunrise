@@ -793,8 +793,7 @@ impl Game<'_> {
         }
         if self.screen_fx.portal == 0.0 {
             let pitch = self.world.random.next_float() * 0.4 + 0.8;
-            self.audio
-                .play("minecraft:block.portal.trigger", None, 0.25, pitch);
+            self.play_audio("minecraft:block.portal.trigger", None, 0.25, pitch);
         }
         true
     }
@@ -929,6 +928,18 @@ impl Game<'_> {
                     process: None,
                 },
             );
+        }
+    }
+    /// `Entity.load` on a live entity (`/data merge`): `portalCooldown` is the
+    /// compound's (0 when it has none), and the portal process is kept.
+    pub(super) fn merge_portal_cooldown(&mut self, id: u32, tag: &Tag) {
+        if let Some(portal) = self.portals.entities.get_mut(&id) {
+            portal.cooldown = tag
+                .get("PortalCooldown")
+                .and_then(sunrise_client::nbt_path::int_value)
+                .unwrap_or(0);
+        } else {
+            self.restore_portal_cooldown(id, tag);
         }
     }
     /// `Entity.saveWithoutId` writes the live `PortalCooldown`: the countdown
@@ -1395,6 +1406,7 @@ impl Game<'_> {
                 | super::commands::Target::Dragon(_)
                 | super::commands::Target::Spawner(_)
                 | super::commands::Target::Cloud(_)
+                | super::commands::Target::Bolt(_)
         ) {
             let at = self.target_position(target)?;
             let [width, height] = self.entity_dimensions(entity)?;
@@ -1434,9 +1446,16 @@ impl Game<'_> {
                 | Target::Dragon(_)
                 | Target::Spawner(_)
                 | Target::Cloud(_)
+                | Target::Bolt(_)
         ) {
             let mut tag = self.command_target_nbt(target)?;
-            super::persist::write_attachments(&mut tag, id, &self.entity_attachments);
+            if let Err(error) =
+                super::persist::write_attachments(&mut tag, id, &self.entity_attachments)
+            {
+                log::error!(
+                    "Sunrise: portal transfer attachment encode failed for entity {id}: {error}"
+                );
+            }
             let state = self.take_transferred_entity_state(id);
             // Remove only the resident body: no death, drops, or discard effects.
             match target {
@@ -1451,6 +1470,7 @@ impl Game<'_> {
                 Target::Dragon(_) => self.discard_resident_dragon(),
                 Target::Spawner(_) => self.ominous_spawners.retain(|e| e.id != id),
                 Target::Cloud(_) => self.breath_clouds.retain(|e| e.id != id),
+                Target::Bolt(_) => self.bolts.retain(|e| e.id != id),
                 _ => unreachable!("lone traveller kind selected above"),
             }
             self.forget_entity(id);
@@ -1539,7 +1559,13 @@ impl Game<'_> {
             })?;
             (tag, List::Projectile, i)
         };
-        super::persist::write_attachments(&mut tag, id, &self.entity_attachments);
+        if let Err(error) =
+            super::persist::write_attachments(&mut tag, id, &self.entity_attachments)
+        {
+            log::error!(
+                "Sunrise: portal transfer attachment encode failed for entity {id}: {error}"
+            );
+        }
         let state = self.take_transferred_entity_state(id);
         match list {
             List::Item => {
@@ -1682,6 +1708,11 @@ impl Game<'_> {
             self.native_entity_portal(self.dim.id(), id, [entry.x, entry.y, entry.z]);
         }
     }
+    /// Whether a portal arrival still needs this level, without collecting its chunks.
+    pub(super) fn has_portal_arrivals(&self, dim: Dim) -> bool {
+        self.portals.arrivals.iter().any(|a| a.plan.dim == dim)
+    }
+
     /// The chunks of the arrivals still waiting to land in `dim`, for the
     /// streaming `extra` areas that light them: vanilla's portal ticket
     /// (`Entity.teleport` adds `TicketType.PORTAL` at the destination) keeps
@@ -1939,7 +1970,14 @@ impl Game<'_> {
             }
         }
         let transferred = if f.id != 0 {
-            super::persist::write_attachments(&mut tag, f.id, &self.entity_attachments);
+            if let Err(error) =
+                super::persist::write_attachments(&mut tag, f.id, &self.entity_attachments)
+            {
+                log::error!(
+                    "Sunrise: portal transfer attachment encode failed for entity {}: {error}",
+                    f.id
+                );
+            }
             let state = self.take_transferred_entity_state(f.id);
             self.forget_entity(f.id);
             Some(TransferredArrivalState::Entity(state))

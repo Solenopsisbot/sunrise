@@ -80,22 +80,8 @@ impl Mob {
             return false;
         };
         let attack = level.attack();
-        let is_direct = attack.is_direct(source);
-        let attacker = match source.attacker {
-            Some(Who::Player) => Some("minecraft:player"),
-            Some(Who::Mob(_)) => source.attacker_species.map(species::vanilla_id),
-            None => None,
-        };
-        let direct_attacker = attack.mob_direct_type(source, attacker);
-        let context = crate::enchant::EffectContext {
-            items: Some(items),
-            damage_type: Some(crate::health::source_damage_type(*source)),
-            is_direct,
-            this: Some(&self.kind.id),
-            attacker,
-            direct_attacker,
-            ..Default::default()
-        };
+        let source = crate::health::mob_source(source, attack);
+        let context = attack.enchantment_context(source, &self.kind.id);
         let gear = gear::gear(self);
         let equipment = SLOT_NAMES
             .into_iter()

@@ -352,7 +352,7 @@ impl ShaderModifiers {
     pub fn resolve(
         &self,
         (vertex, fragment): (&str, &str),
-        program: &crate::core_shader::CoreProgram,
+        program: &sunrise_glsl::Translated,
         own: &[&str],
     ) -> Result<Vec<ExpressionUniform>, ExpressionRefusal> {
         if let Some(name) = (own.iter()).find(|name| {
@@ -364,7 +364,7 @@ impl ShaderModifiers {
         }
         if let Some(i) = (program.other.iter()).position(|n| n == sunrise_polytone::globals::BLOCK)
         {
-            let binding = crate::core_shader::other_binding(i);
+            let binding = program.other_binding(i);
             crate::gfx::expression_blocks::check_poly_globals(
                 [&program.vertex, &program.fragment],
                 binding,
@@ -376,7 +376,7 @@ impl ShaderModifiers {
             if own.contains(&name.as_str()) {
                 continue;
             }
-            let binding = crate::core_shader::other_binding(i);
+            let binding = program.other_binding(i);
             let stages = program.stages_reading(binding);
             if stages.is_empty() {
                 continue;
@@ -423,11 +423,7 @@ mod tests {
     /// A lightmap pipeline's program whose vertex stage reads blocks `vertex` and whose
     /// fragment stage reads `fragment` (each `uniform Name { float v; };`, or `vec4` for one
     /// named `Wide`), besides `LightmapInfo` and the blocks in `unused`, declared and not read.
-    fn program(
-        vertex: &[&str],
-        fragment: &[&str],
-        unused: &[&str],
-    ) -> crate::core_shader::CoreProgram {
+    fn program(vertex: &[&str], fragment: &[&str], unused: &[&str]) -> sunrise_glsl::Translated {
         let block = |name: &&str| {
             let ty = if *name == "Wide" { "vec4" } else { "float" };
             format!(
@@ -475,7 +471,7 @@ mod tests {
 
     fn resolved(
         modifiers: &ShaderModifiers,
-        program: &crate::core_shader::CoreProgram,
+        program: &sunrise_glsl::Translated,
     ) -> Result<Vec<(String, wgpu::ShaderStages, f32)>, ExpressionRefusal> {
         let [vertex, fragment] = crate::gfx::LIGHTMAP_SHADERS;
         let uniforms = modifiers.resolve((vertex, fragment), program, &["LightmapInfo"])?;

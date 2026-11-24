@@ -1743,6 +1743,9 @@ pub enum Event {
     NativePackOptions(usize),
     /// Native mod `.0`'s page opened: the game reads its settings' kept values again.
     NativeSettings(usize),
+    /// Config was pressed for native mod `.0`, which has its own config screen
+    /// (`IConfigScreenFactory`): the game asks the mod to open it over this screen.
+    ModConfigScreen(usize),
     /// Setting `.1` of native mod `.0`'s page changed (`settings.mods`): the game keeps it and
     /// tells the mod (`setting_changed`).
     NativeSetting(usize, usize),
@@ -2091,6 +2094,12 @@ fn tooltip_text(s: &Settings, wd: &Widget) -> Option<Text> {
         Act::Push(Page::Accessibility) => Some("options.accessibility.tooltip".into()),
         Act::PvpPreset => Some("sunrise.pvp.preset.tooltip".into()),
         Act::HudEditor => Some("sunrise.pvp.editor.tooltip".into()),
+        // A toggle, choice or colour shows its tooltip as a range's slider does.
+        Act::NativeSetting(i, j) => s
+            .mods
+            .installed
+            .get(*i)
+            .and_then(|m| m.native.as_ref()?.settings.get(*j)?.tooltip.clone()),
         _ => None,
     };
     if let Some(key) = key.filter(|key| lang::has(key)) {
@@ -3359,6 +3368,15 @@ impl OptionsUi {
                 Do::None => {}
                 Do::OpenFolder => events.push(Event::OpenModFolder),
                 Do::Back => events.extend(self.back(s)),
+                Do::Config(i)
+                    if s.mods.is_on(i)
+                        && s.mods.installed[i]
+                            .native
+                            .as_ref()
+                            .is_some_and(|page| page.own_screen) =>
+                {
+                    events.push(Event::ModConfigScreen(i));
+                }
                 Do::Config(i) => {
                     self.push(Page::NativeMod(i));
                     events.push(Event::NativeSettings(i));
@@ -5571,6 +5589,17 @@ mod tests {
         let events = click(&mut ui, &mut s, 320.0, 223.0);
         assert_eq!(events.first(), Some(&Event::ButtonClick));
         assert_eq!(ui.page(), Page::Main);
+        // A mod with its own config screen (`IConfigScreenFactory`) has Config with no
+        // settings, and Config asks the game to open that screen over this one.
+        s.mods.installed[0].native = Some(crate::mod_list::NativePage {
+            own_screen: true,
+            ..Default::default()
+        });
+        ui.show(Page::Mods);
+        assert!(click(&mut ui, &mut s, 61.0, 76.0).is_empty());
+        let events = click(&mut ui, &mut s, 397.0, 192.0);
+        assert_eq!(events, vec![Event::ButtonClick, Event::ModConfigScreen(0)]);
+        assert_eq!(ui.page(), Page::Mods);
     }
 
     #[test]
@@ -5668,6 +5697,67 @@ mod tests {
                 value: 4.0
             }
         );
+    }
+
+    /// A native mod's toggle shows the tooltip it registered, as its range slider does
+    /// (`OptionInstance.createButton` hands every kind its `Tooltip`).
+    #[test]
+    fn a_native_toggle_shows_its_tooltip_like_a_slider() {
+        use crate::mod_list::{NativeSetting, NativeSettingValue as V};
+        let key = "native.setting.tooltip";
+        let text = "Shows a mod setting's tooltip.";
+        let mut s = Settings::default();
+        let setting = |name: &str, value| NativeSetting {
+            key: name.into(),
+            label: name.into(),
+            tooltip: Some(key.into()),
+            value,
+        };
+        s.mods.installed.push(crate::mod_list::Installed {
+            id: "native".into(),
+            title: "Native 1.0".into(),
+            description: String::new(),
+            problem: None,
+            dev: false,
+            native: Some(crate::mod_list::NativePage {
+                settings: vec![
+                    setting("trails", V::Toggle(true)),
+                    setting(
+                        "speed",
+                        V::Range {
+                            min: 0.0,
+                            max: 4.0,
+                            step: 1.0,
+                            value: 1.0,
+                        },
+                    ),
+                ],
+                ..Default::default()
+            }),
+        });
+        let mut ui = OptionsUi::default();
+        ui.show(Page::NativeMod(0));
+        let language = lang::Language::of("en_us", [(key.into(), text.into())]);
+        let (tips, _) = lang::scoped(language, || {
+            let (widgets, ..) = ui.layout(&s, 480.0, 240.0);
+            widgets
+                .iter()
+                .filter(|w| {
+                    matches!(
+                        w.kind,
+                        WKind::Button {
+                            act: Act::NativeSetting(0, 0),
+                            ..
+                        } | WKind::Slider {
+                            opt: Opt::ModSetting(0, 1),
+                            ..
+                        }
+                    )
+                })
+                .map(|w| tooltip_text(&s, w).map(|t| t.plain()))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(tips, [Some(text.to_owned()), Some(text.to_owned())]);
     }
 
     /// Typing goes to the Mods search box once a click focuses it; the one match is selected,
@@ -5995,6 +6085,7 @@ mod tests {
                     ..Default::default()
                 }],
                 settings: Vec::new(),
+                own_screen: false,
             }),
         });
         ui.show(Page::KeyBinds);
@@ -6353,6 +6444,7 @@ mod tests {
                     tooltip: None,
                     value: crate::mod_list::NativeSettingValue::Toggle(true),
                 }],
+                own_screen: false,
             }),
         });
         let labels = lang::scoped(english(), || ui.extras.row_labels(&s)).0;
@@ -7406,26 +7498,25 @@ mod tests {
             ui.scroll = row.y - row_y;
             let (x, width, height) = (row.x, row.w, row.h);
             ui.draw_test_frame(&s, NONE, &mut batch, &atlas, (-1.0, -1.0), &mut |_, _| {});
-            let vertices: Vec<_> = batch
-                .vertices
-                .iter()
-                .filter(|v| {
-                    (0.25..=0.5).contains(&v.uv[0])
-                        && (0.25..=0.5).contains(&v.uv[1])
-                        && v.pos[0] >= x
-                        && v.pos[0] <= x + width
-                        && v.pos[1] >= row_y
-                        && v.pos[1] <= row_y + height
+            // The button sprite's quads in the row's box, as far as their scissor lets them show.
+            let quads = batch.vertices.as_chunks::<6>().0.iter();
+            let visible: Vec<_> = quads
+                .zip(batch.quad_scissors().zip(batch.visible_quads()))
+                .filter(|(q, ((bounds, _), _))| {
+                    q.iter()
+                        .all(|v| (0.25..=0.5).contains(&v.uv[0]) && (0.25..=0.5).contains(&v.uv[1]))
+                        && bounds[0] >= x
+                        && bounds[2] <= x + width
+                        && bounds[1] >= row_y
+                        && bounds[3] <= row_y + height
                 })
+                .filter_map(|(_, (_, visible))| visible)
                 .collect();
-            assert!(!vertices.is_empty());
-            let lo = vertices
+            assert!(!visible.is_empty());
+            let lo = visible.iter().map(|q| q[1]).fold(f32::INFINITY, f32::min);
+            let hi = visible
                 .iter()
-                .map(|v| v.pos[1])
-                .fold(f32::INFINITY, f32::min);
-            let hi = vertices
-                .iter()
-                .map(|v| v.pos[1])
+                .map(|q| q[3])
                 .fold(f32::NEG_INFINITY, f32::max);
             assert_eq!(lo, row_y.max(top));
             assert_eq!(hi, (row_y + height).min(bottom));

@@ -154,22 +154,29 @@ impl Game<'_> {
         let Some((slot, ticks)) = self.using else {
             return;
         };
-        // ItemStack.isSameItem compares the item in the active hand, even when
-        // that hand is now holding a different hotbar slot.
+        // The may-still-use check (`ItemStack.isSameItem`, then a part's
+        // `canContinueUsing`) reads the active hand, even when that hand is now
+        // holding a different hotbar slot.
         let offhand = slot == crate::game::shield::OFFHAND_SLOT;
-        let hand_slot = if offhand { slot } else { self.selected };
-        let Some(stack) = self
-            .stack_in(hand_slot)
-            .filter(|stack| {
-                self.use_start
-                    .item
-                    .as_ref()
-                    .is_some_and(|active| stack.item == active.item)
-            })
-            .cloned()
-        else {
+        let (hand_slot, hand) = if offhand {
+            (slot, Hand::Off)
+        } else {
+            (self.selected, Hand::Main)
+        };
+        let held = self.stack_in(hand_slot).cloned();
+        let began = self.use_start.item.clone();
+        let goes_on = began
+            .as_ref()
+            .zip(held.as_ref())
+            .is_some_and(|(began, held)| self.can_continue_using(began, held, None, hand));
+        let Some(stack) = held.filter(|_| goes_on) else {
             self.using = None;
             self.use_start = Default::default();
+            // Another item stops the use (`stopUsingItem`); an emptied hand is used up.
+            if let Some(began) = began.filter(|_| self.stack_in(hand_slot).is_some()) {
+                let time_left = ticks_left(self.use_duration, ticks);
+                self.stopped_using(&began, None, hand, time_left);
+            }
             return;
         };
         self.use_start.item = Some(stack.clone());

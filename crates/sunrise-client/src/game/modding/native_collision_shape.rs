@@ -1,12 +1,12 @@
 //! The `collision_shape` Part method (vanilla's `getCollisionShape` with its `CollisionContext`).
 //! The client library asks through `native_client_hooks` from inside a move; only a state whose
-//! block has a subscribing part is converted, and a part that faults is switched off.
+//! block has a subscribing part is converted, and a part that faults loses only its answer.
 use super::{
     Game,
     api_values::{TryIntoApi, block_state},
 };
-use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::Arc};
-use sunrise_core::position::BlockPos;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
+use sunrise_core::{geometry::VoxelShape, position::BlockPos};
 use sunrise_world::{
     block_collision::BlockCollisionRegistry, native_load_context::LoopContext,
     part_collision::InParts, registry::BlockStateId,
@@ -17,21 +17,16 @@ thread_local! {
     /// names they share are not built again each tick.
     static PARTS: RefCell<Option<Rc<sunrise_client::collision_parts::ModParts>>> =
         const { RefCell::new(None) };
-    /// The blocks whose `collision_shape` parts faulted, for the session: in memory, never
-    /// saved, and a new load of the mod set starts empty.
-    static DISABLED: RefCell<HashSet<mod_api::BlockKey>> = RefCell::new(HashSet::new());
 }
 
-/// The game's side of `sunrise_client::collision_parts::native_collision_shape`. A panic in a
-/// part, or an answer over the shape bounds, keeps the block's normal shape, switches the
-/// block's `collision_shape` parts off for the session and is logged once, naming the mods and
-/// the block.
+/// Dispatches through the shared Part dispatcher, which restores only the failed
+/// invocation's output on unwind. Native callers receive the already-built shape.
 pub(crate) fn collision_shape(
     context: &LoopContext,
     pos: BlockPos,
     state: BlockStateId,
     query: &mod_api::CollisionQuery,
-    shape: &mut Option<Vec<[f64; 6]>>,
+    shape: &mut Option<VoxelShape>,
 ) {
     if !block_state::block_listens(mod_api::HookId::CollisionShape, state) {
         return;
@@ -39,52 +34,15 @@ pub(crate) fn collision_shape(
     let Ok(api_state) = state.try_into_api() else {
         return;
     };
-    let block = api_state.block();
-    if DISABLED.with_borrow(|disabled| disabled.contains(&block)) {
-        return;
-    }
-    let mut boxes = None;
-    let ran = sunrise_client::crash::contain(|| {
-        mod_api::dispatch_collision_shape(
-            &sunrise_client_render::api_context::LoopReader(context).context(),
-            pos,
-            api_state,
-            query,
-            &mut boxes,
-        );
-    });
-    match ran {
-        Ok(()) => *shape = boxes,
-        Err(error) => disable(state, &format!("panicked: {error}")),
-    }
-}
-
-/// A part answered a shape the bounds refuse: the block keeps its normal shape.
-pub(crate) fn refused(state: BlockStateId, error: &str) {
-    disable(
-        state,
-        &format!("answered a shape that was refused: {error}"),
+    let mut answer = None;
+    mod_api::dispatch_collision_shape(
+        &sunrise_client_render::api_context::LoopReader(context).context(),
+        pos,
+        api_state,
+        query,
+        &mut answer,
     );
-}
-
-/// Switches the block of `state` off for the session and logs it once, naming the mods and the
-/// block.
-fn disable(state: BlockStateId, fault: &str) {
-    let Ok(api_state) = state.try_into_api() else {
-        return;
-    };
-    let block = api_state.block();
-    if DISABLED.with_borrow_mut(|disabled| disabled.insert(block)) {
-        use mod_api::BlockMetadata;
-        let name = mod_api::__private::block_definitions()
-            .and_then(|blocks| blocks.name(block).ok().map(str::to_owned))
-            .unwrap_or_else(|| format!("block {}", state.0));
-        log::error!(
-            "collision_shape of {name} (mods {}) {fault}; it is disabled for the session and the \
-             block keeps its normal shape",
-            mod_api::__private::block_key_owners(mod_api::HookId::CollisionShape, block).join(", ")
-        );
-    }
+    *shape = answer.map(mod_api::__private::voxel_shape_into_core);
 }
 
 /// Marks the states of `collision` whose parts answer `collision_shape`, and only them.
@@ -120,7 +78,6 @@ impl Game<'_> {
     /// keep them in the cells around their own. Between ticks, after the parts are resolved.
     pub(in crate::game) fn mark_collision_shape_states(&self) {
         mark_part_states(self.collision);
-        DISABLED.with_borrow_mut(HashSet::clear);
     }
 
     /// The parts that answer this tick's collision queries, until the guard drops: none when no
@@ -144,30 +101,44 @@ mod tests {
         Answer,
         Panic,
         Refuse,
+        Observe,
     }
-    struct Part(Mode, Arc<AtomicUsize>);
+    /// One Part type per mod: a block takes a Part type once (`insert_part`).
+    struct Part<const MOD: u8>(Mode, Arc<AtomicUsize>);
     #[mod_api::sunrise_part]
-    impl mod_api::BlockPart for Part {
+    impl<const MOD: u8> mod_api::BlockPart for Part<MOD> {
         fn collision_shape(
             &self,
             _: &dyn mod_api::LoopContext,
             event: &mut mod_api::CollisionShapeEvent<'_>,
         ) {
             self.1.fetch_add(1, Ordering::SeqCst);
+            let half = [[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]];
             match self.0 {
-                Mode::Answer => *event.shape = Some(vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]),
-                Mode::Panic => panic!("a part that faults"),
-                Mode::Refuse => *event.shape = Some(vec![[f64::NAN; 6]]),
+                Mode::Answer => {
+                    *event.shape = Some(mod_api::VoxelShape::try_from_boxes(&half).unwrap())
+                }
+                Mode::Panic => {
+                    *event.shape = Some(mod_api::VoxelShape::empty());
+                    panic!("a part that faults");
+                }
+                Mode::Refuse => {
+                    if let Ok(shape) = mod_api::VoxelShape::try_from_boxes(&[[f64::NAN; 6]]) {
+                        *event.shape = Some(shape);
+                    }
+                }
+                Mode::Observe => {
+                    assert!(event.shape.as_ref().unwrap().boxes().eq(half));
+                    *event.shape = Some(mod_api::VoxelShape::empty());
+                }
             }
         }
     }
 
-    /// A part that answers, one that panics and one whose answer is over the bounds, on stone,
-    /// dirt and gravel: a faulting block keeps its normal shape and is not asked again.
     #[test]
-    fn a_faulting_part_is_switched_off_for_the_session_and_the_others_keep_answering() {
-        let calls: Vec<_> = (0..3).map(|_| Arc::new(AtomicUsize::new(0))).collect();
-        struct Listener(Vec<Arc<AtomicUsize>>);
+    fn a_failed_shape_answer_does_not_erase_other_parts_on_the_same_block() {
+        let calls: Vec<_> = (0..4).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        struct Listener(Mode, Arc<AtomicUsize>);
         #[mod_api::__subscriptions]
         impl mod_api::Hooks for Listener {
             fn register(
@@ -175,20 +146,28 @@ mod tests {
                 registrar: &mut dyn mod_api::Registrar,
                 _: &mod_api::RegistrationContext,
             ) {
-                for (block, mode, calls) in [
-                    ("minecraft:stone", Mode::Answer, &self.0[0]),
-                    ("minecraft:dirt", Mode::Panic, &self.0[1]),
-                    ("minecraft:gravel", Mode::Refuse, &self.0[2]),
-                ] {
-                    let key = registrar.block_key(block);
-                    registrar.block_part(key, Part(mode, calls.clone()));
+                let key = registrar.block_key("minecraft:stone");
+                let calls = self.1.clone();
+                match self.0 {
+                    Mode::Answer => registrar.block_part(key, Part::<0>(self.0, calls)),
+                    Mode::Panic => registrar.block_part(key, Part::<1>(self.0, calls)),
+                    Mode::Refuse => registrar.block_part(key, Part::<2>(self.0, calls)),
+                    Mode::Observe => registrar.block_part(key, Part::<3>(self.0, calls)),
                 }
             }
         }
-        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
-            "collision_fault",
-            Box::new(Listener(calls.clone())),
-        )]
+        let mods: mod_api::Mods = [
+            ("shape_a", Mode::Answer),
+            ("shape_b", Mode::Panic),
+            ("shape_c", Mode::Refuse),
+            ("shape_d", Mode::Observe),
+        ]
+        .into_iter()
+        .zip(&calls)
+        .map(|((id, mode), calls)| {
+            mod_api::ModEntry::new(id, Box::new(Listener(mode, calls.clone())))
+        })
+        .collect::<Vec<_>>()
         .into();
         mod_platform::testing::with_mods(mods.clone(), || {
             mod_platform::__private::part_tests::install_parts_fixture(&mods).unwrap();
@@ -219,25 +198,12 @@ mod tests {
                 );
                 shape
             };
-            DISABLED.with_borrow_mut(HashSet::clear);
-            // Asked for stone: the part's boxes, every time, and the part is not disabled.
-            assert_eq!(ask(0), Some(vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]));
-            assert_eq!(ask(0), Some(vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]));
-            assert_eq!(calls[0].load(Ordering::SeqCst), 2);
-            // A panic keeps the normal shape (none) and switches the block off: the part is not
-            // called a second time.
-            assert_eq!(ask(1), None);
-            assert_eq!(ask(1), None);
-            assert_eq!(calls[1].load(Ordering::SeqCst), 1);
-            // A refused answer reaches the adapter as boxes: the one check is made where the shape
-            // is built, which reports the refusal here and switches the block off.
-            assert!(ask(2).is_some());
-            refused(BlockStateId(2), "TooManyBoxes");
-            assert_eq!(ask(2), None);
-            assert_eq!(calls[2].load(Ordering::SeqCst), 1);
-            assert_eq!(DISABLED.with_borrow(HashSet::len), 2);
-            // A state with no part is not asked and keeps its shape.
-            assert_eq!(ask(3), None);
+            for _ in 0..2 {
+                assert!(ask(0).unwrap().is_empty());
+            }
+            for count in calls {
+                assert_eq!(count.load(Ordering::SeqCst), 2);
+            }
         });
     }
 
@@ -340,7 +306,7 @@ mod tests {
                 if event.query.kind() == mod_api::CollisionEntityKind::Player
                     && event.query.entity() == Some(7)
                 {
-                    *event.shape = Some(Vec::new());
+                    *event.shape = Some(mod_api::VoxelShape::empty());
                 }
             }
         }
@@ -418,7 +384,6 @@ mod tests {
                 .unwrap()
                 .x
             };
-            DISABLED.with_borrow_mut(HashSet::clear);
             ASKED.store(0, Ordering::SeqCst);
             // The level tick's parts, as the client and the server enter them.
             let parts = enter_parts(&context);

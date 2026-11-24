@@ -126,6 +126,8 @@ pub struct StackData {
     pub map_id: Option<i32>,
     /// `minecraft:writable_book_content` pages.
     pub writable_pages: Vec<String>,
+    /// Each page's `Filterable.filtered`: empty when no page has one, else one per page.
+    pub writable_filtered: Vec<Option<String>>,
     /// `minecraft:written_book_content`.
     pub written: Option<WrittenBook>,
     /// `minecraft:banner_patterns` (banners and shields).
@@ -145,6 +147,9 @@ pub struct StackData {
     pub pot_decorations: Option<Box<[Option<ItemStack>; 4]>>,
     /// `minecraft:bundle_contents`.
     pub bundle_contents: Vec<ItemStack>,
+    /// The resolved weight of `bundle_contents`, dropped whenever the data is handed out for
+    /// editing.
+    pub(crate) bundle_weight: crate::bundle::WeightCache,
     /// `BundleContents.selectedItem`: runtime only, never saved or sent.
     pub bundle_selected: BundleSelected,
     /// `minecraft:suspicious_stew_effects`: (effect id, duration).
@@ -157,9 +162,16 @@ pub struct StackData {
     /// What the server sent for this stack, for sending it back unchanged.
     pub wire: Wire,
 }
-impl PartialEq for StackData {
-    fn eq(&self, other: &Self) -> bool {
-        // Exhaustive: adding a component must also choose its equality here.
+impl StackData {
+    /// `PartialEq` with `overlay_enchantments` (when non-empty) and
+    /// `overlay_trim` (when `Some`) substituted for `self`'s fields without
+    /// cloning. Exhaustive: adding a component must also choose its equality here.
+    fn eq_with_overlay(
+        &self,
+        other: &Self,
+        overlay_enchantments: &[(Arc<str>, u32)],
+        overlay_trim: Option<&Trim>,
+    ) -> bool {
         // The two ItemEnchantments fields use map equality; all other fields
         // retain their existing equality, including ordered list components.
         let Self {
@@ -186,6 +198,7 @@ impl PartialEq for StackData {
             fireworks,
             map_id,
             writable_pages,
+            writable_filtered,
             written,
             banner_patterns,
             base_color,
@@ -196,14 +209,21 @@ impl PartialEq for StackData {
             pot_decorations,
             bundle_contents,
             bundle_selected,
+            bundle_weight: _,
             stew_effects,
             map_post_processing,
             other: preserved,
             wire,
         } = self;
+        let effective_enchantments = if overlay_enchantments.is_empty() {
+            enchantments.as_slice()
+        } else {
+            overlay_enchantments
+        };
+        let effective_trim = overlay_trim.or(trim.as_ref());
         damage_set == &other.damage_set
             && banner_patterns_set == &other.banner_patterns_set
-            && enchantments_equal(enchantments, &other.enchantments)
+            && enchantments_equal(effective_enchantments, &other.enchantments)
             && enchantments_equal(stored_enchantments, &other.stored_enchantments)
             && repair_cost == &other.repair_cost
             && explicit_zero_damage == &other.explicit_zero_damage
@@ -214,12 +234,13 @@ impl PartialEq for StackData {
             && villager_food == &other.villager_food
             && potion == &other.potion
             && potion_extra == &other.potion_extra
-            && trim == &other.trim
+            && effective_trim == other.trim.as_ref()
             && container == &other.container
             && charged == &other.charged
             && fireworks == &other.fireworks
             && map_id == &other.map_id
             && writable_pages == &other.writable_pages
+            && writable_filtered == &other.writable_filtered
             && written == &other.written
             && banner_patterns == &other.banner_patterns
             && base_color == &other.base_color
@@ -234,6 +255,11 @@ impl PartialEq for StackData {
             && map_post_processing == &other.map_post_processing
             && preserved == &other.other
             && wire == &other.wire
+    }
+}
+impl PartialEq for StackData {
+    fn eq(&self, other: &Self) -> bool {
+        self.eq_with_overlay(other, &[], None)
     }
 }
 impl std::hash::Hash for StackData {
@@ -263,6 +289,7 @@ impl std::hash::Hash for StackData {
             fireworks,
             map_id,
             writable_pages,
+            writable_filtered,
             written,
             banner_patterns,
             base_color,
@@ -273,6 +300,7 @@ impl std::hash::Hash for StackData {
             pot_decorations,
             bundle_contents,
             bundle_selected: _,
+            bundle_weight: _,
             stew_effects,
             map_post_processing,
             other: preserved,
@@ -304,6 +332,7 @@ impl std::hash::Hash for StackData {
         fireworks.hash(state);
         map_id.hash(state);
         writable_pages.hash(state);
+        writable_filtered.hash(state);
         written.hash(state);
         banner_patterns.hash(state);
         base_color.hash(state);
@@ -333,7 +362,7 @@ fn hash_enchantments<H: std::hash::Hasher>(levels: &Levels, state: &mut H) {
 /// ItemEnchantments is a map, but keeps its written order for display. Compare
 /// without allocating or reordering either component. The usual same-order
 /// case uses slice equality; only reordered entries need the quadratic scan.
-fn enchantments_equal(first: &Levels, second: &Levels) -> bool {
+fn enchantments_equal(first: &[(Arc<str>, u32)], second: &[(Arc<str>, u32)]) -> bool {
     first == second
         || (first.len() == second.len()
             && first.iter().all(|entry| {
@@ -348,7 +377,7 @@ use sunrise_world::component_value::{consume_effects::Admitted, source::normaliz
 #[derive(Clone, Debug, PartialEq)]
 struct ConsumableComponent {
     raw: Tag,
-    value: crate::items::ItemConsumable,
+    value: Arc<crate::items::ItemConsumable>,
     refused: bool,
 }
 impl ConsumableComponent {
@@ -384,7 +413,7 @@ impl ConsumableComponent {
         };
         Some(Arc::new(Self {
             raw,
-            value,
+            value: Arc::new(value),
             refused,
         }))
     }
@@ -575,10 +604,11 @@ impl StackData {
                     .flat_map(|effects| effects.iter()),
             )
             .find_map(|effect| match effect {
-                crate::items::ConsumeEffect::Native {
-                    registered: Some(effect),
-                    ..
-                } if matches(effect) => Some(effect.clone()),
+                crate::items::ConsumeEffect::Native(effect) => effect
+                    .registered
+                    .as_ref()
+                    .filter(|effect| matches(effect))
+                    .cloned(),
                 _ => None,
             })
             .or_else(|| {
@@ -718,19 +748,12 @@ impl StackData {
                 );
             }
             _ if MODELLED.contains(&id) => {
-                let mut saved = match components_tag(0, Some(self)) {
-                    Some(Tag::Compound(c)) => c,
-                    _ => Default::default(),
-                };
-                saved.remove(&JavaString::from(id));
-                if let Some(tag) = tag {
-                    saved.insert(JavaString::from(id), tag);
+                if self.ominous_banner && is_ominous_component(id) {
+                    self.materialize_ominous_banner();
                 }
-                // A damage set before stays where it was: reading would take it.
-                let damage = self.other("minecraft:damage").cloned();
-                let (_, read) = decode_components(Some(&Tag::Compound(saved)));
-                *self = read.map_or_else(Default::default, |data| *data);
-                self.set_other("minecraft:damage", damage);
+                let decoded =
+                    tag.and_then(|tag| decode_components(Some(&Tag::compound([(id, tag)]))).1);
+                self.apply_component_changes(decoded, std::iter::once(id));
             }
             _ => self.set_other(id, tag),
         }
@@ -1016,13 +1039,18 @@ impl StackData {
                     replace_fields!(banner_patterns, banner_patterns_set)
                 }
                 "minecraft:base_color" => replace_fields!(base_color),
-                "minecraft:writable_book_content" => replace_fields!(writable_pages),
+                "minecraft:writable_book_content" => {
+                    replace_fields!(writable_pages, writable_filtered)
+                }
                 "minecraft:written_book_content" => replace_fields!(written),
                 "minecraft:fireworks" => replace_fields!(fireworks),
                 "minecraft:firework_explosion" => replace_fields!(firework_explosion),
                 "minecraft:dyed_color" => replace_fields!(dyed_color),
                 "minecraft:pot_decorations" => replace_fields!(pot_decorations),
-                "minecraft:bundle_contents" => replace_fields!(bundle_contents, bundle_selected),
+                "minecraft:bundle_contents" => {
+                    replace_fields!(bundle_contents, bundle_selected);
+                    data.bundle_weight = Default::default();
+                }
                 "minecraft:suspicious_stew_effects" => replace_fields!(stew_effects),
                 "minecraft:map_post_processing" => replace_fields!(map_post_processing),
                 "minecraft:charged_projectiles" => replace_fields!(charged),
@@ -1206,7 +1234,7 @@ impl ItemStack {
     pub fn consumable<'a>(
         &'a self,
         info: Option<&'a ItemInfo>,
-    ) -> Option<&'a crate::items::ItemConsumable> {
+    ) -> Option<&'a Arc<crate::items::ItemConsumable>> {
         if let Some(data) = self.data() {
             if data.other("!minecraft:consumable").is_some() {
                 return None;
@@ -1274,7 +1302,9 @@ impl ItemStack {
     }
 
     pub fn data_mut(&mut self) -> &mut StackData {
-        self.extra.get_or_insert_with(Box::default)
+        let data = self.extra.get_or_insert_with(Box::default);
+        data.bundle_weight = Default::default();
+        data
     }
     /// Apply only the named component fields from a decoded snapshot of this same item.
     /// Unchanged fields keep their runtime data, including in nested stacks. The engine
@@ -1404,6 +1434,11 @@ impl ItemStack {
     /// `Item.isFoil` (enchantments, or a compass carrying a lodestone tracker).
     /// Stored book enchantments do not count.
     pub fn has_foil(&self, item_glint: Option<bool>) -> bool {
+        self.has_foil_with_enchantments(item_glint, !self.enchantments().is_empty())
+    }
+
+    /// Use the enchantments of a borrowed equipment stack, which can carry a gear overlay.
+    pub fn has_foil_with_enchantments(&self, item_glint: Option<bool>, enchanted: bool) -> bool {
         let own = self
             .data()
             .and_then(|data| data.other("minecraft:enchantment_glint_override"))
@@ -1417,7 +1452,7 @@ impl ItemStack {
             &self.item,
             self.data()
                 .is_some_and(|data| data.other("minecraft:lodestone_tracker").is_some()),
-            !self.enchantments().is_empty(),
+            enchanted,
         );
         crate::properties::foil(override_glint, item_foil)
     }
@@ -1537,6 +1572,28 @@ impl ItemStack {
     /// `ItemStack.matches`: the same item, count and components.
     pub fn matches(&self, other: &Self) -> bool {
         self.count == other.count && self.same_item_same_components(other)
+    }
+    /// `ItemStack.matches` with separate mob gear overlays (`enchantments` when
+    /// non-empty, `trim` when `Some`) applied to `self` without cloning.
+    pub fn matches_with_overlay(
+        &self,
+        other: &Self,
+        enchantments: &[(Arc<str>, u32)],
+        trim: Option<&Trim>,
+    ) -> bool {
+        if self.count != other.count || self.item != other.item || self.damage != other.damage {
+            return false;
+        }
+        if enchantments.is_empty() && trim.is_none() {
+            return self.data() == other.data();
+        }
+        let Some(other_data) = other.data() else {
+            return false;
+        };
+        match self.data() {
+            Some(self_data) => self_data.eq_with_overlay(other_data, enchantments, trim),
+            None => StackData::default().eq_with_overlay(other_data, enchantments, trim),
+        }
     }
     /// `getOrDefault(DataComponents.ATTRIBUTE_MODIFIERS)`: the stack's own
     /// `attribute_modifiers` component when it has one (none at all when it
@@ -1764,6 +1821,31 @@ impl WrittenBook {
     }
 }
 
+/// `WritableBookContent.CODEC`'s pages that decode, as their raw text.
+fn writable_raw(content: Option<&Tag>) -> Vec<String> {
+    writable_page_tags(content)
+        .filter_map(filterable_text)
+        .collect()
+}
+/// The filtered text of the pages [`writable_raw`] keeps: empty when none has one.
+fn writable_filtered(content: Option<&Tag>) -> Vec<Option<String>> {
+    let filtered: Vec<_> = writable_page_tags(content)
+        .filter(|t| filterable_text(t).is_some())
+        .map(|t| t.get("filtered").and_then(read_text))
+        .collect();
+    if filtered.iter().all(Option::is_none) {
+        Vec::new()
+    } else {
+        filtered
+    }
+}
+fn writable_page_tags(content: Option<&Tag>) -> impl Iterator<Item = &Tag> {
+    match content.and_then(|b| b.get("pages")) {
+        Some(Tag::List(pages)) => pages.as_slice(),
+        _ => &[],
+    }
+    .iter()
+}
 fn filterable_text(t: &Tag) -> Option<String> {
     match t.get("raw") {
         Some(raw) => read_text(raw),
@@ -2156,13 +2238,19 @@ fn components_tag_inner(
         {
             entries.push(("minecraft:base_color", Tag::String((&**color).into())));
         }
-        // Filterable values are saved as {raw: ..}.
-        let raw = |t: Tag| Tag::compound([("raw", t)]);
+        // `Filterable.codec` encodes the full record: {raw: ..}, and `filtered` when a page has one.
         if !d.writable_pages.is_empty() && selector("minecraft:writable_book_content") {
             let pages = d
                 .writable_pages
                 .iter()
-                .map(|p| raw(Tag::String(p.as_str().into())))
+                .enumerate()
+                .map(|(i, p)| {
+                    let filtered = d.writable_filtered.get(i).and_then(Option::as_deref);
+                    Tag::compound(
+                        std::iter::once(("raw", Tag::String(p.as_str().into())))
+                            .chain(filtered.map(|f| ("filtered", Tag::String(f.into())))),
+                    )
+                })
                 .collect();
             entries.push((
                 "minecraft:writable_book_content",
@@ -2458,10 +2546,8 @@ fn decode_components_inner(
             .base_color
             .and_then(string)
             .map(|s| Arc::from(s.as_str())),
-        writable_pages: match seen.writable_book_content.and_then(|b| b.get("pages")) {
-            Some(Tag::List(pages)) => pages.iter().filter_map(filterable_text).collect(),
-            _ => Vec::new(),
-        },
+        writable_pages: writable_raw(seen.writable_book_content),
+        writable_filtered: writable_filtered(seen.writable_book_content),
         written: seen.written_book_content.map(written_book_from_tag),
         fireworks: seen
             .fireworks
@@ -2545,6 +2631,7 @@ fn decode_components_inner(
             .map(|v| v as u8),
         trim: seen.trim.and_then(trim::from_nbt),
         bundle_selected: BundleSelected::default(),
+        bundle_weight: Default::default(),
         other: Vec::new(),
         wire: Wire::default(),
     };
@@ -4115,13 +4202,8 @@ mod tests {
                 .get("minecraft:base_color")
                 .and_then(string)
                 .map(|s| Arc::from(s.as_str())),
-            writable_pages: match c
-                .get("minecraft:writable_book_content")
-                .and_then(|b| b.get("pages"))
-            {
-                Some(Tag::List(pages)) => pages.iter().filter_map(filterable_text).collect(),
-                _ => Vec::new(),
-            },
+            writable_pages: writable_raw(c.get("minecraft:writable_book_content")),
+            writable_filtered: writable_filtered(c.get("minecraft:writable_book_content")),
             written: c
                 .get("minecraft:written_book_content")
                 .map(written_book_from_tag),
@@ -4206,6 +4288,7 @@ mod tests {
                 .map(|v| v.clamp(0, 4) as u8),
             trim: c.get("minecraft:trim").and_then(trim::from_nbt),
             bundle_selected: BundleSelected::default(),
+            bundle_weight: Default::default(),
             other: Vec::new(),
             wire: Wire::default(),
         };
@@ -4395,21 +4478,21 @@ mod carried_component_tests {
         let mut stack = ItemStack::new("minecraft:stick", 1);
         stack.extra = extra;
         let copied = stack.clone();
-        let (ConsumeEffect::Native { data: a, .. }, ConsumeEffect::Native { data: b, .. }) = (
+        let (ConsumeEffect::Native(a), ConsumeEffect::Native(b)) = (
             &stack.death_protection(None).unwrap()[0],
             &copied.death_protection(None).unwrap()[0],
         ) else {
             panic!("native effect")
         };
-        assert!(Arc::ptr_eq(a, b));
-        assert_eq!(a.get("amount"), Some(&Tag::Int(42)));
+        assert!(Arc::ptr_eq(&a.data, &b.data));
+        assert_eq!(a.data.get("amount"), Some(&Tag::Int(42)));
         assert_eq!(components_tag(0, stack.data()), Some(patch));
         stack
             .data_mut()
             .set_other("minecraft:death_protection", Some(component));
         assert!(matches!(
             &stack.death_protection(None).unwrap()[0],
-            ConsumeEffect::Native { .. }
+            ConsumeEffect::Native(_)
         ));
         stack
             .data_mut()
@@ -4821,5 +4904,33 @@ mod custom_data_boundary_tests {
             assert_eq!(loaded.other(CUSTOM), Some(&bad));
             assert_eq!(components_tag(0, Some(&loaded)), Some(input));
         }
+    }
+
+    #[test]
+    fn matches_with_overlay_matches_projected_enchantments_and_trim_without_cloning() {
+        let mut base = ItemStack::new("minecraft:iron_chestplate", 1);
+        base.damage = 4;
+        let enchants = vec![
+            (Arc::from("minecraft:protection"), 2),
+            (Arc::from("minecraft:unbreaking"), 3),
+        ];
+        let trim: Trim = ("minecraft:gold".into(), "minecraft:coast".into());
+
+        let mut projected = base.clone();
+        projected.data_mut().enchantments = vec![
+            (Arc::from("minecraft:unbreaking"), 3),
+            (Arc::from("minecraft:protection"), 2),
+        ];
+        projected.data_mut().trim = Some(trim.clone());
+
+        assert!(base.matches_with_overlay(&projected, &enchants, Some(&trim)));
+        assert!(!base.matches_with_overlay(&projected, &[], Some(&trim)));
+        assert!(!base.matches_with_overlay(&projected, &enchants, None));
+        assert!(!base.matches_with_overlay(&base, &enchants, Some(&trim)));
+        assert!(base.matches_with_overlay(&base, &[], None));
+
+        let mut different_damage = projected.clone();
+        different_damage.damage = 5;
+        assert!(!base.matches_with_overlay(&different_damage, &enchants, Some(&trim)));
     }
 }

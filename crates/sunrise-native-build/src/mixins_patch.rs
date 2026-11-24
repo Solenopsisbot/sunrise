@@ -200,7 +200,7 @@ fn build(rust: &dyn Toolchain, dir: &Path, revision: &str) -> Result<(), String>
         .arg(top.join("crates/horizon-mixins-cli"))
         .arg("--root")
         .arg(dir);
-    let built = run(cmd, "Building horizon-mixins", |_| {});
+    let built = run(cmd, "Building horizon-mixins");
     let _ = fs::remove_dir_all(&partial);
     built
 }

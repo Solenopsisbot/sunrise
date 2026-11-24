@@ -8,9 +8,9 @@
 use crate::game::native_entity_refs::tests::{run_fresh_cases, with_game_at};
 use crate::game::world_loading::WorldRequest;
 use mod_api::{
-    BlockEntityClientTickEvent, BlockEntityClientTicksEvent, BlockEntityDataReceivedEvent,
-    BlockEntityPart, BlockPart, BlocksEvent, ClientHost, ClientTickPostEvent, ClientTickPreEvent,
-    Hooks, HostSide, LevelTickPostEvent, LevelTickPreEvent, Registrar, RegistrationContext,
+    BlockEntityClientTickEvent, BlockEntityDataReceivedEvent, BlockEntityPart, BlockPart,
+    BlocksEvent, ClientHost, ClientTickPostEvent, ClientTickPreEvent, Hooks, HostSide,
+    LevelTickPostEvent, LevelTickPreEvent, Registrar, RegistrationContext,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -87,13 +87,6 @@ struct Hum;
 impl BlockPart for Hum {}
 #[mod_api::sunrise_part]
 impl BlockEntityPart for Hum {
-    fn block_entity_client_ticks(
-        &self,
-        _: &dyn ClientHost,
-        event: &mut BlockEntityClientTicksEvent<'_>,
-    ) {
-        event.ticks = true;
-    }
     fn block_entity_client_tick(&self, event: &mut BlockEntityClientTickEvent<'_>) {
         record(event);
     }
@@ -106,7 +99,7 @@ impl BlockEntityPart for Hum {
     }
 }
 
-/// Has a client tick but never declares one.
+/// Has a client tick, but the selector rejects its client states.
 struct Quiet;
 #[mod_api::sunrise_part]
 impl BlockPart for Quiet {}
@@ -123,7 +116,11 @@ impl Hooks for Probe {
     fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
         let hum = r.block_entity_type("hum").blocks(&[HUM]).build();
         r.block_entity_part(&hum, Hum).unwrap();
-        let quiet = r.block_entity_type("quiet").blocks(&[QUIET]).build();
+        let quiet = r
+            .block_entity_type("quiet")
+            .blocks(&[QUIET])
+            .ticker_when(|_, _, side| side == mod_api::LogicalSide::Server)
+            .build();
         r.block_entity_part(&quiet, Quiet).unwrap();
         let boxed = r
             .block_entity_type("crate_shulker_box")

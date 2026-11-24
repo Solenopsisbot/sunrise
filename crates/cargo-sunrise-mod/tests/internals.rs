@@ -53,13 +53,14 @@ impl Project {
                 1,
             )
         };
-        // Update's fit report also reads the function index. These tests need no function bodies.
+        // The pin report reads the complete build data. These tests need no bodies or loops.
         let functions = format!(
             r#"{{"schema":1,"build":{{"commit":"{revision}"}},"crates":{{}},"functions":{{}},"refused":{{}}}}"#
         );
         fs::write(dir.join("internals.json"), &text).unwrap();
         fs::write(dir.join("functions.json"), &functions).unwrap();
         // The pin report reads the same files from the signed release, never from this cache.
+        let loops = format!(r#"{{"schema":1,"build":{{"commit":"{revision}"}},"loops":[]}}"#);
         let mixins = if revision == OLD {
             MANIFEST_MIXINS
         } else {
@@ -71,6 +72,7 @@ impl Project {
             Some(&[
                 ("internals.json", text.into_bytes()),
                 ("functions.json", functions.into_bytes()),
+                ("loops.json", loops.into_bytes()),
             ]),
         );
     }

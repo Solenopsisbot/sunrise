@@ -363,3 +363,16 @@ impl<T: Into<Arc<[String]>>> From<T> for FeatureFlagIds {
         Self(ids.into())
     }
 }
+
+impl FromIterator<mod_api::FeatureFlag> for FeatureFlagIds {
+    fn from_iter<T: IntoIterator<Item = mod_api::FeatureFlag>>(flags: T) -> Self {
+        let mut ids = Vec::new();
+        for flag in flags {
+            let id = flag.id();
+            if !ids.iter().any(|present| present == id) {
+                ids.push(id.to_owned());
+            }
+        }
+        Self(ids.into())
+    }
+}

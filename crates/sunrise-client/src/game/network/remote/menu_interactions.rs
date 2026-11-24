@@ -51,6 +51,21 @@ impl Game<'_> {
         }
         r.menu.set(menu);
         r.set_menu_title(title);
+        if self
+            .native_net
+            .placement
+            .client
+            .window()
+            .is_some_and(|window| !self.native_book_placement_window_matches(window))
+            || self
+                .native_net
+                .placement
+                .view
+                .as_ref()
+                .is_some_and(|view| !self.native_book_placement_catalog_matches(&view.identity))
+        {
+            self.clear_mod_book_placement_screen();
+        }
     }
     /// The server's open menu: its window id and menu type (0, "inventory"
     /// when none is open).
@@ -612,7 +627,7 @@ impl Game<'_> {
         self.send_play(S::SetCreativeModeSlot(play::SetCreativeModeSlot {
             slot: -1,
             item: Some(item),
-        }))
+        })) == crate::game::native_net::PlaySend::Admitted
     }
 
     /// `MultiPlayerGameMode.handleCreativeModeItemDrop`: the click site, not
@@ -678,6 +693,10 @@ impl Game<'_> {
         if self.mod_screen.take().is_some() {
             self.clear_mod_book_placement_screen();
             self.screen_state.build.reopened();
+        } else if self.native_net.placement.client.window().is_some()
+            || self.native_net.placement.view.is_some()
+        {
+            self.clear_mod_book_placement_screen();
         }
         self.mount_menu_reset();
         // The client's menu has no level access: what it holds is the server's.
@@ -920,15 +939,15 @@ impl Game<'_> {
         // exception does.
         let size = p.columns.wrapping_mul(3);
         if size < 0 {
-            return self.refuse_play_payload("the mount menu's chest has a negative size");
+            return self.refuse_remote_input("the mount menu's chest has a negative size");
         }
         let columns = usize::try_from(p.columns).unwrap_or(0);
         if columns > (MOD_MENU_SLOT_BASE - CHEST) / 3 {
-            return self.refuse_play_payload("the mount menu's chest does not fit its slot range");
+            return self.refuse_remote_input("the mount menu's chest does not fit its slot range");
         }
         let mut items = Vec::new();
         if items.try_reserve_exact(size as usize).is_err() {
-            return self.refuse_play_payload("the mount menu's chest does not fit its slot range");
+            return self.refuse_remote_input("the mount menu's chest does not fit its slot range");
         }
         let entity = p.entity as u32;
         let Some(species) = self

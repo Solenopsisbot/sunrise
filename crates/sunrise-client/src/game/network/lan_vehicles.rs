@@ -291,6 +291,10 @@ impl Game<'_> {
                     return None;
                 }
                 let p = game.player_boat_seat(i);
+                // AbstractBoat.positionRider's clampRotation sets the raw body yaw.
+                if let Some(player) = &mut game.player {
+                    player.body_yaw = game.boats[i].yaw;
+                }
                 return Some([p.x, p.y, p.z]);
             }
             // The minecart moves with the rider's input, and lets it out when
@@ -1076,6 +1080,47 @@ pub(in crate::game) mod controller_tests {
         (rider.vehicle, rider.vehicle_order) = (Some(horse), 1);
         game.lan.as_mut().unwrap().hub.guests.push(rider);
         (horse, packets)
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_guests_mount_uses_its_totem_during_the_landing() {
+        use crate::game::native_entity_refs::tests::with_game;
+
+        with_game(|game| {
+            let (horse, _packets) = guest_horse_at_start_of_fall(game);
+            game.mobs.update(0, |mob| {
+                mob.health = 1.0;
+                mob.add_effect("minecraft:poison", 25, 0);
+                mob.extra
+                    .set_main_hand_stack(Some(sunrise_client::items::ItemStack::new(
+                        "minecraft:totem_of_undying",
+                        1,
+                    )));
+            });
+            for (y, on_ground) in [
+                (209.0, false),
+                (207.0, false),
+                (204.0, false),
+                (200.0, true),
+            ] {
+                game.guest_move_vehicle(
+                    2,
+                    &play::MoveVehicleRequest {
+                        position: [4.5, y, 4.5],
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        on_ground,
+                    },
+                );
+            }
+            let mob = game.mobs.iter().find(|mob| mob.id == horse).unwrap();
+            assert!(mob.alive());
+            assert!(mob.extra.main_hand_stack().is_none());
+            assert!(!mob.has_effect("minecraft:poison"));
+            assert!(mob.has_effect("minecraft:regeneration"));
+            assert_eq!(game.lan.as_ref().unwrap().hub.guests[0].health, 13.0);
+        });
     }
 
     /// handleMoveVehicle for a horse its guest's client moves: `vehicle.move`

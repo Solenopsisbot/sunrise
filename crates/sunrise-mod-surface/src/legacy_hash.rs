@@ -132,7 +132,12 @@ impl<'a> LegacyFit<'a> {
             Old {
                 hashes: methods
                     .map(|m| (m.id.as_str(), Contract::Method(&m.contract)))
-                    .chain(functions.map(|f| (f.id.as_str(), Contract::Function(&f.contract))))
+                    .chain(
+                        // The old recipe cannot certify a newly versioned behaviour.
+                        functions
+                            .filter(|f| f.contract.behaviour_versions.is_empty())
+                            .map(|f| (f.id.as_str(), Contract::Function(&f.contract))),
+                    )
                     .collect(),
                 known_types,
                 current_types,

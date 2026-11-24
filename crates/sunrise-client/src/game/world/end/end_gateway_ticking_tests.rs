@@ -37,6 +37,8 @@ fn item(id: u32, at: Vec3) -> ItemEntity {
         ground: Default::default(),
         vertical_collision: false,
         age: 97,
+        stack_revision: 0,
+        lifespan: ItemEntity::LIFETIME,
         pickup_delay: 0,
         bob_offset: 0.0,
         ticks: 97,

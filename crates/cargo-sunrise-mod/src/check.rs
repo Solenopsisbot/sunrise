@@ -8,7 +8,6 @@ use sunrise_attestation::{Attested, PUBLIC_GOOD_TRUSTED_ROOT};
 use sunrise_mod_package::Package;
 use sunrise_mod_package::index::{self, Facts, Kind};
 use sunrise_mod_package::manifest::{MANIFEST, MAX_USES};
-use sunrise_shader_api::mod_pipeline;
 
 pub struct Report {
     pub kind: Kind,
@@ -297,7 +296,11 @@ fn uses_list(path: &Path) -> Result<(), String> {
 pub fn references(root: &Path, manifest: &sunrise_mod_package::Manifest) -> Result<(), String> {
     let content = sunrise_mod_package::Content::read(root, manifest)?;
     let findings = sunrise_mod_package::content::check_references(&content, manifest)?;
-    for warning in &findings.warnings {
+    for warning in findings
+        .warnings
+        .iter()
+        .chain(&renamed_folders(&content.files))
+    {
         eprintln!("warning: {warning}");
     }
     if findings.errors.is_empty() {
@@ -309,7 +312,7 @@ pub fn references(root: &Path, manifest: &sunrise_mod_package::Manifest) -> Resu
 
 /// Composes and validates every render pipeline fragment file in a mod's `files`
 /// (`assets/<namespace>/shaders/pipeline/<path>.wgsl`) with the game's own code
-/// (`sunrise_shader_api::mod_pipeline`), returning how many there are and each refusal as
+/// (`sunrise_mod_pipeline`), returning how many there are and each refusal as
 /// `<file>:<line>:<column>: <message>` (`<file>: <message>` where it has no span), the text the game logs after the pipeline's id. Whether a pipeline is
 /// textured is in the mod's code, which this cannot see: a file that calls `pipeline_texture`
 /// is composed as textured, any other as untextured.
@@ -321,7 +324,7 @@ pub fn pipeline_shaders(files: &BTreeMap<String, Vec<u8>>) -> (usize, Vec<String
         let in_folder = parts.next() == Some("assets")
             && parts.next().is_some()
             && parts.next().is_some_and(|rest| {
-                rest.strip_prefix(mod_pipeline::FOLDER)
+                rest.strip_prefix(sunrise_mod_pipeline::FOLDER)
                     .is_some_and(|rest| rest.starts_with('/') && rest.ends_with(".wgsl"))
             });
         if !in_folder {
@@ -332,7 +335,7 @@ pub fn pipeline_shaders(files: &BTreeMap<String, Vec<u8>>) -> (usize, Vec<String
             .map_err(|e| e.to_string())
             .map_err(|e| vec![format!("{name}: {e}")])
             .and_then(|text| {
-                mod_pipeline::compose_with(name, text, text.contains("pipeline_texture"))
+                sunrise_mod_pipeline::compose_with(name, text, text.contains("pipeline_texture"))
                     .map_err(|problems| problems.iter().map(ToString::to_string).collect())
             });
         if let Err(reasons) = composed {
@@ -342,9 +345,60 @@ pub fn pipeline_shaders(files: &BTreeMap<String, Vec<u8>>) -> (usize, Vec<String
     (count, refused)
 }
 
+/// One line per data folder that holds files under 26.2's name for a folder 26.3 reads under
+/// another ([`sunrise_port_pack::upgrade::RENAMED_FOLDERS`]): the game reads nothing there, so
+/// the files are silently left out.
+fn renamed_folders(files: &[String]) -> Vec<String> {
+    let mut found: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
+    for file in files {
+        let Some((namespace, rest)) = file
+            .strip_prefix("data/")
+            .and_then(|rest| rest.split_once('/'))
+        else {
+            continue;
+        };
+        for (old, new) in sunrise_port_pack::upgrade::RENAMED_FOLDERS {
+            if rest
+                .strip_prefix(old)
+                .is_some_and(|path| path.starts_with('/'))
+            {
+                *found.entry((namespace, old, new)).or_default() += 1;
+            }
+        }
+    }
+    found
+        .into_iter()
+        .map(|((namespace, old, new), count)| {
+            format!(
+                "data/{namespace}/{old}/: 26.3 does not read this folder, so its {count} file(s) are left out; 26.3 reads data/{namespace}/{new}/, in 26.3's format"
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn files_in_a_folder_26_3_renamed_are_named_once_per_folder() {
+        let files = [
+            "data/b/worldgen/configured_feature/arch.json",
+            "data/b/worldgen/configured_feature/deep/rope.json",
+            "data/b/worldgen/configured_carver/gap.json",
+            "data/b/worldgen/feature/plank.json",
+            "data/b/worldgen/configured_features/typo.json",
+            "assets/b/worldgen/configured_feature/not_data.json",
+        ]
+        .map(String::from);
+        assert_eq!(
+            renamed_folders(&files),
+            [
+                "data/b/worldgen/configured_carver/: 26.3 does not read this folder, so its 1 file(s) are left out; 26.3 reads data/b/worldgen/carver/, in 26.3's format",
+                "data/b/worldgen/configured_feature/: 26.3 does not read this folder, so its 2 file(s) are left out; 26.3 reads data/b/worldgen/feature/, in 26.3's format",
+            ]
+        );
+    }
 
     #[test]
     fn pipeline_files_are_composed_as_the_game_does() {
@@ -450,6 +504,7 @@ mod tests {
         // Test policy on verified claims; the verifier crate exercises real signed bundles.
         let attested = Attested {
             repository_id: 123456,
+            owner_id: 654321,
             repository_name: "author/repo".into(),
             signer_workflow_ref:
                 "sunrise-org/sunrise-mods/.github/workflows/release.yml@refs/tags/release-v1".into(),

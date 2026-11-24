@@ -93,6 +93,7 @@ impl Game<'_> {
         self.resident_entities.local_player.retire();
         self.player_state.attachments.retire();
         self.player = None;
+        self.player_model = None;
         if self.remote.is_some()
             && let Some(id) = id
         {

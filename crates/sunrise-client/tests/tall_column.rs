@@ -49,7 +49,7 @@ impl ChunkGenerator for Spires {
         }
         Some(chunk)
     }
-    fn proto(&self, _: &mut (), _: i32, _: i32) -> Proto {
+    fn proto(&self, _: &mut (), _: i32, _: i32) -> std::result::Result<Proto, String> {
         unreachable!("every column is saved")
     }
     fn finish(&self, _: Proto) -> Chunk {

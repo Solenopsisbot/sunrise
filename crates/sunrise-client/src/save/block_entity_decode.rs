@@ -3,19 +3,20 @@ use super::*;
 /// The block entity type ID for the block it sits in (a chest-like container
 /// is a chest, trapped chest or barrel).
 pub fn block_entity_id<'a>(e: &'a crate::containers::BlockEntity, block: &'a str) -> &'a str {
-    let block = crate::block_entity_types::factory_block(block);
-    match (e, block) {
-        (
-            crate::containers::BlockEntity::Chest(_),
-            "minecraft:trapped_chest"
-            | "minecraft:barrel"
-            | "minecraft:dropper"
-            | "minecraft:ender_chest",
-        ) => block,
-        (crate::containers::BlockEntity::Chest(_), b) if b.ends_with("shulker_box") => {
-            "minecraft:shulker_box"
-        }
+    match e {
+        crate::containers::BlockEntity::Chest(_) => chest_backed_id(e.id(), block),
         _ => e.id(),
+    }
+}
+/// The type ID of a chest-backed container whose own ID is `id`, for the block it sits in.
+pub fn chest_backed_id<'a>(id: &'a str, block: &'a str) -> &'a str {
+    match crate::block_entity_types::factory_block(block) {
+        block @ ("minecraft:trapped_chest"
+        | "minecraft:barrel"
+        | "minecraft:dropper"
+        | "minecraft:ender_chest") => block,
+        b if b.ends_with("shulker_box") => "minecraft:shulker_box",
+        _ => id,
     }
 }
 /// `block_entity_nbt::overlay`, then a container that now holds items loses its
@@ -60,15 +61,18 @@ pub fn decode_end_gateway(tag: &Tag) -> crate::containers::EndGateway {
     }
 }
 /// A mod's block entity: its compound without `id` and the position, and
-/// (when `decode_items` is true, i.e. container-backed or unknown-block loads)
-/// the `Items` rows that can be represented losslessly as modeled slots.
-/// Slotless holders loaded at a known block keep `Items` verbatim in `nbt`.
-fn decode_mod_block_entity(
+/// (when `mod_item_slots > 0`) the `Items` rows within `0..mod_item_slots`
+/// that can be represented losslessly as modeled slots.
+/// Slotless holders (`mod_item_slots == 0`) keep `Items` verbatim in `nbt`,
+/// and rows outside `0..mod_item_slots`, duplicates, invalid or noncanonical
+/// rows, and slotless entries stay verbatim in `nbt`.
+/// The game sizes the modeled vector to its container when it uses it.
+pub(super) fn decode_mod_block_entity(
     id: String,
     tag: &Tag,
-    decode_items: bool,
+    mod_item_slots: usize,
 ) -> Option<crate::containers::ModBlockEntity> {
-    use crate::block_entity_nbt::saved_item_slot;
+    use crate::block_entity_nbt::{mod_item_slot_tag, saved_mod_item_slot};
     let Tag::Compound(map) = tag else {
         return None;
     };
@@ -81,22 +85,25 @@ fn decode_mod_block_entity(
         .remove(&crate::containers::SHAPES_KEY.into())
         .and_then(|tag| crate::containers::PublishedShapes::from_tag(&tag));
     let mut items = Vec::new();
-    if decode_items {
+    if mod_item_slots > 0 {
         let key = "Items".into();
         if let Some(Tag::List(entries)) = nbt.get_mut(&key) {
-            let mut occurrences = [0u8; 256];
-            for slot in entries.iter().filter_map(saved_item_slot) {
-                occurrences[slot] = occurrences[slot].saturating_add(1);
+            let mut occurrences: HashMap<usize, u8> = HashMap::new();
+            for slot in entries.iter().filter_map(saved_mod_item_slot) {
+                let count = occurrences.entry(slot).or_insert(0);
+                *count = count.saturating_add(1);
             }
             entries.retain(|raw| {
-                let Some(slot) = saved_item_slot(raw) else {
+                let Some(slot) = saved_mod_item_slot(raw) else {
                     return true;
                 };
-                if occurrences[slot] == 1
+                if slot < mod_item_slots
+                    && occurrences.get(&slot) == Some(&1)
+                    && let Some(slot_tag) = mod_item_slot_tag(slot)
                     && let Some(stack) = item_from_nbt(raw)
                     && let Tag::Compound(mut canonical) = Tag::from(&stack)
                 {
-                    canonical.insert("Slot".into(), Tag::Byte(slot as i8));
+                    canonical.insert("Slot".into(), slot_tag);
                     if raw == &Tag::Compound(canonical) {
                         if items.len() <= slot {
                             items.resize(slot + 1, None);
@@ -123,9 +130,14 @@ fn decode_mod_block_entity(
     entity.set_shapes(shapes.map(std::sync::Arc::new));
     Some(entity)
 }
-/// Whether a mod block owns the saved `Items` field as engine-managed inventory.
-pub(super) fn block_has_mod_item_slots(block: &str) -> bool {
-    mod_api::__private::parts_installation::block_container(block).is_some_and(|c| c.slots > 0)
+/// Compact unsigned-byte slot count (`0..=255`) decoded when a mod block's
+/// declared container shape is unknown (`decode_block_entity`).
+const COMPACT_MOD_ITEM_SLOTS: usize = 256;
+
+/// The declared item slot count owned by a mod block's stock container.
+pub(super) fn block_mod_item_slots(block: &str) -> usize {
+    mod_api::__private::parts_installation::block_container(block)
+        .map_or(0, |container| container.slots)
 }
 
 /// Decode an entity at a known block, refusing undeclared IDs and invalid native membership.
@@ -144,9 +156,7 @@ pub fn decode_block_entity_replacing(
     block: &str,
     previous: Option<&crate::containers::BlockEntity>,
 ) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
-    let slots = mod_api::__private::parts_installation::block_container(block)
-        .map_or(0, |container| container.slots);
-    let mut decoded = decode_block_entity_with_history(tag, previous, slots > 0)?;
+    let mut decoded = decode_block_entity_with_history(tag, previous, Some(block))?;
     // Several vanilla types share a decoded representation (for example barrel
     // and chest). Membership belongs to the saved type, not that representation.
     let saved_id = text(tag.get("id"))?;
@@ -155,11 +165,9 @@ pub fn decode_block_entity_replacing(
             if crate::block_entity_types::valid(block, m.id()) != Some(true) {
                 return None;
             }
-            // Missing saved stacks are empty slots, not a shorter container.
-            // Keep any saved stacks past the declared size out of the menu but on disk.
-            if m.items.len() < slots {
-                m.items.resize(slots, None);
-            }
+            // Missing saved stacks are empty slots, whatever the declared capacity: `items` holds
+            // the slots up to the last one occupied, and a slot past it reads as empty.
+            // Any saved stacks past the declared size stay out of the menu but on disk.
             true
         }
         _ => crate::block_entity_types::valid(block, &saved_id)
@@ -169,27 +177,34 @@ pub fn decode_block_entity_replacing(
 }
 
 pub fn decode_block_entity(tag: &Tag) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
-    decode_block_entity_with_history(tag, None, true)
+    decode_block_entity_with_history(tag, None, None)
 }
 
 pub(super) fn decode_block_entity_with_history(
     tag: &Tag,
     previous: Option<&crate::containers::BlockEntity>,
-    decode_mod_items: bool,
+    block: Option<&str>,
 ) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
     use crate::containers::BlockEntity;
     let int = |k: &str| tag.get(k).and_then(crate::nbt_path::int_value); // getIntOr
     let id = text(tag.get("id"))?;
     let pos = (int("x")?, int("y")?, int("z")?);
-    if id.contains(':') && !id.starts_with("minecraft:") {
+    // A detached decode can still hold an opaque payload without a known block.
+    // At a known block, only an admitted native type gets that representation.
+    if crate::block_entity_types::declared(&id)
+        || (block.is_none() && id.contains(':') && !id.starts_with("minecraft:"))
+    {
         return Some((
             pos,
             BlockEntity::Mod(Box::new(decode_mod_block_entity(
                 id,
                 tag,
-                decode_mod_items,
+                block.map_or(COMPACT_MOD_ITEM_SLOTS, block_mod_item_slots),
             )?)),
         ));
+    }
+    if block.is_some() && !crate::block_entity_nbt::is_known_type(&id) {
+        return None;
     }
     if id == "minecraft:end_gateway" {
         return Some((pos, BlockEntity::EndGateway(decode_end_gateway(tag))));

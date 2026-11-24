@@ -726,6 +726,7 @@ fn bind_images(
         wgpu::ShaderStages::COMPUTE,
     );
     let stand_ins = std::cell::RefCell::new(Vec::new());
+    let mod_uniform_mismatches = std::cell::RefCell::new(std::collections::HashSet::new());
     let pack = Resources {
         textures: &[],
         images: &[],
@@ -741,6 +742,11 @@ fn bind_images(
         stand_ins: &stand_ins,
         shadow_linear: 0,
         jobs: None,
+        mod_depth_targets: &[],
+        mod_uniforms: &[],
+        mod_uniform_mismatches: &mod_uniform_mismatches,
+        mod_depth_target: std::cell::Cell::new(None),
+        depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
     };
     let mut notes = Vec::new();
     let bound = bindings(

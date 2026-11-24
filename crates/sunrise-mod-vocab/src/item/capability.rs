@@ -4,12 +4,17 @@
 //! is given the host, so a handler may look up and call a neighbour's capability (a pipe), and
 //! it keeps its state where the game keeps the block entity's (its slots, its saved compound, its
 //! attachments).
+use super::item_stack::read_stack_view;
 use crate::{
     Answer, BlockEntityRef, BlockEntityTypeKey, BlockProviders, BlockState, Direction,
     ItemResource, LevelHost, LevelRef, Overanswered, ResourceHandler, ServerHost,
     TransactionContext, TransactionError, backend_mut_of, backend_of,
 };
-use std::{fmt::Debug, marker::PhantomData, ops::Deref};
+use std::{
+    fmt::Debug,
+    marker::PhantomData,
+    ops::{Deref, Range},
+};
 
 // no wire: process-local capability declaration carries a provider function pointer and type identity.
 /// A capability: its name (`sunrise:items`, `mymod:chemicals`), the handler trait `T` it answers
@@ -182,6 +187,19 @@ impl<R> ResourceHandler<R> for Capability<dyn ResourceHandler<R>> {
         self.handler.size(host)
     }
 
+    fn next_transfer_index(
+        &self,
+        host: &mut dyn ServerHost,
+        indices: Range<usize>,
+        inserting: Option<&R>,
+    ) -> Option<usize> {
+        self.handler.next_transfer_index(host, indices, inserting)
+    }
+
+    fn uniform_slots_end(&self, host: &mut dyn ServerHost, indices: Range<usize>) -> usize {
+        self.handler.uniform_slots_end(host, indices)
+    }
+
     fn resource(&self, host: &mut dyn ServerHost, index: usize) -> Option<R> {
         self.handler.resource(host, index)
     }
@@ -222,6 +240,31 @@ impl<R> ResourceHandler<R> for Capability<dyn ResourceHandler<R>> {
             amount,
             "insert_at",
         )
+    }
+
+    fn insert_at_in_range(
+        &self,
+        host: &mut dyn ServerHost,
+        tx: &TransactionContext,
+        indices: Range<usize>,
+        resource: &R,
+        amount: u32,
+    ) -> Result<(u32, usize), TransactionError<Overanswered>> {
+        if !host.transaction_matches(Some(tx)) {
+            return Err(TransactionError::InvalidContext);
+        }
+        match self
+            .handler
+            .insert_at_in_range(host, tx, indices, resource, amount)
+        {
+            Ok((answer, next)) => Ok((
+                self.check_resource_transfer(Ok(answer), amount, "insert_at_in_range")?,
+                next,
+            )),
+            Err(error) => Err(self
+                .check_resource_transfer(Err(error), amount, "insert_at_in_range")
+                .unwrap_err()),
+        }
     }
 
     fn extract_at(
@@ -318,9 +361,10 @@ impl<T: ?Sized + 'static> CapabilityKey<T> {
         }
     }
     /// Whether this key's published metadata marks unilateral forwarding to another block safe.
-    /// Unmarked and unknown capabilities are not proxyable.
+    /// Unmarked, unknown and differently typed capabilities are not proxyable.
     pub fn is_proxyable(&self, host: &dyn crate::Host) -> bool {
-        crate::block_capability_proxyable(host, self.name)
+        host.capability_providers()
+            .block_capability_proxyable(self.name, Some(self.binding().0))
     }
 }
 
@@ -396,13 +440,27 @@ impl ResourceHandler<ItemResource> for GameItems {
             .unwrap_or(0)
     }
     fn resource(&self, host: &mut dyn ServerHost, index: usize) -> Option<ItemResource> {
-        let stack = backend_of(&*host)?.container_stack(self.0, index)?;
-        Some(ItemResource::of(&stack))
+        let backend = backend_of(&*host)?;
+        read_stack_view(
+            |view| view.project().map(ItemResource::from_owned_stack),
+            |lend| {
+                backend.lend_container_stack(self.0, index, lend);
+                Some(())
+            },
+        )?
     }
     fn amount(&self, host: &mut dyn ServerHost, index: usize) -> u32 {
         backend_of(&*host)
-            .and_then(|backend| backend.container_stack(self.0, index))
-            .map_or(0, |stack| stack.count())
+            .and_then(|backend| {
+                read_stack_view(
+                    |view| view.count(),
+                    |lend| {
+                        backend.lend_container_stack(self.0, index, lend);
+                        Some(())
+                    },
+                )
+            })
+            .unwrap_or(0)
     }
     fn capacity(
         &self,
@@ -447,8 +505,16 @@ impl ResourceHandler<ItemResource> for GameItems {
         if !host.transaction_matches(Some(tx)) {
             return Err(TransactionError::InvalidContext);
         }
-        let held = backend_of(&*host).and_then(|backend| backend.container_stack(self.0, index));
-        if !held.is_some_and(|held| resource.matches(&held)) {
+        let matches = backend_of(&*host).and_then(|backend| {
+            read_stack_view(
+                |view| resource.matches_view(&view),
+                |lend| {
+                    backend.lend_container_stack(self.0, index, lend);
+                    Some(())
+                },
+            )
+        });
+        if matches != Some(true) {
             return Ok(0);
         }
         let Some(backend) = backend_mut_of(host) else {
@@ -523,5 +589,94 @@ impl LevelRef {
             },
             selected => crate::answered(selected, None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        Backend, BackendRef, ComponentId, DimensionKey, Host, ItemKey, ItemStack, ItemStackView,
+        Tag, WorldEpoch, prelude::ItemsBackend,
+    };
+    use std::cell::Cell;
+
+    struct ResidentSlot {
+        at: BlockSide,
+        stack: ItemStack,
+        projections: Cell<usize>,
+    }
+
+    impl ItemsBackend for ResidentSlot {
+        fn container_size(&self, at: BlockSide) -> Option<usize> {
+            (at == self.at).then_some(1)
+        }
+
+        fn lend_container_stack(
+            &self,
+            at: BlockSide,
+            slot: usize,
+            read: &mut dyn for<'a> FnMut(ItemStackView<'a>),
+        ) {
+            if at != self.at || slot != 0 {
+                return;
+            }
+            let project = |_| {
+                self.projections.set(self.projections.get() + 1);
+                Some(self.stack.clone())
+            };
+            read(ItemStackView::resident(
+                self.stack.read_metadata(),
+                &project,
+            ));
+        }
+    }
+
+    impl Backend for ResidentSlot {}
+    impl Host for ResidentSlot {
+        fn backend(&self) -> Option<BackendRef<'_>> {
+            Some(BackendRef::of(self))
+        }
+    }
+    impl ServerHost for ResidentSlot {}
+    crate::impl_backend_areas!(ResidentSlot, except(items));
+    crate::impl_host_areas!(ResidentSlot);
+    crate::impl_server_host_areas!(ResidentSlot);
+
+    #[test]
+    fn resident_container_amount_does_not_project_but_resource_projects_once() {
+        let level = LevelRef::new(WorldEpoch::new(1), DimensionKey::OVERWORLD);
+        let pos = [1, 64, 0];
+        let at = BlockSide {
+            level,
+            pos,
+            side: Some(Direction::Up),
+        };
+        let item = ItemKey(17);
+        let component = ComponentId::new("minecraft:custom_data").unwrap();
+        let custom_data = Tag::Compound([("marker".into(), Tag::Int(42))].into_iter().collect());
+        let mut stack = ItemStack::new(item, 7).unwrap();
+        stack
+            .set_components(
+                [(component.as_str().into(), custom_data.clone())]
+                    .into_iter()
+                    .collect(),
+            )
+            .unwrap();
+        let mut host = ResidentSlot {
+            at,
+            stack,
+            projections: Cell::new(0),
+        };
+
+        let items = GameItems(at);
+        assert_eq!(items.amount(&mut host, 0), 7);
+        assert_eq!(host.projections.get(), 0);
+
+        let resource = items.resource(&mut host, 0).unwrap();
+        assert_eq!(resource.item(), item);
+        assert_eq!(resource.component(&component), Some(custom_data));
+        assert_eq!(resource.as_stack().count(), 1);
+        assert_eq!(host.projections.get(), 1);
     }
 }

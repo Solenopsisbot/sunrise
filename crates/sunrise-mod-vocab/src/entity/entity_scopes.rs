@@ -306,9 +306,9 @@ impl<'a> ItemEntitySubjectView<'a> {
         });
         result
     }
-    /// The signed pickup delay; the infinite sentinel reads as vanilla's `32767`.
-    /// `None` if a stored value is outside `i32`.
-    pub fn pickup_delay(&self) -> Option<i32> {
+    /// The signed pickup delay (`ItemEntity.pickupDelay`); `32767` is vanilla's
+    /// infinite-delay sentinel (`set_never_pickup`).
+    pub fn pickup_delay(&self) -> i32 {
         self.data.pickup_delay()
     }
     /// `ItemEntity.getAge`, including negative lifetime sentinels.
@@ -325,8 +325,9 @@ impl<'a> ItemEntitySubjectView<'a> {
     }
 
     /// Replace the item entity's stack (`ItemEntity.setItem`), journaled under any open
-    /// transaction. Empty stacks are refused and return `Ok(false)`.
-    pub fn set_stack(&mut self, stack: ItemStack) -> Result<bool, StackWriteError> {
+    /// transaction. Passing `None` or an air stack stores an empty stack, which normal
+    /// `ItemEntity.tick` discards on its next tick.
+    pub fn set_stack(&mut self, stack: Option<ItemStack>) -> Result<bool, StackWriteError> {
         self.data.set_stack(stack)
     }
     /// `ItemEntity.setPickUpDelay`.
@@ -515,11 +516,11 @@ pub trait ResidentItemEntity {
     fn position(&self) -> [f64; 3];
     fn velocity(&self) -> [f64; 3];
     fn with_stack(&self, f: &mut dyn for<'a> FnMut(ItemStackView<'a>));
-    fn pickup_delay(&self) -> Option<i32>;
+    fn pickup_delay(&self) -> i32;
     fn age(&self) -> i32;
     fn target(&self) -> Option<u128>;
     fn owner(&self) -> Option<EntityRef>;
-    fn set_stack(&mut self, stack: ItemStack) -> Result<bool, StackWriteError>;
+    fn set_stack(&mut self, stack: Option<ItemStack>) -> Result<bool, StackWriteError>;
     fn set_pickup_delay(&mut self, ticks: i32) -> bool;
     fn set_target(&mut self, target: Option<u128>) -> bool;
     fn set_velocity(&mut self, velocity: [f64; 3]) -> bool;

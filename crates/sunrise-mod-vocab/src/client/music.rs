@@ -48,19 +48,6 @@ impl Music {
     pub fn game() -> Self {
         Self::new("minecraft:music.game", 12000, 24000, false)
     }
-    /// The built-in situations the Music page lists, in its order: the lang key
-    /// of the heading the page's group shows and the music that situation plays.
-    pub fn builtin() -> [(&'static str, Music); 7] {
-        [
-            ("sunrise.pages.music.menu", Self::menu()),
-            ("sunrise.pages.music.overworld", Self::game()),
-            ("sunrise.pages.music.creative", Self::creative()),
-            ("sunrise.pages.music.underwater", Self::under_water()),
-            ("sunrise.pages.music.end", Self::end()),
-            ("sunrise.pages.music.boss", Self::end_boss()),
-            ("sunrise.pages.music.credits", Self::credits()),
-        ]
-    }
     /// `Music.CODEC`.
     // hidden: a game-side helper, not part of the mod surface
     #[doc(hidden)]

@@ -243,16 +243,20 @@ fn items(host: &dyn mod_api::Host) -> usize {
 }
 
 /// Experience points in the orbs within 3 blocks of `pos`.
-fn orb_points(host: &dyn ServerHost, pos: [i32; 3]) -> i64 {
+fn orb_points(host: &dyn mod_api::Host, pos: [i32; 3]) -> i64 {
+    let level = host.level("minecraft:overworld").expect("the overworld");
     let at = pos.map(f64::from);
-    host.experience_orbs(
-        "minecraft:overworld",
-        at.map(|v| v - 3.0),
-        at.map(|v| v + 4.0),
-    )
-    .iter()
-    .map(|orb| i64::from(orb.value) * i64::from(orb.count))
-    .sum()
+    let mut total = 0i64;
+    let visit = level
+        .visit_experience_orbs(host, at.map(|v| v - 3.0), at.map(|v| v + 4.0), &mut |orb| {
+            let value = orb.value(host).expect("live orb value");
+            let count = orb.count(host).expect("live orb count");
+            total += i64::from(value) * i64::from(count);
+            core::ops::ControlFlow::Continue(())
+        })
+        .expect("experience orb visit");
+    assert_eq!(visit, core::ops::ControlFlow::Continue(()));
+    total
 }
 
 /// Gives every break 7 experience points, and records and optionally rewrites what
@@ -644,7 +648,11 @@ fn mob_block_drops_lend_the_original_entity_after_a_loot_listener_replaces_it() 
     struct Replace(Arc<Mutex<Option<mod_api::BlockEntityRef>>>);
     #[mod_api::__subscriptions]
     impl Hooks for Replace {
-        fn loot_drops(&self, host: &mut dyn ServerHost, event: &mut mod_api::LootDropsEvent<'_>) {
+        fn loot_drops(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut mod_api::LootDropsEvent<'_, '_>,
+        ) {
             let Some((pos, _)) = event.context.block else {
                 return;
             };

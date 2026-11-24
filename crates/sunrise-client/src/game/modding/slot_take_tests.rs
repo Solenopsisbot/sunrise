@@ -3,7 +3,7 @@
 //! what is not a take is silent; and a failing listener undoes its writes, effects and transient
 //! slots with the take. The fixtures need prepared resources.
 use crate::game::native_guest_turn_tests::with_guests;
-use mod_api::item::menu::{ClickedStackResult, StackResult, StackedOnOtherDirection};
+use mod_api::item::menu::StackedOnOtherDirection;
 use mod_api::{
     BlockPart, Hooks, HostBlockStates, HostTransaction, ITEMS, ItemCraftedEvent, ItemPlace,
     ItemResource, MenuContainer, MenuPart, MenuSlotChangedEvent, MenuSlotRulesEvent,
@@ -405,22 +405,25 @@ impl mod_api::ItemPart for TakeOne {
     fn item_stacked_on_other(
         &self,
         _: mod_api::HostSide<'_>,
-        event: &mut mod_api::ItemStackedOnOtherEvent<'_>,
+        event: &mut mod_api::ItemStackedOnOtherEvent<'_, '_>,
     ) -> mod_api::Flow {
-        event.result.clicked = ClickedStackResult::Take(1);
-        let clicked = event.event.direction == StackedOnOtherDirection::OtherStackedOnMe;
+        assert!(event.click.take_clicked(1).is_some());
+        let clicked = event.click.direction == StackedOnOtherDirection::OtherStackedOnMe;
         match (SCRIPT.get(), clicked) {
             (TakeScript::RemoveBackingWithPartCursor, false)
             | (TakeScript::MoveStickToCursor, true) => {
-                event.result.carried = StackResult::Set(Some(api_item("minecraft:stone", 1)));
+                event
+                    .click
+                    .set_carried(Some(api_item("minecraft:stone", 1)));
             }
             (TakeScript::RemoveBackingWithPartCursor, true) => {
-                event.result.carried = StackResult::Set(Some(api_item("minecraft:stone", 2)));
+                event
+                    .click
+                    .set_carried(Some(api_item("minecraft:stone", 2)));
             }
             _ => {}
         }
         if clicked {
-            event.result.handled = true;
             mod_api::Flow::Cancel
         } else {
             mod_api::Flow::Continue
@@ -1329,6 +1332,7 @@ fn a_partial_mod_craft_keeps_crafting_bookkeeping_but_not_item_crafted() {
                     conditions:
                         serde_json::json!({"recipes": [PLANKS], "ingredients": [{"items": LOG}]})
                             .into(),
+                    player: None,
                 }],
             });
             tree.by_id.insert(ID.into(), 0);

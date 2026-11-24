@@ -151,12 +151,7 @@ impl Game<'_> {
     ) -> finalize::SpawnEvent {
         // A mob finalization makes starts without group data, and the
         // finalization that follows reads none.
-        let (outcome, _) = self.finalize_spawn_event(mob, reason, None, &mut None);
-        match outcome {
-            super::creatures::Finalized::Cancelled => finalize::SpawnEvent::Cancelled,
-            super::creatures::Finalized::Skipped => finalize::SpawnEvent::Skip,
-            super::creatures::Finalized::Done => finalize::SpawnEvent::Finalize,
-        }
+        self.finalize_spawn_event(mob, reason, None, &mut None).0
     }
     /// The game's own finalization of a mob, with no event: the same
     /// `finalize::Ctx` world generation runs, over the live level, with the
@@ -195,7 +190,7 @@ impl Game<'_> {
         game.world.random = random;
         for m in created {
             game.mobs.push(m);
-            game.native_mobs_joined(game.mobs.len() - 1, false);
+            game.admit_new_mobs(game.mobs.len() - 1);
         }
     }
 }
@@ -300,7 +295,7 @@ mod tests {
             game.world.random =
                 sunrise_core::random::LevelRandom::for_level(LegacyRandom::new(42_i64));
             let outcome = game.finalize_with(&mut with, Reason::Natural, None);
-            assert_eq!(outcome, super::super::creatures::Finalized::Done);
+            assert!(outcome);
             // The same stream for the plain path: same seed, same draws.
             game.world.random =
                 sunrise_core::random::LevelRandom::for_level(LegacyRandom::new(42_i64));

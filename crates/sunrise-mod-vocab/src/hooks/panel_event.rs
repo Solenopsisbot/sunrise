@@ -1,5 +1,4 @@
 //! The `panel_event` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0021
 
 pub trait Hooks {
     /// `event` happened on mod `mod_id`'s panel (`native_panel_items`): the

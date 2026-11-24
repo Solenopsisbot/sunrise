@@ -743,8 +743,8 @@ pub(in crate::game) fn run_camera_consumers_bob_fog_dark_disc_and_vignette_26_3(
             "vignette must sample light at camera entity eye"
         );
 
-        game.border.set_center([0.0, 0.0]);
-        game.border.set_size(200.0);
+        game.border.set_center([0.0, 0.0]).unwrap();
+        game.border.set_size(200.0).unwrap();
         game.border.warning_distance = 10;
         game.settings.vignette = true;
         game.ui.hide_gui = false;

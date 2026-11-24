@@ -445,6 +445,9 @@ menus and clearing any overlay), switches to `Screen::Mod` owned by `mod_id`, an
 `screen_init_post`. It returns `false` when cancelled or redirected by `screen_opening`, while a
 world or connection is loading, or without a client window.
 
+The Mods screen's **Config** button opens your screen the same way when you register a config screen factory
+([settings](../mod-settings.md#your-own-config-screen)); closing it then returns to the Mods screen.
+
 Widget callbacks (`Button` `on_press`, `TextField` `on_change` / `on_submit`, and `ScreenWidget`
 input handlers) receive `&mut dyn ClientHost` and execute screen transitions synchronously: calling
 `host.close_screen()`, `host.mod_screen_close(id)`, or `host.mod_screen_open(next_id)` transitions
@@ -529,39 +532,26 @@ For example, to let the player press Q on the title screen while this mod is loa
 
 ## Labels: wrapped text without a widget
 
-A label is text laid out in a box: measured, wrapped and placed, and nothing else. Call
-`DrawContext::text_lines` from a drawing hook with the component, the box's width, an alignment and the
-scale the label is drawn at, and draw the lines it answers with where it says:
+A label wraps and places a styled component without registering a widget. Call
+[`GuiCanvas::text_with_word_wrap`](gui-paint.md#drawing-directly-with-a-canvas) to lay it out and
+paint it in one operation, inside the current pose and scissor:
 
 ```rust
 {{#include ../../../examples/src/client_rendering.rs:scaled_text_lines}}
 ```
 
-The layout is measured unscaled and answered scaled: the text wraps at `120 / scale` GUI pixels, and
-every dimension and position `text_lines` answers — each line's `at` and `width`, the block's `width`
-and `height` — is in scaled GUI pixels, which is why the lines are drawn inside the same
-`PoseOp::Scale`. The positions are already post-scale coordinates, whereas coordinates inside the
-scale pose are unscaled, so the example divides each line's `at` by `scale` before drawing. A `scale` of one is the text at its own size.
+The width is in label-local GUI pixels after scaling, so the text wraps at `max_width / scale`.
+Wrapping follows `Font.split`: fitting spaces break lines, overlong words break at a character,
+and newline starts another line, including an empty line after a trailing `\n`. A width below
+one unscaled pixel still wraps at one pixel. Styles, legacy formatting, inline sprites and player
+heads are preserved. A centred line sits at `wrap_width / 2 - floor(line_width / 2)` before
+scaling, as in vanilla's `TextAlignment.CENTER.calculateLeft`.
 
-Wrapping is vanilla's: a line breaks at a space that fits, a single word wider than the box is broken at
-a character rather than dropped, and an explicit `\n` starts a new line, so a trailing `\n` leaves an
-empty last line. A width below one pixel still wraps, at one pixel, as `Font.split` does: too narrow a
-box gives one character a line rather than none, and one character alone can still make a line wider
-than the box. Leading spaces are characters like any other and stay in the line.
-
-Each line keeps its styles, and its legacy `§` codes are applied to those styles and dropped, so a line
-drawn alone draws exactly what it measured: a `§r` goes back to the style its run carried, so right
-after a break it restores the tail run's carried style (a bold run stays bold). Draw the line through `GuiDraw::Text`; `DrawContext::text` draws plain
-characters only. A centred line sits at `wrapping width / 2 - floor(line width / 2)`, as vanilla's
-`TextAlignment.CENTER.calculateLeft` floors the half line width. `height` is the last line's `at[1]`
-plus one line height, so a scroll container sizes its content from it, and an empty component has no
-line at all.
-
-It refuses, answering no line at all, a `TextLinesRefusal` naming why: a width that is not finite (or
-that dividing by `scale` overflows), a `scale` that is not finite or is zero or less, text that wraps
-into more than 512 lines, or lines holding more than 8192 characters together. This is in-process
-layout, so the serialization depth limit does not apply. Inline sprites and player heads remain
-objects in the returned lines, with their fallbacks.
+Use [`ClientHost::visit_text_lines`](styled-text-measurements.md) to measure or inspect lines
+outside drawing. Both calls return the widest line and the last line's offset plus one line height
+(or zero for empty text). A non-finite width, an overflowing `max_width / scale`, or a non-positive
+or non-finite scale refuses the layout. There is no separate limit on the number of lines or
+characters.
 
 ## An item or a model turned in 3D
 
@@ -590,11 +580,72 @@ draw.model_3d(Gui3dSubject::Model(self.mirror), Gui3dView::new([120.0, 60.0], 40
 - The view is orthographic. Both subjects have a depth of their own: a draw never intersects
   what the screen drew before or after it, and later drawing covers it in call order. An item's
   faces meet each other by depth, as a model's do, and its enchantment glint follows them. The
-  OptiFine CIT glint layers of a stack are not drawn on this path. There is no z input.
-  `push_clip` cuts both as it cuts `fill`.
+  OptiFine CIT glint layers of a stack are not drawn on this path. There is no z input. Use
+  [`DrawContext::with_scissor`](#clipping-what-a-screen-draws) to clip either subject.
 - In an available draw context, a `minecraft:air` stack is a no-op (`Ok(())`) even with an
   invalid view or unreadable component overrides, matching `GuiGraphicsExtractor.item`. Refusals draw nothing: `Gui3dError::Unavailable` (no game, or a
   server), `NotFinite` (a non-finite view value or transformed corner, or a non-positive size),
   `UnknownItem` (an unknown key or an item missing from the current registry), `InvalidStack`
   (component overrides that cannot be converted for drawing), and `Model(ModelError)` (a stale
   or unknown handle).
+
+## Room beside a container
+
+`Hooks::screen_room` lets a client mod reserve room for a panel to the right of an open container.
+This is a layout query, not a drawing or cancellation hook. It does not add recipe properties,
+slot membership or ghost-placement APIs.
+
+The API is right-only because the existing recipe book occupies the left of the container; mod panels reserve the right. Left reservations are not part of this API.
+
+```rust,ignore
+fn screen_room(&self, _: &dyn ClientHost, event: &mut ScreenRoomEvent<'_>) {
+    let panel_width_with_gap = 149.0;
+    event.right = event.right.max(panel_width_with_gap);
+}
+```
+
+Import `ClientHost`, `Hooks` and `ScreenRoomEvent` from `mod_api` and implement the method in your subscribed `Hooks` implementation. Keep the query pure and cheap: do not draw, mutate game state or do expensive work here.
+
+The answer starts at zero. Later listeners see earlier answers and keep the maximum, not a sum. Panels asking for 80 and 149 GUI pixels reserve 149 pixels together, not 229. They share the reservation and must coordinate their own contents; the engine does not stack panels or assign per-mod offsets.
+
+The query's `event.screen.rect` is the **pre-reservation** container rectangle. Later drawing and input `ScreenView` values expose the shifted rectangle. Do not subtract the shift yourself from those later views.
+
+When the window, the open recipe book (including its category tabs), and the requested right room all fit, the window and book move left by half the requested room, rounded down. Slots, hit boxes and effect panels follow in the same frame. Otherwise nothing moves. A panel should check the later window rectangle's right edge plus its required room against the viewport before drawing there. A request is not a guarantee of space.
+
+A negative or non-finite final answer counts as zero. Zero and absent listeners preserve the original layout. A finite request too large to fit also preserves it. The hook runs for the inventory, containers and custom menus, but not Creative, Merchant or Beacon screens, or a narrow screen where the recipe book covers the menu.
+
+The answer is queried at most once per frame and screen and reused by every layout consumer that frame. A recursive layout query during dispatch sees zero, avoiding recursive dispatch. The next frame queries again. A geometry-changing answer rebuilds the layout that frame; unchanged geometry reuses the existing build, even if the numerical answer changed without affecting the resulting layout.
+
+## Clipping what a screen draws
+
+A scrolling list or a viewport into a larger page shows only the part inside a box.
+`DrawContext::with_scissor(rect, &mut |clipped| { ... })` cuts draws made through `clipped` to
+`[x, y, w, h]` in GUI pixels, like vanilla's `GuiGraphics.enableScissor` and `disableScissor`
+around the callback. The full drawing context is available inside, including widgets, scenes,
+items and text. The callback returns `()` and the clip does not roll back drawing; handle errors
+from draw methods inside the callback.
+
+```rust,ignore
+fn render_gui_post(&self, _: &dyn ClientHost, event: &mut RenderGuiPostEvent<'_>) {
+    let [x, y, w, h] = self.list_box;
+    let _ = event.draw.with_scissor([x, y, w, h], &mut |clipped| {
+        for (row, line) in self.lines.iter().enumerate() {
+            let top = y + row as f32 * 12.0 - self.scroll;
+            clipped.text(line, [x + 2.0, top], 0xFFFF_FFFF, false);
+        }
+    });
+}
+```
+
+- **Nesting.** An inner clip is intersected with the outer clip, so it never shows more than that
+  one. A nonpositive width or height, or a disjoint inner clip, clips everything. The enclosing
+  clip is restored on return or unwind, before any subsequent draws.
+- **Depth.** Scenes keep their own box too. Cutting an item or scene preserves depth: a cut face
+  still draws in front of or behind its neighbours as it did uncut.
+- **Refusals.** `GuiClipRefusal::NotFinite` (a coordinate, size or computed endpoint is NaN or
+  infinite) or `Unavailable` (no scissor drawing surface) leaves the enclosing clip as it was and
+  does not call the callback.
+
+For a fallible, transactional group of GUI primitives [on a canvas](gui-paint.md#drawing-directly-with-a-canvas),
+pass `Some(rect)` to `canvas.scope`. That scissor uses the child scope's pose at entry; later
+pose changes do not move it.

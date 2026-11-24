@@ -269,7 +269,11 @@ pub(super) fn drowned_travel(
 ) -> ControlFlow<super::living::TravelPause> {
     m.move_relative(0.01, input);
     m.travel_move(w, level, events, pause, |m, _, _, _| {
-        m.velocity = Vec3::new(m.velocity.x * 0.9, m.velocity.y * 0.9, m.velocity.z * 0.9);
+        m.set_velocity(Vec3::new(
+            m.velocity.x * 0.9,
+            m.velocity.y * 0.9,
+            m.velocity.z * 0.9,
+        ));
     })
 }
 /// `RangedAttackMob.rangedAttackUncertainty`: 14 on peaceful, four less per

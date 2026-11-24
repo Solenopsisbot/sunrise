@@ -1514,6 +1514,11 @@ fn wetness(wetness: f32, rain: f32, dt: f32) -> f32 {
     rain + (wetness - rain) * 0.5f32.powf(dt / half_life)
 }
 
+// Native shader input inverts this exact, left-associated composition.
+pub(super) fn view_projection(projection: Mat4, bob: Mat4, spin: Mat4) -> Mat4 {
+    projection * bob * spin
+}
+
 /// The frame as packs read it (docs/api/shaders-reference.md), from the renderer's `Frame`.
 pub fn frame_inputs(
     frame: &Frame,
@@ -1523,10 +1528,16 @@ pub fn frame_inputs(
     shadow: Option<&sunrise_shaders::Shadow>,
 ) -> FrameInputs {
     let aspect = size[0] as f32 / size[1].max(1) as f32;
-    let view = crate::camera::view_matrix(frame.yaw, frame.pitch);
-    let projection = super::world_projection(frame.fov_degrees, aspect, frame.depth_far)
-        * frame.bob
-        * frame.spin;
+    let view = if frame.roll == 0.0 {
+        crate::camera::view_matrix(frame.yaw, frame.pitch)
+    } else {
+        crate::camera::view_matrix_rolled(frame.yaw, frame.pitch, frame.roll)
+    };
+    let projection = view_projection(
+        super::world_projection(frame.fov_degrees, aspect, frame.depth_far),
+        frame.posed_bob(),
+        frame.spin,
+    );
     // A celestial body's direction at `angle` degrees (SkyRenderer: Y -90°, then X by the
     // angle, of straight up): overhead at 0, rising in the east (+x).
     let body = |angle: f32| {

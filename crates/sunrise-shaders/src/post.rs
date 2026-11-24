@@ -579,6 +579,10 @@ pub struct Post {
     pub shadow_only_lit_blocks: bool,
     /// `shadowcomp`..`shadowcomp99`, after the shadow pass (2.1).
     pub shadow_comp: Vec<PostProgram>,
+    /// Mod-declared render pipelines resolved against this pack (`GameInputs::mod_programs`),
+    /// in request order. `program: None` means no candidate in the pipeline's fallback chain
+    /// existed or translated cleanly, so the pipeline falls back to its own shader.
+    pub mod_programs: Vec<ModPackProgram>,
     /// Translucent entities draw after deferred (`separateEntityDraws`, 3.2).
     pub translucent_late: bool,
     /// Particles draw after deferred (`particles.ordering`, `particles.before.deferred`, 3.2).
@@ -606,8 +610,8 @@ pub struct Post {
 
 impl Post {
     /// Every program that loaded: the passes', what draws the game's geometry, the shadow
-    /// pass's and its composites.
-    fn every_program(&self) -> impl Iterator<Item = &PostProgram> {
+    /// pass's and its composites, and bound mod pipeline programs.
+    pub fn every_program(&self) -> impl Iterator<Item = &PostProgram> {
         let draws = [
             &self.terrain,
             &self.terrain_cutout,
@@ -620,12 +624,16 @@ impl Post {
             &self.entities_translucent,
             &self.particles,
             &self.particles_translucent,
+            &self.beacon_beam,
             &self.damaged_block,
             &self.clouds,
+            &self.lines,
             &self.weather,
             &self.hand,
+            &self.hand_water,
             &self.shadow,
             &self.shadow_water,
+            &self.shadow_water_plain,
             &self.shadow_entities,
             &self.shadow_block,
         ];
@@ -633,6 +641,7 @@ impl Post {
             .iter()
             .chain(draws.into_iter().flatten())
             .chain(&self.shadow_comp)
+            .chain(self.mod_programs.iter().filter_map(|m| m.program.as_ref()))
     }
 
     /// The fewest bytes each storage buffer (`bufferObject.<n>`, set 4) needs for every stage
@@ -724,6 +733,32 @@ pub const DEVICELESS_INTERFACE_LIMITS: naga::front::glsl::InterfaceLimits =
         vertex_attributes: 32,
     };
 
+/// A mod-declared render pipeline asking [`load_post`] to resolve the first available
+/// program from its ordered fallback chain (`programs`) for a pack pass `group`.
+#[derive(Clone, Debug)]
+pub struct ModPackProgramRequest {
+    /// Mod pipeline slot index echoed back in [`ModPackProgram::slot`].
+    pub slot: usize,
+    /// Ordered candidate program stems (`RenderPipeline::effective_pack_programs`).
+    pub programs: Vec<String>,
+    /// Pack pass group (`Group::Gbuffers`, `Group::Translucent`, or `Group::Shadow`).
+    pub group: Group,
+    /// Default blend state when `shaders.properties` sets no `blend.<program>`.
+    pub default_blend: Option<Blend>,
+    /// Vertex-stage inputs matching the pipeline's vertex format and GLSL bindings.
+    pub inputs: GbuffersInputs,
+}
+
+/// Resolution result for one [`ModPackProgramRequest`].
+#[derive(Clone)]
+pub struct ModPackProgram {
+    /// Mod pipeline slot index from [`ModPackProgramRequest::slot`].
+    pub slot: usize,
+    /// First program in the request's chain that existed and translated cleanly, or `None` when
+    /// none matched or all failed to translate.
+    pub program: Option<PostProgram>,
+}
+
 /// The game's geometry a pack may draw with its gbuffers programs: each kind's vertex inputs,
 /// when the game can draw it with a pack.
 #[derive(Clone, Debug, Default)]
@@ -751,6 +786,8 @@ pub struct GameInputs {
     pub terrain_geometry: Option<crate::GeometryInputs>,
     /// Entities and block entities read vertex by vertex, for the same.
     pub entity_geometry: Option<crate::GeometryInputs>,
+    /// Mod-declared pipelines requesting pack program discovery and translation.
+    pub mod_programs: Vec<ModPackProgramRequest>,
     /// The device's stage interface limits (`wgpu::Limits::max_inter_stage_shader_variables` and
     /// `max_vertex_attributes`): a program whose varyings or vertex inputs take more is refused
     /// with a note, as the device could never build its pipeline. Default: wgpu's defaults.
@@ -824,6 +861,7 @@ pub fn load_post(
         shadow_only_player: false,
         shadow_only_lit_blocks: false,
         shadow_comp: Vec::new(),
+        mod_programs: Vec::new(),
         translucent_late: false,
         particles_late: false,
         custom: Custom::parse(properties),
@@ -857,6 +895,8 @@ pub fn load_post(
             continue;
         }
         if let Some(name) = e.key.strip_prefix("image.") {
+            // `Properties::parse` expanded the file's own macros at the line; the options again
+            // here, for a file read without them.
             match CustomImage::parse(name, &options.expand(&e.value)) {
                 Some(i) => post.images.push(i),
                 None => post.notes.push(format!("`{}`: not an image", e.key)),
@@ -866,7 +906,11 @@ pub fn load_post(
         let Some(name) = e.key.strip_prefix("size.buffer.") else {
             continue;
         };
-        match (crate::buffer_index(name), BufferSize::parse(&e.value)) {
+        // As for `image.*`: the options again, for a file read without them.
+        match (
+            crate::buffer_index(name),
+            BufferSize::parse(&options.expand(&e.value)),
+        ) {
             (Some(b), Some(size)) => post.sizes[b] = Some(size),
             _ => post
                 .notes
@@ -1058,6 +1102,27 @@ pub fn load_post(
             p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
             p
         });
+    // Resolve non-shadow mod pipeline requests against the pack's gbuffers/translucent programs.
+    // Shadow-slot mod requests resolve inside `load_shadow` only when `shadow_pass` is active.
+    let mod_programs: Vec<ModPackProgram> = inputs
+        .mod_programs
+        .iter()
+        .map(|req| {
+            let program = if req.group.shadow() {
+                None
+            } else {
+                let names: Vec<&str> = req.programs.iter().map(String::as_str).collect();
+                gbuffers(&names, req.group, &req.inputs).map(|mut p| {
+                    p.blend = blend(properties, &p.name).unwrap_or(req.default_blend);
+                    p
+                })
+            };
+            ModPackProgram {
+                slot: req.slot,
+                program,
+            }
+        })
+        .collect();
     if let Some(terrain) = &inputs.terrain {
         // Cutout terrain's alpha test, unless `alphaTest.*` says otherwise (3.2): alpha above
         // 0.5, which `alphaTestRef` reads. Iris 1.11.7 with probe packs of ours (#9307), through
@@ -1153,6 +1218,11 @@ pub fn load_post(
             }
         }
         loader.post.terrain = solid;
+        // Translucent terrain blends every buffer it writes with the translucent default (3.2),
+        // encoded data included. A pack keeps a buffer exact with its own
+        // `blend.<program>.<buffer>=off`, keyed by the program that draws water
+        // (`gbuffers_water`, or the `gbuffers_terrain` chain it falls back to); see
+        // sunrise-client-render's `gfx::pack_post::water_blend_tests`.
         loader.post.water = water.map(|mut p| {
             p.blend = blend(properties, &p.name).unwrap_or(Some(TRANSLUCENT_BLEND));
             p
@@ -1188,11 +1258,13 @@ pub fn load_post(
         Some(_) => true,
         None => !flag("particles.before.deferred").unwrap_or(false),
     };
+    loader.post.mod_programs = mod_programs;
     load_shadow(
         &mut loader,
         inputs.terrain.as_ref(),
         inputs.entities.as_ref(),
         [&inputs.terrain_geometry, &inputs.entity_geometry].map(Option::as_ref),
+        &inputs.mod_programs,
     );
     post
 }
@@ -1207,6 +1279,7 @@ fn load_shadow(
     terrain: Option<&GbuffersInputs>,
     entities: Option<&GbuffersInputs>,
     geometry: [Option<&crate::GeometryInputs>; 2],
+    mod_requests: &[ModPackProgramRequest],
 ) {
     let post = &*loader.post;
     let gbuffers = [
@@ -1232,6 +1305,7 @@ fn load_shadow(
     // for a probe pack of ours whose only reader of it was `prepare.csh` (#10490).
     let reads = (post.programs.iter())
         .chain(gbuffers.into_iter().flatten())
+        .chain(post.mod_programs.iter().filter_map(|m| m.program.as_ref()))
         .flat_map(|p| {
             let stages = p.program.iter().map(|q| &q.interface);
             stages.chain(p.compute.iter().map(|(_, c)| &c.interface))
@@ -1378,6 +1452,30 @@ fn load_shadow(
     loader.post.shadow_block = shadow_block;
     loader.post.shadow_only_player = only_player;
     loader.post.shadow_only_lit_blocks = only_lit;
+    for (idx, req) in mod_requests.iter().enumerate() {
+        if !req.group.shadow() {
+            continue;
+        }
+        let resolved = req.programs.iter().find_map(|name| {
+            let test = match properties.get(&format!("alphaTest.{name}")) {
+                Some(v) => crate::AlphaTest::parse(v.trim()).flatten(),
+                None => req.inputs.alpha_test,
+            };
+            let mut mod_inputs = req.inputs.clone();
+            mod_inputs.alpha_test = test;
+            loader
+                .load(name.clone(), Group::Shadow, |v, f| {
+                    translate_shadow(v, f, &mod_inputs, limits)
+                })
+                .map(|mut p| {
+                    p.blend = blend(properties, &p.name).unwrap_or(req.default_blend);
+                    p
+                })
+        });
+        if let Some(entry) = loader.post.mod_programs.get_mut(idx) {
+            entry.program = resolved;
+        }
+    }
 }
 
 struct Loader<'a> {
@@ -2156,6 +2254,121 @@ mod tests {
         let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
         assert!(post.images.is_empty());
         assert!(!post.notes.is_empty());
+    }
+
+    /// `image.*` sizes written as macros `shaders.properties` defines above them, inside and
+    /// outside `#if` blocks (#675), read as the game reads the pack. A `#define` reaches the
+    /// lines after it only, so the macros an image line sees are the ones at that line.
+    #[test]
+    fn image_dimensions_expand_the_macros_the_properties_file_defines_above_them() {
+        let properties = "\
+            #if MC_VERSION >= 10000\n#define WIDTH 192\n#define HEIGHT 128\n#endif\n\
+            image.sky = none RGBA RGBA16F HALF_FLOAT false false WIDTH HEIGHT\n\
+            #ifdef NOT_DEFINED\n#define DEPTH 5\n#else\n#define DEPTH 7\n#endif\n\
+            image.volume = none RGBA RGBA8 BYTE false false WIDTH 3 DEPTH\n\
+            #define WIDE SIZE\n\
+            image.option = none RGBA RGBA8 BYTE false false WIDE 24\n\
+            #define SHORT 40\n\
+            image.at_its_line = none RGBA RGBA8 BYTE false false 9 SHORT\n\
+            #undef SHORT\n#define SHORT 41\n\
+            image.late = none RGBA RGBA8 BYTE false false LATER 2\n\
+            #define LATER 6\n\
+            #define GONE 11\n#undef GONE\n\
+            image.gone = none RGBA RGBA8 BYTE false false GONE 2\n";
+        let bytes = zip(&[
+            ("shaders/options.glsl", "#define SIZE 16 // [8 16]\n"),
+            ("shaders/shaders.properties", properties),
+        ]);
+        for (chosen, option) in [(None, 16), (Some("8"), 8)] {
+            let mut pack = Pack::from_zip_bytes("image.zip", bytes.clone()).unwrap();
+            if let Some(value) = chosen {
+                pack = pack.with_chosen(std::collections::BTreeMap::from([(
+                    "SIZE".into(),
+                    value.into(),
+                )]));
+            }
+            let mut macros = Macros::standard();
+            let (properties, _) = crate::read_properties(&pack, &mut macros);
+            let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+            let images: Vec<_> = post
+                .images
+                .iter()
+                .map(|i| (i.name.as_str(), i.size))
+                .collect();
+            assert_eq!(
+                images,
+                [
+                    ("sky", ImageSize::Absolute([192, 128])),
+                    ("volume", ImageSize::Volume([192, 3, 7])),
+                    ("option", ImageSize::Absolute([option, 24])),
+                    ("at_its_line", ImageSize::Absolute([9, 40])),
+                ]
+            );
+            // Only the two lines left unresolved are noted, each naming its key.
+            let named = |n: &String, key: &str| n.contains(&format!("`{key}`"));
+            assert!(
+                post.notes.len() == 2
+                    && named(&post.notes[0], "image.late")
+                    && named(&post.notes[1], "image.gone"),
+                "{:?}",
+                post.notes
+            );
+        }
+    }
+    /// `size.buffer.*` sizes written as macros, as `image.*` ones (#675; spec 1.5 item 2 names
+    /// buffer sizes first): each value sees the macros of its line.
+    #[test]
+    fn buffer_sizes_expand_the_macros_the_properties_file_defines_above_them() {
+        let properties = "\
+            #if MC_VERSION >= 10000\n#define WIDTH 64\n#define HEIGHT 48\n#endif\n\
+            size.buffer.colortex4 = WIDTH HEIGHT\n\
+            #define SIDE SIZE\n\
+            size.buffer.colortex5 = SIDE SIDE\n\
+            #define SHORT 40\n\
+            size.buffer.colortex6 = 9 SHORT\n\
+            #undef SHORT\n#define SHORT 41\n\
+            size.buffer.colortex7 = LATER 2\n\
+            #define LATER 6\n\
+            #define GONE 11\n#undef GONE\n\
+            size.buffer.colortex8 = GONE 2\n\
+            #ifdef NOT_DEFINED\n#define TALL 5\n#else\n#define TALL 7\n#endif\n\
+            size.buffer.colortex9 = 3 TALL\n";
+        let bytes = zip(&[
+            ("shaders/options.glsl", "#define SIZE 16 // [8 16]\n"),
+            ("shaders/shaders.properties", properties),
+        ]);
+        for (chosen, option) in [(None, 16), (Some("8"), 8)] {
+            let mut pack = Pack::from_zip_bytes("sizes.zip", bytes.clone()).unwrap();
+            if let Some(value) = chosen {
+                pack = pack.with_chosen(std::collections::BTreeMap::from([(
+                    "SIZE".into(),
+                    value.into(),
+                )]));
+            }
+            let mut macros = Macros::standard();
+            let (properties, _) = crate::read_properties(&pack, &mut macros);
+            let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+            assert_eq!(
+                post.sizes[4..10],
+                [
+                    Some(BufferSize::Absolute([64, 48])),
+                    Some(BufferSize::Absolute([option, option])),
+                    Some(BufferSize::Absolute([9, 40])),
+                    None,
+                    None,
+                    Some(BufferSize::Absolute([3, 7])),
+                ]
+            );
+            // Only the two lines left unresolved are noted, each naming its key.
+            let named = |n: &String, key: &str| n.contains(&format!("`{key}`"));
+            assert!(
+                post.notes.len() == 2
+                    && named(&post.notes[0], "size.buffer.colortex7")
+                    && named(&post.notes[1], "size.buffer.colortex8"),
+                "{:?}",
+                post.notes
+            );
+        }
     }
     use crate::pack::tests::zip;
 
@@ -3446,6 +3659,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             terrain_one_pass: None,
             terrain_geometry: None,
             entity_geometry: None,
+            mod_programs: Vec::new(),
             interface_limits: Default::default(),
         };
         let post = load_post(&pack, "", &Properties::default(), &macros, &inputs);
@@ -3638,6 +3852,103 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
         assert_eq!(
             post.config.buffers[2].format,
             crate::Format::parse("RGBA16F").unwrap()
+        );
+    }
+
+    #[test]
+    fn mod_program_requests_resolve_chain_fallback_and_defines_without_panicking() {
+        let mod_vsh = "#version 120\n\
+            void main() {\n\
+                gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n\
+            }\n";
+        let mod_fsh_defined = "#version 120\n\
+            #ifdef MOD_CUSTOM_FEATURE\n\
+            void main() { gl_FragData[0] = vec4(0.25, 0.75, 0.5, 1.0); }\n\
+            #else\n\
+            void main() { gl_FragData[0] = vec4(1.0, 0.0, 0.0, 1.0); }\n\
+            #endif\n";
+        let broken_fsh = "#version 120\nvoid main() { gl_FragData[0] = undeclared_symbol; }\n";
+        let pack = Pack::from_zip_bytes(
+            "mod-pack-programs",
+            crate::pack::tests::zip(&[
+                ("shaders/custom_terrain.vsh", mod_vsh),
+                ("shaders/custom_terrain.fsh", mod_fsh_defined),
+                ("shaders/broken_custom.vsh", mod_vsh),
+                ("shaders/broken_custom.fsh", broken_fsh),
+                ("shaders/gbuffers_terrain.vsh", mod_vsh),
+                (
+                    "shaders/gbuffers_terrain.fsh",
+                    "#version 120\nvoid main() { gl_FragData[0] = vec4(0.5, 0.5, 0.5, 1.0); }\n",
+                ),
+            ]),
+        )
+        .unwrap();
+        let mut macros = Macros::standard();
+        macros.define("MOD_CUSTOM_FEATURE", "");
+        let base_inputs = GbuffersInputs {
+            declarations: "layout(location = 0) in vec3 hz_v_pos;\n".into(),
+            body: "    hz_Vertex = vec4(hz_v_pos, 1.0);\n\
+                   hz_Color = vec4(1.0);\n\
+                   hz_MultiTexCoord0 = vec4(0.0, 0.0, 0.0, 1.0);\n\
+                   hz_MultiTexCoord1 = vec4(240.0, 240.0, 0.0, 1.0);\n\
+                   hz_MultiTexCoord2 = hz_MultiTexCoord1;\n\
+                   hz_Normal = vec3(0.0, 1.0, 0.0);\n"
+                .into(),
+            ..GbuffersInputs::default()
+        };
+        let inputs = GameInputs {
+            mod_programs: vec![
+                // Custom program exists and compiles with injected define.
+                ModPackProgramRequest {
+                    slot: 0,
+                    programs: vec!["custom_terrain".into(), "gbuffers_terrain".into()],
+                    group: Group::Gbuffers,
+                    default_blend: None,
+                    inputs: base_inputs.clone(),
+                },
+                // Prepended program fails to translate -> falls down chain to gbuffers_terrain.
+                ModPackProgramRequest {
+                    slot: 1,
+                    programs: vec!["broken_custom".into(), "gbuffers_terrain".into()],
+                    group: Group::Gbuffers,
+                    default_blend: None,
+                    inputs: base_inputs.clone(),
+                },
+                // Every candidate missing or broken -> resolves to None (falls back to mod shader).
+                ModPackProgramRequest {
+                    slot: 2,
+                    programs: vec!["missing_prog".into(), "broken_custom".into()],
+                    group: Group::Translucent,
+                    default_blend: Some(TRANSLUCENT_BLEND),
+                    inputs: base_inputs,
+                },
+            ],
+            ..GameInputs::default()
+        };
+        let post = load_post(&pack, "", &Properties::default(), &macros, &inputs);
+        assert_eq!(post.mod_programs.len(), 3);
+        assert_eq!(post.mod_programs[0].slot, 0);
+        assert_eq!(
+            post.mod_programs[0]
+                .program
+                .as_ref()
+                .map(|p| p.name.as_str()),
+            Some("custom_terrain")
+        );
+        assert_eq!(post.mod_programs[1].slot, 1);
+        assert_eq!(
+            post.mod_programs[1]
+                .program
+                .as_ref()
+                .map(|p| p.name.as_str()),
+            Some("gbuffers_terrain")
+        );
+        assert_eq!(post.mod_programs[2].slot, 2);
+        assert!(post.mod_programs[2].program.is_none());
+        assert!(
+            post.notes.iter().any(|n| n.contains("broken_custom")),
+            "broken program should be noted without panicking: {:?}",
+            post.notes
         );
     }
 }

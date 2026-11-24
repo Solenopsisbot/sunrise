@@ -15,8 +15,8 @@ pub enum Profile {
 impl Profile {
     pub const fn output_version(self) -> u32 {
         match self {
-            Self::Full => 8,
-            Self::Server => 1,
+            Self::Full => 9,
+            Self::Server => 2,
         }
     }
 

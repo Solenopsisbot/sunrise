@@ -801,7 +801,7 @@ computer, as it already does for native mods."""
 dev = """Issue #4354: when no release asset matches the platform, the launcher fetches the tagged source and runs \
 the same pinned-toolchain `cargo build --locked` its native-mod builds use, with a warning about the time it \
 takes. The build is unsigned, so the launcher marks the version as built locally."""
-links = ["#4354", "docs/native-mods.md"]
+links = ["#4354", "docs/modding/src/how-to/native-mods.md"]
 
 [[item]]
 id = "windows-arm64"
@@ -988,8 +988,8 @@ homes, mace smashes and knockback."""
 dev = """Villages: iron golem village goals, villager memories across saves, villager age, job-site claiming on \
 dedicated servers, flower offers (#1639 is one report). Combat: the mobs' `attack_knockback` attribute, mace \
 smash logic, the hit knockback source on the host, the fire burnout biome tag. Each is checked against \
-vanilla by a harness (docs/rust-parity.md)."""
-links = ["#1639", "docs/rust-parity.md"]
+vanilla by a harness (docs/status.md)."""
+links = ["#1639", "docs/status.md"]
 
 [[item]]
 id = "audio-device"

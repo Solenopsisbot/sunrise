@@ -4,7 +4,11 @@
 //! hearts and the experience bar, plus the draw-call types and colour
 //! helpers the other layouts share (`hud_overlays`, `chat`). Computed without
 //! drawing so the parity fixture can compare them with the vanilla client.
-use crate::{font::Font, text::Text};
+use crate::{
+    font::Font,
+    hud::{HudAtlas, HudBatch, Rect},
+    text::Text,
+};
 pub use mod_api::client::hud_layout::{Blend, HeartKind, PoseOp};
 use std::borrow::Cow;
 use sunrise_core::random::{LegacyRandom, RandomSource};
@@ -87,18 +91,6 @@ pub enum GuiDraw {
         scale: [f32; 2],
         pivot: [f32; 2],
     },
-    /// `PlayerFaceExtractor.extractRenderState` of the player `uuid`'s skin: the face, then the
-    /// hat layer when `hat`, `size` pixels square, upside down when `flip`, tinted `color`. The
-    /// skin comes from the caller ([`GuiFaces`]).
-    PlayerFace {
-        uuid: u128,
-        x: i32,
-        y: i32,
-        size: i32,
-        hat: bool,
-        flip: bool,
-        color: u32,
-    },
     /// `pose().pushMatrix()` followed by `ops`.
     Push(Vec<PoseOp>),
     /// `pose().popMatrix()`.
@@ -109,9 +101,8 @@ pub enum GuiDraw {
 pub type Pose = [f32; 6];
 pub const IDENTITY: Pose = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
-/// Applies `op` like JOML's `translate` / `scale` / `rotate` (same float order). A
-/// `Rotate` by a NaN or infinite angle is refused: `m` stays as it was (see
-/// [`pose_refused`]).
+/// Applies `op` like JOML's `translate` / `scale` / `rotate` (same float order).
+/// A `Rotate` by a NaN or infinite angle leaves `m` as it was.
 pub fn pose_apply(m: &mut Pose, op: PoseOp) {
     match op {
         PoseOp::Translate(x, y) => {
@@ -143,12 +134,13 @@ pub fn pose_apply(m: &mut Pose, op: PoseOp) {
     }
 }
 
-/// The first op of `ops` that [`pose_apply`] refuses (a `Rotate` by a NaN or infinite
-/// angle), if any.
-pub fn pose_refused(ops: &[PoseOp]) -> Option<PoseOp> {
-    ops.iter()
-        .copied()
-        .find(|op| matches!(op, PoseOp::Rotate(angle) if !angle.is_finite()))
+/// Transform a GUI point in JOML's float order. Skip for [`IDENTITY`] when painting a range.
+#[inline]
+pub fn pose_point(pose: Pose, [x, y]: [f32; 2]) -> [f32; 2] {
+    [
+        pose[0] * x + pose[2] * y + pose[4],
+        pose[1] * x + pose[3] * y + pose[5],
+    ]
 }
 
 pub const WHITE: u32 = 0xFFFF_FFFF;
@@ -200,6 +192,17 @@ pub fn fill(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> GuiDraw {
         y1: y0.max(y1),
         color,
     }
+}
+/// Paint a vanilla fill with the signed integer endpoints intact until the float conversion.
+pub(crate) fn paint_fill_endpoints(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    [x0, y0, x1, y1]: [i32; 4],
+    color: u32,
+) {
+    let (l, r) = (x0.min(x1) as f32, x0.max(x1) as f32);
+    let (t, b) = (y0.min(y1) as f32, y0.max(y1) as f32);
+    batch.fill_quad(atlas, [[l, t], [r, t], [r, b], [l, b]], abgr(color));
 }
 /// `graphics.text`: dropped when fully transparent.
 fn text(out: &mut Vec<GuiDraw>, text: Text, x: i32, y: i32, color: u32, shadow: bool) {
@@ -558,6 +561,13 @@ pub struct StatusBarHeights {
     right: StatusColumn,
 }
 
+impl StatusBarHeights {
+    /// The left and right columns' heights (NeoForge's `Hud.leftHeight`, `rightHeight`).
+    pub fn heights(&self) -> [i32; 2] {
+        [self.left.height, self.right.height]
+    }
+}
+
 struct StatusColumn {
     height: i32,
 }
@@ -892,24 +902,192 @@ impl HealthHud {
     }
 }
 
+/// An atlas rectangle already resolved by the caller, drawn at `dst` (`[x, y, w, h]` in GUI
+/// pixels) and tinted with an ARGB colour. Emission does not look up the source again.
+pub struct ResolvedGuiQuad {
+    pub rect: Rect,
+    pub dst: [f32; 4],
+    pub color: u32,
+}
+
+fn is_mob_effect_sprite(sprite: &str) -> bool {
+    sprite.starts_with("mob_effect/")
+        || sprite
+            .split_once(':')
+            .is_some_and(|(_, path)| path.starts_with("mob_effect/"))
+}
+
+impl ResolvedGuiQuad {
+    /// Paint a packed atlas sprite without GUI sprite modifiers or a special blend.
+    pub fn paint(self, batch: &mut HudBatch) {
+        let [x, y, w, h] = self.dst;
+        batch.rect_uv(x, y, w, h, self.rect, abgr(self.color));
+    }
+
+    /// Paint a GUI sprite, optionally cut to a region `[sprite_w, sprite_h, u, v]`, then apply
+    /// Polytone sprite modifiers, `gui.scaling` for whole non-effect sprites
+    /// (`GuiGraphicsExtractor.blitSprite`), and the GUI sprite's blend to the resulting draws.
+    pub fn paint_sprite(
+        mut self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        sprite: &str,
+        region: Option<[i32; 4]>,
+        blend: Blend,
+    ) {
+        if let Some([sw, sh, u, v]) = region {
+            let r = &mut self.rect;
+            let [_, _, w, h] = self.dst;
+            let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
+            let u0 = r.u0 + du * u as f32 / sw as f32;
+            let v0 = r.v0 + dv * v as f32 / sh as f32;
+            r.u1 = u0 + du * w / sw as f32;
+            r.v1 = v0 + dv * h / sh as f32;
+            r.u0 = u0;
+            r.v0 = v0;
+        }
+        let whole_scaling = region.is_none() && !is_mob_effect_sprite(sprite);
+        // A whole GUI sprite draws as its `gui.scaling` says (`GuiGraphicsExtractor.blitSprite`).
+        let draw = |batch: &mut HudBatch, key: &str, rect: Rect, at: [f32; 4], color: u32| {
+            let start = batch.vertices.len();
+            if whole_scaling {
+                crate::ui::draw_whole_sprite(batch, atlas, key, rect, at, color);
+            } else {
+                batch.rect_uv(at[0], at[1], at[2], at[3], rect, color);
+            }
+            if blend == Blend::Crosshair {
+                if let Some(page) = atlas.gui_atlas_page(key) {
+                    batch.blend_since(
+                        start,
+                        crate::hud::Blend::AtlasPage(page, crate::hud::AtlasBlend::Invert),
+                    );
+                } else {
+                    batch.invert_since(start);
+                }
+            } else {
+                batch.bind_gui_atlas(start, atlas, key);
+            }
+        };
+        match crate::hud::sprite_modifiers::draws(
+            atlas,
+            sprite,
+            self.rect,
+            self.dst,
+            abgr(self.color),
+        ) {
+            // A Polytone screen sprite modifier: the sprite changed, then its overlays.
+            Some(draws) => {
+                for d in draws {
+                    draw(batch, &d.key, d.rect, d.at, d.color);
+                }
+            }
+            None => draw(batch, sprite, self.rect, self.dst, abgr(self.color)),
+        }
+    }
+
+    /// Paint a raw texture cut at `uv` with source size `src` in the texture's `tex` units.
+    pub fn paint_blit(
+        mut self,
+        batch: &mut HudBatch,
+        atlas_page: Option<usize>,
+        uv: [f32; 2],
+        src: [i32; 2],
+        tex: [i32; 2],
+        blend: Blend,
+    ) {
+        let start = batch.vertices.len();
+        let r = &mut self.rect;
+        let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
+        let u0 = r.u0 + du * uv[0] / tex[0] as f32;
+        let v0 = r.v0 + dv * uv[1] / tex[1] as f32;
+        r.u1 = r.u0 + du * (uv[0] + src[0] as f32) / tex[0] as f32;
+        r.v1 = r.v0 + dv * (uv[1] + src[1] as f32) / tex[1] as f32;
+        r.u0 = u0;
+        r.v0 = v0;
+        self.paint(batch);
+        if let Some(page) = atlas_page {
+            use crate::hud::AtlasBlend;
+            let blend = match blend {
+                Blend::Textured => AtlasBlend::Alpha,
+                Blend::Vignette => AtlasBlend::Vignette,
+                Blend::Nausea => AtlasBlend::Additive,
+                Blend::Crosshair => AtlasBlend::Invert,
+            };
+            batch.blend_since(start, crate::hud::Blend::AtlasPage(page, blend));
+        } else {
+            match blend {
+                Blend::Textured => {}
+                Blend::Vignette => batch.blend_since(start, crate::hud::Blend::Vignette),
+                Blend::Nausea => batch.blend_since(start, crate::hud::Blend::Additive),
+                Blend::Crosshair => batch.invert_since(start),
+            }
+        }
+    }
+}
+
+/// Paint a float-rectangle `fillGradient` with ARGB colours at its input y edges.
+/// A zero extent or one-axis inversion draws nothing. The caller checks for finite geometry.
+pub fn paint_fill_gradient(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    [x, y, w, h]: [f32; 4],
+    top: u32,
+    bottom: u32,
+) {
+    if w == 0.0 || h == 0.0 || (w > 0.0) != (h > 0.0) {
+        return;
+    }
+    let (rect, top, bottom) = if w < 0.0 {
+        ((x + w, y + h, -w, -h), bottom, top)
+    } else {
+        ((x, y, w, h), top, bottom)
+    };
+    batch.fill_gradient(atlas, rect, abgr(top), abgr(bottom));
+}
+
+/// Paint `PlayerFaceExtractor.extractRenderState` from `skin` at `dst = [x, y, w, h]`: the face,
+/// then the hat layer when `hat`, upside down when `flip`, tinted by ARGB `color`. Returns `false`
+/// without drawing if the atlas lacks `skin`.
+pub fn paint_player_face(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    skin: &str,
+    dst: [f32; 4],
+    hat: bool,
+    flip: bool,
+    color: u32,
+) -> bool {
+    let Some(&rect) = atlas.blit_rect(skin) else {
+        return false;
+    };
+    for (uv, src) in crate::tab_list::face_blits(hat, flip) {
+        ResolvedGuiQuad { rect, dst, color }.paint_blit(
+            batch,
+            atlas.blit_atlas_page(skin),
+            uv,
+            src,
+            crate::tab_list::SKIN_TEX,
+            Blend::Textured,
+        );
+    }
+    true
+}
+
 /// Draws the calls with the HUD batch under their poses; items are left to
 /// the caller (they need the item renderer) and so are the vignette and
-/// nausea blits (their blending needs the screen-effect pipeline) and player
-/// faces (their skins are the game's). [`paint_items`] draws the first two,
-/// [`paint_checked`] all three.
-pub fn paint(batch: &mut crate::hud::HudBatch, atlas: &crate::hud::HudAtlas, draws: &[GuiDraw]) {
-    paint_with(batch, atlas, draws, None, None);
+/// nausea blits (their blending needs the screen-effect pipeline).
+/// [`paint_items`] draws both.
+pub fn paint(batch: &mut HudBatch, atlas: &HudAtlas, draws: &[GuiDraw]) {
+    paint_with(batch, atlas, draws, None);
 }
 
 /// [`paint`], and with `items` also each `Item` (its stack, scaled about its pivot, then its
-/// decorations) and the blits of every blend, and with `faces` each `PlayerFace`. Without them
-/// those draw nothing, as `paint`.
+/// decorations) and the blits of every blend. Without `items` those draw nothing, as `paint`.
 fn paint_with<'a>(
-    batch: &mut crate::hud::HudBatch,
-    atlas: &crate::hud::HudAtlas,
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
     draws: impl IntoIterator<Item = &'a GuiDraw>,
     mut items: Option<&mut dyn GuiItems>,
-    mut faces: Option<&mut dyn GuiFaces>,
 ) {
     // The initial identity is implicit, so a layer without Push does not allocate a pose stack.
     let mut stack = Vec::new();
@@ -929,39 +1107,20 @@ fn paint_with<'a>(
             } => {
                 // An effect sprite (a content mod's under its namespace) draws as the missing
                 // sprite where the atlas lacks it; any other GUI sprite is then not drawn.
-                let effect = sprite.starts_with("mob_effect/")
-                    || sprite
-                        .split_once(':')
-                        .is_some_and(|(_, path)| path.starts_with("mob_effect/"));
+                let effect = is_mob_effect_sprite(sprite);
                 let found = match effect {
                     true => atlas.gui_sprite_or_missing(sprite),
                     false => atlas.gui_rect(sprite).copied(),
                 };
-                let Some(mut r) = found else {
+                let Some(rect) = found else {
                     continue;
                 };
-                if let Some([sw, sh, u, v]) = *region {
-                    let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
-                    let u0 = r.u0 + du * u as f32 / sw as f32;
-                    let v0 = r.v0 + dv * v as f32 / sh as f32;
-                    r.u1 = u0 + du * *w as f32 / sw as f32;
-                    r.v1 = v0 + dv * *h as f32 / sh as f32;
-                    r.u0 = u0;
-                    r.v0 = v0;
+                ResolvedGuiQuad {
+                    rect,
+                    dst: [*x as f32, *y as f32, *w as f32, *h as f32],
+                    color: *color,
                 }
-                let at = [*x as f32, *y as f32, *w as f32, *h as f32];
-                match crate::hud::sprite_modifiers::draws(atlas, sprite, r, at, abgr(*color)) {
-                    // A Polytone screen sprite modifier: the sprite changed, then its overlays.
-                    Some(draws) => {
-                        for d in draws {
-                            batch.rect_uv(d.at[0], d.at[1], d.at[2], d.at[3], d.rect, d.color);
-                        }
-                    }
-                    None => batch.rect_uv(at[0], at[1], at[2], at[3], r, abgr(*color)),
-                }
-                if *blend == Blend::Crosshair {
-                    batch.invert_since(start);
-                }
+                .paint_sprite(batch, atlas, sprite, *region, *blend);
             }
             GuiDraw::AtlasSprite {
                 sprite,
@@ -972,8 +1131,13 @@ fn paint_with<'a>(
                 color,
             } => {
                 // A block atlas sprite, by its packed name, never a GUI sprite of the same id.
-                if let Some(r) = atlas.sprites.get(sprite.as_ref()).copied() {
-                    batch.rect_uv(*x as f32, *y as f32, *w as f32, *h as f32, r, abgr(*color));
+                if let Some(rect) = atlas.sprites.get(sprite.as_ref()).copied() {
+                    ResolvedGuiQuad {
+                        rect,
+                        dst: [*x as f32, *y as f32, *w as f32, *h as f32],
+                        color: *color,
+                    }
+                    .paint(batch);
                 }
             }
             GuiDraw::Blit { blend, .. } if *blend != Blend::Textured && items.is_none() => {}
@@ -989,16 +1153,22 @@ fn paint_with<'a>(
                 tex,
                 color,
             } => {
-                let at = [*x, *y, *w, *h];
-                if !blit(batch, atlas, texture, at, *uv, *src, *tex, *color) {
+                let Some(rect) = atlas.blit_rect(texture.as_ref()).copied() else {
                     continue;
+                };
+                ResolvedGuiQuad {
+                    rect,
+                    dst: [*x as f32, *y as f32, *w as f32, *h as f32],
+                    color: *color,
                 }
-                match blend {
-                    Blend::Textured => {}
-                    Blend::Vignette => batch.blend_since(start, crate::hud::Blend::Vignette),
-                    Blend::Nausea => batch.blend_since(start, crate::hud::Blend::Additive),
-                    Blend::Crosshair => batch.invert_since(start),
-                }
+                .paint_blit(
+                    batch,
+                    atlas.blit_atlas_page(texture.as_ref()),
+                    *uv,
+                    *src,
+                    *tex,
+                    *blend,
+                );
             }
             GuiDraw::Item {
                 slot,
@@ -1015,38 +1185,13 @@ fn paint_with<'a>(
                     items.decorations(batch, *slot, *x, *y);
                 }
             }
-            GuiDraw::PlayerFace {
-                uuid,
-                x,
-                y,
-                size,
-                hat,
-                flip,
-                color,
-            } => {
-                if let Some(faces) = faces.as_deref_mut() {
-                    // The tab list's face blits, each a `Blit` of the skin, moved by this op's pose.
-                    let skin = faces.skin(*uuid);
-                    let at = [*x, *y, *size, *size];
-                    for (uv, src) in crate::tab_list::face_blits(*hat, *flip) {
-                        let tex = crate::tab_list::SKIN_TEX;
-                        blit(batch, atlas, &skin, at, uv, src, tex, *color);
-                    }
-                }
-            }
             GuiDraw::Fill {
                 x0,
                 y0,
                 x1,
                 y1,
                 color,
-            } => {
-                // `GuiGraphics.fill` orders the corners; a wrapped bar end can be past the
-                // other by more than an `int` holds, so the span is taken in floats.
-                let (x0, x1) = ((*x0).min(*x1) as f32, (*x0).max(*x1) as f32);
-                let (y0, y1) = ((*y0).min(*y1) as f32, (*y0).max(*y1) as f32);
-                batch.fill(atlas, x0, y0, x1 - x0, y1 - y0, abgr(*color));
-            }
+            } => paint_fill_endpoints(batch, atlas, [*x0, *y0, *x1, *y1], *color),
             GuiDraw::FillGradient {
                 x0,
                 y0,
@@ -1088,41 +1233,10 @@ fn paint_with<'a>(
         }
         if pose != IDENTITY {
             for v in &mut batch.vertices[start..] {
-                let [x, y] = v.pos;
-                v.pos = [
-                    pose[0] * x + pose[2] * y + pose[4],
-                    pose[1] * x + pose[3] * y + pose[5],
-                ];
+                v.pos = pose_point(pose, v.pos);
             }
         }
     }
-}
-
-/// A `Blit`'s quad: `texture`'s `src` texels from `uv` of its `tex` size, drawn at `at` (`x`,
-/// `y`, `w`, `h`) tinted `color`; `false`, drawing nothing, when the atlas lacks the texture.
-#[allow(clippy::too_many_arguments)]
-fn blit(
-    batch: &mut crate::hud::HudBatch,
-    atlas: &crate::hud::HudAtlas,
-    texture: &str,
-    [x, y, w, h]: [i32; 4],
-    uv: [f32; 2],
-    src: [i32; 2],
-    tex: [i32; 2],
-    color: u32,
-) -> bool {
-    let Some(mut r) = atlas.blit_rect(texture).copied() else {
-        return false;
-    };
-    let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
-    let u0 = r.u0 + du * uv[0] / tex[0] as f32;
-    let v0 = r.v0 + dv * uv[1] / tex[1] as f32;
-    r.u1 = r.u0 + du * (uv[0] + src[0] as f32) / tex[0] as f32;
-    r.v1 = r.v0 + dv * (uv[1] + src[1] as f32) / tex[1] as f32;
-    r.u0 = u0;
-    r.v0 = v0;
-    batch.rect_uv(x as f32, y as f32, w as f32, h as f32, r, abgr(color));
-    true
 }
 
 /// An ARGB colour as the HUD batch's packed RGBA.
@@ -1142,9 +1256,7 @@ fn opaque(color: u32) -> u32 {
 
 #[path = "hud_layout_items.rs"]
 mod items;
-pub use items::{
-    GuiFaces, GuiItems, Undrawable, item_slot, paint_checked, paint_items, undrawable,
-};
+pub use items::{GuiItems, paint_items};
 
 #[cfg(test)]
 #[path = "hud_layout_face_tests.rs"]

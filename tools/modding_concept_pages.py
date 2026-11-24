@@ -46,7 +46,7 @@ STALE_URL = re.compile(
 FOLDERS = {"Concepts": "concepts", "How-to": "how-to"}
 SECTION_PAGES = "<!-- section-pages -->"
 # The book documents what the game does. A page titled as one of these is a design, a plan or a work list,
-# and lives in docs/design/ instead.
+# and belongs in an issue or PR instead.
 NOT_A_MANUAL = re.compile(r"\b(design|designs|proposal|proposed|draft|roadmap|tracker|status|plan)\b", re.IGNORECASE)
 # Reader pages never cite tracker issue or PR numbers (such as `#42` or `#100000`);
 # hex colours, Markdown link destinations and explicit heading IDs are excluded before matching.
@@ -343,7 +343,7 @@ def refuse_designs(book):
         for title in titles:
             assert not NOT_A_MANUAL.search(title), (
                 f"{chapter_['path']}: \"{title}\" reads as a design or a work list; the book documents what "
-                "the game does, and designs, plans and trackers live in docs/design/")
+                "the game does, and designs, plans and trackers live in issues and PRs")
 
 
 def require_h1(book):

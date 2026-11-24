@@ -63,6 +63,13 @@ impl Game<'_> {
             None if effect.instant => 1,
             None => 600,
         };
+        let source = self.source_entity().and_then(|t| {
+            let id = match t {
+                Target::Player => self.own_entity_id() as u32,
+                other => self.network_entity_id(other)? as u32,
+            };
+            self.entity(id)
+        });
         let mut tracker = Tracker::default();
         for t in self.living_targets(ctx)? {
             let changed = match t {
@@ -70,44 +77,14 @@ impl Game<'_> {
                     // `new MobEffectInstance(effect, duration, amplifier, false, particles)`.
                     let instance = EffectInstance::new(effect.id, duration, amplifier)
                         .with_flags(false, particles);
-                    self.for_player(t, |g| g.add_player_effect(instance))
+                    self.for_player(t, |g| g.add_player_effect_from(instance, source))
                         .unwrap_or(false)
                 }
                 Target::Mob(id) => {
-                    let Some(kind) = self
-                        .mobs
-                        .iter()
-                        .find(|m| m.id == id && !m.removed)
-                        .map(|m| m.kind.id.clone())
-                    else {
-                        tracker.track(t, false);
-                        continue;
-                    };
-                    let name = namespaced(effect.id);
-                    // `LivingEntity.addEffect` refuses what the mob cannot
-                    // be affected by.
-                    if !self.can_be_affected(Some(id as i32), &kind, name) {
-                        false
-                    } else {
-                        match self.mobs.iter_mut().find(|m| m.id == id) {
-                            Some(m) => {
-                                let new = !m.has_effect(name);
-                                // `new MobEffectInstance(effect, duration, amplifier, false, particles)`.
-                                let changed =
-                                    m.add_effect_with(name, duration, amplifier, false, particles);
-                                if new
-                                    && changed
-                                    && let Some(sound) = super::super::potions::sound_on_added(name)
-                                {
-                                    let at = [m.position.x, m.position.y, m.position.z];
-                                    self.audio.play(sound, Some(at), 1.0, 1.0);
-                                }
-                                self.mod_effect_added(name, Some(id as i32), amplifier, new);
-                                changed
-                            }
-                            None => false,
-                        }
-                    }
+                    // `new MobEffectInstance(effect, duration, amplifier, false, particles)`.
+                    let instance = EffectInstance::new(effect.id, duration, amplifier)
+                        .with_flags(false, particles);
+                    self.add_mob_effect(id, instance, source)
                 }
                 _ => continue,
             };

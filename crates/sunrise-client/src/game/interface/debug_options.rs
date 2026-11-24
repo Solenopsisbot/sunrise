@@ -392,7 +392,7 @@ impl Game<'_> {
                 let status = self.debug_entries.status(entry.path);
                 for ((status_of, _, _), x) in BUTTONS.into_iter().zip(button_xs(left + 2.0)) {
                     if status != status_of && ui::hovered(self.cursor, x, cy, BUTTON, 16.0) {
-                        clicked = Some((entry.path, status_of));
+                        clicked = Some((entry.path.to_owned(), status_of));
                     }
                 }
             }
@@ -401,8 +401,8 @@ impl Game<'_> {
         self.debug_options = Some(s);
         if let Some((path, status)) = clicked {
             // OptionEntry.setValue.
-            self.audio.play_button_click();
-            self.debug_entries.set_status(path, status);
+            self.play_audio_button_click();
+            self.debug_entries.set_status(&path, status);
             return true;
         }
         let (xs, fy) = footer(w, h);
@@ -421,15 +421,15 @@ impl Game<'_> {
                 if self.debug_entries.is_using_profile(profile) {
                     return search;
                 }
-                self.audio.play_button_click();
+                self.play_audio_button_click();
                 self.debug_entries.load_profile(profile);
             }
             2 => {
-                self.audio.play_button_click();
+                self.play_audio_button_click();
                 self.cycle_debug_gui_scale(shift);
             }
             _ => {
-                self.audio.play_button_click();
+                self.play_audio_button_click();
                 self.close_debug_options();
             }
         }

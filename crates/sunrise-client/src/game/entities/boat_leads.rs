@@ -498,7 +498,7 @@ impl Game<'_> {
         }
         // Entity.shearOffAllLeashConnections: its own lead and every one
         // hanging on it.
-        if item.as_deref() == Some("minecraft:shears") {
+        if self.held_shears(super::item_abilities::ability::SHEARS_HARVEST) {
             let held_mobs: Vec<u32> = self
                 .mobs
                 .iter()
@@ -515,8 +515,7 @@ impl Game<'_> {
                 }
                 self.drop_boat_leashes(&held_boats);
                 self.lead_game_event("minecraft:shear", at);
-                self.audio
-                    .play("minecraft:item.shears.snip", Some(at), 1.0, 1.0);
+                self.play_audio("minecraft:item.shears.snip", Some(at), 1.0, 1.0);
                 self.damage_held_tool();
                 return true;
             }

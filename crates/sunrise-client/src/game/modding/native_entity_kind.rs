@@ -59,6 +59,7 @@ impl Game<'_> {
             Target::Fangs(_) => "minecraft:evoker_fangs",
             Target::Spawner(_) => "minecraft:ominous_item_spawner",
             Target::Cloud(_) => "minecraft:area_effect_cloud",
+            Target::Bolt(_) => "minecraft:lightning_bolt",
             Target::Hook(_) => "minecraft:fishing_bobber",
             Target::Knot(_) => "minecraft:leash_knot",
         })

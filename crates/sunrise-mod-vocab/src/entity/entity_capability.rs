@@ -3,8 +3,8 @@
 //! `Capabilities.Item.ENTITY`). A player's inventory is the game's own answer for a player.
 use crate::{
     Capability, ComponentId, Direction, EnergyHandler, EntityRef, EquipmentSlot, FluidResource,
-    Host, ItemPlace, ItemResource, Overanswered, PREVENT_ARMOR_CHANGE, ProvidedBy, ResourceHandler,
-    ServerHost, Tag, TransactionContext, TransactionError, backend_of,
+    Host, ItemPlace, ItemResource, Overanswered, PREVENT_ARMOR_CHANGE, ResourceHandler, ServerHost,
+    Tag, TransactionContext, TransactionError, backend_of,
 };
 use std::marker::PhantomData;
 
@@ -107,23 +107,20 @@ impl EntityRef {
         if !self.level(host)?.in_place(host) {
             return None;
         }
+        let Some(providers) = crate::entity_providers(key, host, self, context) else {
+            return key.default.and_then(|default| {
+                default(host, self, context).map(|handler| Capability {
+                    handler,
+                    owner: None,
+                })
+            });
+        };
         let mut game = None;
-        let table = host.capability_providers();
-        let kind = table
-            .provided(ProvidedBy::Entity, key.name)
-            .then(|| self.kind(host)?.id(host))
-            .flatten();
-        let mut index = 0;
         crate::answered(
-            crate::ask_providers(
-                host,
-                || table.entity_provider(key.name, kind.as_deref()?, &mut index),
-                |provider, host| provider.get::<T, C>()?.provide(host, self, context),
-                |host| {
-                    game = key.default.and_then(|default| default(host, self, context));
-                    game.is_some()
-                },
-            ),
+            providers.answer(host, |host| {
+                game = key.default.and_then(|default| default(host, self, context));
+                game.is_some()
+            }),
             game,
         )
     }

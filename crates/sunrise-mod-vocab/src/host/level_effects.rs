@@ -13,9 +13,8 @@ pub trait LevelEffectsBackendMut {
     /// slider. `except` leaves that player out (a client that already played the sound itself
     /// for its own action); None plays it to everyone, as `playSound(null, ...)`. A fake player
     /// has no client to leave out, so it excludes no one; a stale or client-side `except` queues
-    /// nothing. A `minecraft:` event must be registered; a mod's goes by name
-    /// and is heard where its resources define it. True means queued, not
-    /// heard.
+    /// nothing. The server sends registered events by ID and other valid keys by name, with
+    /// volume and pitch as supplied. True means queued, not heard.
     /// The request joins the innermost open transaction in the level active at the call. The
     /// `play_level_sound_at_position` hook runs synchronously; only the resolved sound waits for
     /// the owning level's outermost commit, in journal order, and is discarded on abort. Delivery
@@ -90,6 +89,32 @@ pub trait LevelEffectsBackendMut {
         options: &ParticleOptions,
         state: Option<BlockState>,
         at: [f64; 3],
+        spread: [f64; 3],
+        speed: f64,
+        count: i32,
+    ) -> bool;
+    /// Side: server.
+    /// Sends the same particle effect around each entry of `positions`, in slice order,
+    /// including repeated positions. Each sends a separate packet to players in the named
+    /// level whose block centre is strictly less than 32 blocks away, as in
+    /// `ServerLevel.sendParticles`. There is no limit on the number of positions.
+    ///
+    /// Uses the same validation as `LevelRef::send_particles`. If any position or shared
+    /// argument is invalid, nothing is queued and the call returns false. An empty slice
+    /// returns true without checking the particle arguments or queueing anything, but a
+    /// stale or unknown level or a call on the logical client is still refused.
+    /// True means accepted, not that a player received or drew any particles.
+    ///
+    /// The requests join the innermost open transaction in the level active at the call.
+    /// They wait for that level's outermost commit in journal order and are discarded on
+    /// abort. Delivery uses the level named by the request, even if parked.
+    #[forward_api_inputs]
+    fn level_send_particles_batch(
+        &mut self,
+        level: LevelRef,
+        options: &ParticleOptions,
+        state: Option<BlockState>,
+        positions: &[[f64; 3]],
         spread: [f64; 3],
         speed: f64,
         count: i32,
@@ -215,8 +240,8 @@ pub trait LevelEffectsBackendMut {
     /// `cells` gives them. A state is asked once per call only when every part on its block that
     /// answers `explosion_resistance` declares the answer pure
     /// (`BlockPart::explosion_resistance_is_pure`); otherwise its parts are asked once a cell.
-    /// Refused, with nothing read, for an inverted area or more than
-    /// `ResistanceCells::MAX` (262,144) cells: it runs on the server tick, so read big areas in
+    /// Refused, with nothing read, for an inverted area or an area whose cell count
+    /// overflows what one allocation can hold: it runs on the server tick, so read big areas in
     /// pieces.
     fn level_explosion_resistances(
         &mut self,
@@ -235,9 +260,11 @@ pub trait LevelEffectsBackendMut {
     /// found with it, spread over ticks if it likes. A Sunrise addition. Each call is one
     /// explosion to the hooks: `explosion_start` first, which may cancel it (then nothing breaks
     /// and the answer is 0), then, for a radius of at least 0.00001, `explosion_detonate` with
-    /// the positions as its block list, in the order given, a repeated one once; a listener may
-    /// only take positions out (spare them), and one it adds is ignored. Then the block step in
-    /// vanilla's order: the positions shuffled with the level's random, and each block hit as
+    /// the positions as its block list, in the order given, a repeated one once; listeners may
+    /// remove, add or reorder positions (`ExplosionEvent.Detonate`), and the resulting list is
+    /// kept in order with multiplicity intact, filtered only to loaded chunks within the level's
+    /// height. Then the block step in vanilla's order: the positions shuffled with the level's
+    /// random, and each block hit as
     /// the blast hits one (air skipped; `can_drop_from_explosion`; loot with the radius under
     /// the decay interaction; experience when the causing entity is a player;
     /// `on_block_exploded`, whose default sets air and primes TNT owned by the causing entity),
@@ -246,9 +273,8 @@ pub trait LevelEffectsBackendMut {
     /// breaks nothing else, and `Trigger` only works the blocks it may. Unlike vanilla's rays, a
     /// position in a chunk that isn't loaded is skipped, never loaded and not counted, and so is
     /// one outside the level's height. The number of blocks destroyed: those that were not air
-    /// when their turn came. `Err`, with nothing changed, for more than 65,536 positions
-    /// (`ExplosionDestroyError::MAX_POSITIONS`), a stale level or `source`, or a centre or
-    /// radius that isn't finite or a negative radius.
+    /// when their turn came. `Err`, with nothing changed, for a stale level or `source`, or a
+    /// centre or radius that isn't finite.
     fn level_explosion_destroy_blocks(
         &mut self,
         level: LevelRef,

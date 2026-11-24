@@ -573,7 +573,7 @@ impl Game<'_> {
             .answer_at(self.cursor);
         match answer {
             Some(yes) => {
-                self.audio.play_button_click();
+                self.play_audio_button_click();
                 self.answer_pack_prompt(yes)?;
                 Ok(true)
             }

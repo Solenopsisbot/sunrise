@@ -185,8 +185,8 @@ pub struct Renderer {
     pub(crate) lightning_pipeline: wgpu::RenderPipeline,
     pub(crate) lightning: lightning::Renderer,
     pub(crate) see_through_pipeline: wgpu::RenderPipeline,
-    /// Native mods' world primitives (`Frame::world_primitives`).
-    pub(crate) world_primitives: world_primitives::WorldPrimitives,
+    /// Native mods' world primitives (`Frame::world_primitives`), taken briefly during OIT pass.
+    pub(crate) world_primitives: Option<world_primitives::WorldPrimitives>,
     pub(crate) text_polygon_offset_pipeline: wgpu::RenderPipeline,
     pub(crate) world_text_pipeline: wgpu::RenderPipeline,
     pub(crate) text_mark_pipelines: [wgpu::RenderPipeline; 2],
@@ -210,6 +210,7 @@ pub struct Renderer {
     /// Screen effects: alpha-blended, then vignette (`dst * (1 - src)`)
     /// pipelines, each for every sampling (index `blend * 4 + sampling`).
     pub(crate) screen_pipelines: [wgpu::RenderPipeline; 16],
+    pub(crate) screen_page_groups: Vec<Option<wgpu::BindGroup>>,
     pub(crate) screen_buffer: wgpu::Buffer,
     pub(crate) screen_capacity: u64,
     pub(crate) entity_group: wgpu::BindGroup,
@@ -350,6 +351,13 @@ pub struct Renderer {
     /// Per-frame scratch, kept to avoid allocating every frame.
     pub(crate) visible: Vec<resident::Visible>,
     pub(crate) visible_lods: Vec<lod::Visible>,
+    /// Canonical primary-camera visible sections exposed to `FrameHooks` (reused across frames).
+    pub(crate) visible_renderable_sections: Vec<mod_api::RenderableSection>,
+    pub(crate) visible_renderable_scratch: Vec<(u64, SectionKey, Option<u32>)>,
+    /// Reusable submission and merge buffers for `FrameHooks`' CPU models and name tags.
+    pub(crate) hook_geometry: world_primitives::PreparedHookGeometry,
+    pub(crate) hook_entities_scratch: Vec<Vertex>,
+    pub(crate) hook_see_through_scratch: Vec<Vertex>,
     /// Every far tile in view, whether the GPU's solid draws own it or not: the water's
     /// re-sort walks it (`draw_frame`), so its budget and rotation do not follow which
     /// solid draws the sourced-geometry pass took over.
@@ -475,16 +483,20 @@ pub struct Renderer {
     pub(crate) shared_material_maps: [Option<wgpu::Texture>; 2],
     /// The pack's terrain program reads flat draws' vertices (`pack_terrain_inputs`).
     pub(crate) pack_terrain_flat: bool,
-    /// Vertex shaders read the section arena's pages (`flat::pages_readable`): a pack's terrain
+    /// Vertex shaders read the section arena's pages (`flat::pages_readable`, and
+    /// `pack_post::Gpu::vertex_reads`): a pack's terrain
     /// program can read its quad's corners there in per-section draws too (`pack_terrain_draws`).
     pub(crate) terrain_pages: bool,
     /// The pack's terrain programs read their pages in per-section draws: decided as
     /// `pack_terrain_inputs` last took them, from `pack_terrain_bindings`.
     pub(crate) pack_terrain_pages: bool,
+    /// The pack's terrain programs read the normal stream in per-section draws that read no
+    /// pages: decided as `pack_terrain_inputs` last took them, from `pack_terrain_bindings`.
+    pub(crate) pack_terrain_normals: bool,
     /// What the pack being loaded binds in its terrain programs' vertex stage
     /// (`set_pack_terrain_bindings`).
     pub(crate) pack_terrain_bindings: pack_atlas::TerrainBindings,
-    /// The section arena's pages are storage too (`arena_storage`, `follow_arena_storage`).
+    /// The section arena's pages are storage too (`arena_storage`, `follow_arena_layout`).
     pub(crate) arena_storage: bool,
     /// OptiFine/Iris separate ambient occlusion: pass vertex alpha to hz_Color.a.
     pub separate_ao: bool,

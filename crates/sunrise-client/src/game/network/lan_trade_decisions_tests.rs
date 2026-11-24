@@ -2,7 +2,7 @@
 use super::{Game, native_guest_turn_tests::with_guests};
 use mod_api::{
     Flow, Hooks, HostSide, HostTransaction, ItemPlace, ItemResource, ItemStackedOnOtherEvent,
-    ModEntry, Mods, PlayerTradeEvent, ServerHost, TradeWithVillagerEvent,
+    ModEntry, Mods, ServerHost, TradeWithVillagerEvent,
 };
 use std::cell::{Cell, RefCell};
 use std::sync::{Arc, mpsc};
@@ -33,7 +33,6 @@ const SPEED: &str = "minecraft:movement_speed";
 #[derive(Clone, Default)]
 struct Script {
     panic_on: Option<usize>,
-    panic_on_completion: bool,
     answer: bool,
     invalid: bool,
     /// An answer whose result stack is not a valid one for the game.
@@ -49,7 +48,6 @@ thread_local! {
     static SCRIPT: RefCell<Script> = RefCell::new(Script::default());
     static CALLS: Cell<usize> = const { Cell::new(0) };
     static STACKED: Cell<usize> = const { Cell::new(0) };
-    static COMPLETED: Cell<usize> = const { Cell::new(0) };
     static STAGED_WRITES: Cell<bool> = const { Cell::new(false) };
     static USES: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
     static IN_ACTION: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
@@ -58,7 +56,6 @@ fn script(value: Script) {
     SCRIPT.with(|s| *s.borrow_mut() = value);
     CALLS.set(0);
     STACKED.set(0);
-    COMPLETED.set(0);
     STAGED_WRITES.set(false);
     USES.with(|uses| uses.borrow_mut().clear());
     IN_ACTION.with(|a| a.borrow_mut().clear());
@@ -73,14 +70,6 @@ impl Hooks for Mod {
         event: &mut TradeWithVillagerEvent<'_>,
     ) {
         trade(host, event);
-    }
-
-    fn player_trade(&self, _: &mut dyn ServerHost, _: &mut PlayerTradeEvent<'_>) {
-        COMPLETED.set(COMPLETED.get() + 1);
-        assert!(
-            !SCRIPT.with(|s| s.borrow().panic_on_completion),
-            "completion listener failed"
-        );
     }
 }
 /// The same trade listener, also hearing `item_stacked_on_other`: the result pickup is both.
@@ -98,7 +87,7 @@ impl Hooks for Both {
     fn item_stacked_on_other(
         &self,
         host: HostSide,
-        event: &mut ItemStackedOnOtherEvent<'_>,
+        event: &mut ItemStackedOnOtherEvent<'_, '_>,
     ) -> Flow {
         Stacked.item_stacked_on_other(host, event)
     }
@@ -107,7 +96,11 @@ impl Hooks for Both {
 struct Stacked;
 #[mod_api::__subscriptions]
 impl Hooks for Stacked {
-    fn item_stacked_on_other(&self, _: HostSide, event: &mut ItemStackedOnOtherEvent<'_>) -> Flow {
+    fn item_stacked_on_other(
+        &self,
+        _: HostSide,
+        event: &mut ItemStackedOnOtherEvent<'_, '_>,
+    ) -> Flow {
         STACKED.set(STACKED.get() + 1);
         let (refuse, replace) = SCRIPT.with(|s| {
             let s = s.borrow();
@@ -115,8 +108,7 @@ impl Hooks for Stacked {
         });
         assert!(!refuse, "stacked listener failed");
         if replace {
-            event.result.handled = true;
-            event.result.clicked = mod_api::ClickedStackResult::Set(None);
+            event.click.set_clicked(None);
             event.cancelled = true;
             return Flow::Cancel;
         }
@@ -452,8 +444,8 @@ struct RemoveHero {
 }
 
 impl RemoveHero {
-    fn remove(host: HostSide<'_>, entities: &[u32]) {
-        assert_eq!(entities, [40]);
+    fn remove(host: HostSide<'_>, entity: u32) {
+        assert_eq!(entity, 40);
         let HostSide::Server(host) = host else {
             panic!("server fixture");
         };
@@ -465,23 +457,20 @@ impl RemoveHero {
 
 #[mod_api::__subscriptions]
 impl Hooks for RemoveHero {
-    fn register(&self, registrar: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
-        registrar.entity_tick_each("minecraft:villager");
-    }
-
-    fn entity_tick_listened(&self, _: HostSide<'_>, event: &mut mod_api::EntityTickListenedEvent) {
-        event.listened = true;
-    }
-
-    fn entity_tick_pre(&self, host: HostSide<'_>, event: &mut mod_api::EntityTickPreEvent<'_>) {
+    fn entity_tick_pre(
+        &self,
+        host: HostSide<'_>,
+        event: &mut mod_api::EntityTickPreEvent<'_>,
+    ) -> mod_api::Flow {
         if self.before_work {
-            Self::remove(host, event.entities);
+            Self::remove(host, event.entity);
         }
+        mod_api::Flow::Continue
     }
 
     fn entity_tick_post(&self, host: HostSide<'_>, event: &mut mod_api::EntityTickPostEvent<'_>) {
         if !self.before_work {
-            Self::remove(host, event.entities);
+            Self::remove(host, event.entity);
         }
     }
 }
@@ -577,16 +566,8 @@ fn restock_after_hero_change(test: &str, before_work: bool) {
 struct EditInPost;
 #[mod_api::__subscriptions]
 impl Hooks for EditInPost {
-    fn register(&self, registrar: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
-        registrar.entity_tick_each("minecraft:villager");
-    }
-
-    fn entity_tick_listened(&self, _: HostSide<'_>, event: &mut mod_api::EntityTickListenedEvent) {
-        event.listened = true;
-    }
-
     fn entity_tick_post(&self, host: HostSide<'_>, event: &mut mod_api::EntityTickPostEvent<'_>) {
-        assert_eq!(event.entities, [40]);
+        assert_eq!(event.entity, 40);
         let HostSide::Server(host) = host else {
             panic!("server fixture");
         };
@@ -864,12 +845,14 @@ fn speed_modifier_ids(game: &Game<'_>) -> [Vec<String>; 2] {
         .map(|row| row.id.to_string())
         .collect();
     let other = game.living(game.entity(41).unwrap()).unwrap();
-    let live = other
-        .attribute_modifiers(game, SPEED)
-        .unwrap()
-        .into_iter()
-        .map(|row| row.id.to_string())
-        .collect();
+    let mut live = Vec::new();
+    assert_eq!(
+        other.visit_attribute_modifiers(game, SPEED, &mut |row| {
+            live.push(row.id.to_owned());
+            std::ops::ControlFlow::Continue(())
+        }),
+        Ok(std::ops::ControlFlow::Continue(()))
+    );
     [legacy, live]
 }
 
@@ -1169,7 +1152,6 @@ fn accepted_trade_keeps_the_collect_answer() {
                 (6, 19, -7, -4, 11)
             );
             assert_eq!(offer.price_multiplier, 0.25);
-            assert_eq!(COMPLETED.get(), 1);
             let received = packets(&rx);
             let [
                 Clientbound::MerchantOffers(offers),
@@ -1192,23 +1174,20 @@ fn accepted_trade_keeps_the_collect_answer() {
 
 #[test]
 #[ignore = "daily"]
-fn a_panicking_completion_listener_cannot_drop_success_packets() {
+fn a_committed_take_publishes_success_packets() {
     with_mod(|| {
         with_guests(|game| {
             let click = open(game, 2);
             let rx = record_packets(game);
             script(Script {
                 answer: true,
-                panic_on_completion: true,
                 ..Script::default()
             });
             game.storage_scope(|game, _| {
                 assert!(game.lan_merchant_click(12, &click));
-                assert_eq!(COMPLETED.get(), 0);
                 assert!(packets(&rx).is_empty());
                 ((), true)
             });
-            assert_eq!(COMPLETED.get(), 1);
             assert_eq!((result(game), stat(game)), (1, 1));
             assert_eq!(game.lan_trade_session(12).unwrap().offers[0].uses, 6);
             let received = packets(&rx);
@@ -1289,11 +1268,9 @@ fn an_outer_abort_undoes_an_accepted_trade() {
                 assert!(game.lan_merchant_click(12, &click));
                 assert_eq!((result(game), dirt(game), stat(game)), (1, 0, 1));
                 assert!(game.orbs.is_empty(), "orb creation waits for root commit");
-                assert_eq!(COMPLETED.get(), 0);
                 assert!(packets(&rx).is_empty());
                 ((), false)
             });
-            assert_eq!(COMPLETED.get(), 0);
             corrected(&rx, click.container, 2);
             unchanged(game, 2);
         })

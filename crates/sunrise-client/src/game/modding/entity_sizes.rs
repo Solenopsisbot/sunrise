@@ -31,7 +31,7 @@ use sunrise_core::geometry::{Aabb, Vec3};
 /// The pose a client sizes its copy of a server mob by: `Entity.getPose`, the synched
 /// `DATA_POSE` (a player's as the server sent it, not the one its client tick derives), never a
 /// villager's bed position, which moves it without sizing it.
-fn synced_pose(m: &Mob) -> Pose {
+pub(super) fn synced_pose(m: &Mob) -> Pose {
     match &*m.kind.id {
         "minecraft:player" => Pose::from_id(i32::from(m.extra.synced_pose)),
         "minecraft:mannequin" => m.extra.avatar_pose.into(),
@@ -825,8 +825,7 @@ mod tests {
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
                 finish_login(game, &mut server);
-                game.native_lifecycle
-                    .begin_open(mod_api::Authority::RemoteClient);
+                game.native_lifecycle.begin_open(None);
                 game.world
                     .chunks
                     .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
@@ -1238,7 +1237,7 @@ mod tests {
                     position: Vec3::new(6.5, 70.0, 2.5),
                     yaw: 0.0,
                     pitch: 0.0,
-                    item_transformation: None,
+                    display: None,
                     interaction: None,
                 });
             }

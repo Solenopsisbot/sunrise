@@ -7,7 +7,6 @@
 //! invalid answer and a failing listener; each undoes every write the listener made.
 use crate::game::native_entity_refs::tests::with_game;
 use crate::game::native_guest_turn_tests::with_guests;
-use mod_api::item::menu::{ClickedStackResult, StackResult};
 use mod_api::{
     Flow, Hooks, HostSide, HostTransaction, ItemPlace, ItemResource, ItemStackedOnOtherEvent,
     ModEntry, Mods,
@@ -68,6 +67,26 @@ fn api_stack(item: &str, count: u32) -> mod_api::ItemStack {
     mod_api::ItemStack::new(mod_api::__private::item_key(item).unwrap(), count).unwrap()
 }
 
+/// A script's edits on the lent click: the clicked slot's take or write, then the cursor.
+fn edit_click(
+    click: &mut mod_api::item::menu::StackedOnOther<'_>,
+    take: Option<u32>,
+    clicked: Option<Option<(&str, u32)>>,
+    carried: Option<Option<(&str, u32)>>,
+) {
+    let stack = |r: Option<(&str, u32)>| r.map(|(item, count)| api_stack(item, count));
+    match (take, clicked) {
+        (Some(count), _) => {
+            click.take_clicked(count);
+        }
+        (None, Some(write)) => click.set_clicked(stack(write)),
+        (None, None) => {}
+    }
+    if let Some(write) = carried {
+        click.set_carried(stack(write));
+    }
+}
+
 struct Listener;
 #[mod_api::__subscriptions]
 impl Hooks for Listener {
@@ -78,11 +97,11 @@ impl Hooks for Listener {
     fn item_stacked_on_other(
         &self,
         mut host: HostSide,
-        event: &mut ItemStackedOnOtherEvent<'_>,
+        event: &mut ItemStackedOnOtherEvent<'_, '_>,
     ) -> Flow {
         let counts = (
-            event.event.carried.as_ref().map_or(0, |s| s.count()),
-            event.event.clicked.as_ref().map_or(0, |s| s.count()),
+            event.click.carried().map_or(0, |s| s.count()),
+            event.click.clicked().map_or(0, |s| s.count()),
         );
         SEEN.with(|seen| seen.borrow_mut().push(counts));
         let s = SCRIPT.with(|s| s.borrow().clone());
@@ -117,22 +136,8 @@ impl Hooks for Listener {
         if s.panic {
             panic!("a listener failed");
         }
-        let set_carried = |r: Option<Option<(&str, u32)>>| match r {
-            None => StackResult::Keep,
-            Some(None) => StackResult::Set(None),
-            Some(Some((item, count))) => StackResult::Set(Some(api_stack(item, count))),
-        };
-        let set_clicked = |r: Option<Option<(&str, u32)>>| match r {
-            None => ClickedStackResult::Keep,
-            Some(None) => ClickedStackResult::Set(None),
-            Some(Some((item, count))) => ClickedStackResult::Set(Some(api_stack(item, count))),
-        };
-        event.result.handled = s.handled;
-        event.result.carried = set_carried(s.set_carried);
-        event.result.clicked = match s.take_clicked {
-            Some(count) => ClickedStackResult::Take(count),
-            None => set_clicked(s.set_clicked),
-        };
+        event.click.handled = s.handled;
+        edit_click(event.click, s.take_clicked, s.set_clicked, s.set_carried);
         if s.cancel {
             event.cancelled = true;
             return Flow::Cancel;
@@ -1245,9 +1250,6 @@ mod item_part_tests {
     struct PartScript {
         cancel_carried: bool,
         cancel_clicked: bool,
-        handled: bool,
-        carried_handled: Option<bool>,
-        clicked_handled: Option<bool>,
         set_carried: Option<Option<(&'static str, u32)>>,
         set_clicked: Option<Option<(&'static str, u32)>>,
         take_clicked: Option<u32>,
@@ -1276,25 +1278,18 @@ mod item_part_tests {
         static TRACE: RefCell<Vec<(&'static str, StackedOnOtherDirection)>> =
             const { RefCell::new(Vec::new()) };
         static OBSERVATIONS: RefCell<Vec<PartObservation>> = const { RefCell::new(Vec::new()) };
-        static SMELTED: RefCell<Vec<(Option<(String, u32)>, u32)>> =
-            const { RefCell::new(Vec::new()) };
-        static EXTRACTED: RefCell<Vec<(String, u32)>> = const { RefCell::new(Vec::new()) };
+        static SMELTED: RefCell<Vec<(String, u32, u32)>> = const { RefCell::new(Vec::new()) };
     }
 
     fn set_part_script(script: PartScript) {
         TRACE.with(|t| t.borrow_mut().clear());
         OBSERVATIONS.with(|o| o.borrow_mut().clear());
         SMELTED.with(|s| s.borrow_mut().clear());
-        EXTRACTED.with(|e| e.borrow_mut().clear());
         PART_SCRIPT.with(|s| *s.borrow_mut() = script);
     }
 
-    fn smelted_events() -> Vec<(Option<(String, u32)>, u32)> {
+    fn smelted_events() -> Vec<(String, u32, u32)> {
         SMELTED.with(|s| s.borrow().clone())
-    }
-
-    fn extracted_events() -> Vec<(String, u32)> {
-        EXTRACTED.with(|e| e.borrow().clone())
     }
 
     fn trace() -> Vec<(&'static str, StackedOnOtherDirection)> {
@@ -1312,17 +1307,17 @@ mod item_part_tests {
         fn item_stacked_on_other(
             &self,
             mut host: HostSide<'_>,
-            event: &mut ItemStackedOnOtherEvent<'_>,
+            event: &mut ItemStackedOnOtherEvent<'_, '_>,
         ) -> Flow {
-            TRACE.with(|t| t.borrow_mut().push((self.0, event.event.direction)));
+            TRACE.with(|t| t.borrow_mut().push((self.0, event.click.direction)));
             let is_server = matches!(host, HostSide::Server(_));
             OBSERVATIONS.with(|o| {
                 o.borrow_mut().push(PartObservation {
                     tag: self.0,
-                    direction: event.event.direction,
+                    direction: event.click.direction,
                     is_server,
-                    primary: event.event.primary,
-                    carried: event.event.carried.as_ref().map(|s| {
+                    primary: event.click.action == mod_api::item::menu::ClickAction::Primary,
+                    carried: event.click.carried().map(|s| {
                         (
                             mod_api::__private::item_key_id(s.item())
                                 .unwrap_or_default()
@@ -1330,7 +1325,7 @@ mod item_part_tests {
                             s.count(),
                         )
                     }),
-                    clicked: event.event.clicked.as_ref().map(|s| {
+                    clicked: event.click.clicked().map(|s| {
                         (
                             mod_api::__private::item_key_id(s.item())
                                 .unwrap_or_default()
@@ -1354,25 +1349,14 @@ mod item_part_tests {
                 .unwrap();
             }
             if s.panic_on_carried
-                && event.event.direction == StackedOnOtherDirection::CarriedOnOther
+                && event.click.direction == StackedOnOtherDirection::CarriedOnOther
             {
                 panic!("item part panicked");
             }
-            let set_carried = |r: Option<Option<(&str, u32)>>| match r {
-                None => StackResult::Keep,
-                Some(None) => StackResult::Set(None),
-                Some(Some((item, count))) => StackResult::Set(Some(api_stack(item, count))),
-            };
-            let set_clicked = |r: Option<Option<(&str, u32)>>| match r {
-                None => ClickedStackResult::Keep,
-                Some(None) => ClickedStackResult::Set(None),
-                Some(Some((item, count))) => ClickedStackResult::Set(Some(api_stack(item, count))),
-            };
-            let (should_cancel, phase_handled, phase_carried, phase_clicked, phase_take) =
-                match event.event.direction {
+            let (should_cancel, phase_carried, phase_clicked, phase_take) =
+                match event.click.direction {
                     StackedOnOtherDirection::CarriedOnOther => (
                         s.cancel_carried,
-                        s.carried_handled.unwrap_or(s.cancel_carried && s.handled),
                         s.carried_phase_set_carried.or(if s.cancel_carried {
                             s.set_carried
                         } else {
@@ -1391,7 +1375,6 @@ mod item_part_tests {
                     ),
                     StackedOnOtherDirection::OtherStackedOnMe => (
                         s.cancel_clicked,
-                        s.clicked_handled.unwrap_or(s.cancel_clicked && s.handled),
                         s.clicked_phase_set_carried.or(if s.cancel_clicked {
                             s.set_carried
                         } else {
@@ -1408,14 +1391,9 @@ mod item_part_tests {
                             None
                         }),
                     ),
-                    StackedOnOtherDirection::Event => (false, false, None, None, None),
+                    StackedOnOtherDirection::Event => (false, None, None, None),
                 };
-            event.result.handled = phase_handled;
-            event.result.carried = set_carried(phase_carried);
-            event.result.clicked = match phase_take {
-                Some(count) => ClickedStackResult::Take(count),
-                None => set_clicked(phase_clicked),
-            };
+            edit_click(event.click, phase_take, phase_clicked, phase_carried);
             if should_cancel {
                 Flow::Cancel
             } else {
@@ -1446,27 +1424,17 @@ mod item_part_tests {
             r.item_part(flint, TaggedPart("flint"));
             r.item_part(ingot, TaggedPart("iron_ingot"));
         }
-        fn item_smelted(
-            &self,
-            _: &mut dyn mod_api::ServerHost,
-            event: &mut mod_api::ItemSmeltedEvent<'_>,
-        ) {
-            let stack = event.stack.map(|s| {
-                (
-                    mod_api::__private::item_key_id(s.item())
-                        .unwrap_or_default()
-                        .to_owned(),
-                    s.count(),
-                )
+        fn item_smelted(&self, host: HostSide<'_>, event: &mut mod_api::ItemSmeltedEvent<'_>) {
+            let HostSide::Server(host) = host else {
+                panic!("hosted furnace clicks must dispatch on the server");
+            };
+            SMELTED.with(|s| {
+                s.borrow_mut().push((
+                    event.stack.item().id(host).unwrap().to_owned(),
+                    event.stack.count(),
+                    event.amount_removed,
+                ));
             });
-            SMELTED.with(|s| s.borrow_mut().push((stack, event.amount_removed)));
-        }
-        fn furnace_extract(
-            &self,
-            _: &mut dyn mod_api::ServerHost,
-            event: &mut mod_api::FurnaceExtractEvent<'_>,
-        ) {
-            EXTRACTED.with(|e| e.borrow_mut().push((event.item.to_owned(), event.count)));
         }
     }
 
@@ -1492,11 +1460,11 @@ mod item_part_tests {
         fn item_stacked_on_other(
             &self,
             _: HostSide<'_>,
-            event: &mut ItemStackedOnOtherEvent<'_>,
+            event: &mut ItemStackedOnOtherEvent<'_, '_>,
         ) -> Flow {
-            TRACE.with(|t| t.borrow_mut().push(("global", event.event.direction)));
+            TRACE.with(|t| t.borrow_mut().push(("global", event.click.direction)));
             if self.0 {
-                event.result.handled = true;
+                event.cancelled = true;
                 return Flow::Cancel;
             }
             Flow::Continue
@@ -1524,7 +1492,6 @@ mod item_part_tests {
                 // 2. CarriedOnOther runs first; cancelling skips OtherStackedOnMe and replaces stacks.
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:stick", 1))),
                     set_clicked: Some(Some(("minecraft:diamond", 2))),
                     ..PartScript::default()
@@ -1546,7 +1513,6 @@ mod item_part_tests {
                 // 3. CarriedOnOther returning Continue defers to OtherStackedOnMe.
                 set_part_script(PartScript {
                     cancel_clicked: true,
-                    handled: true,
                     set_carried: Some(None),
                     set_clicked: Some(Some(("minecraft:flint", 4))),
                     ..PartScript::default()
@@ -1568,7 +1534,6 @@ mod item_part_tests {
                 //    the clicked item's OtherStackedOnMe override.
                 set_part_script(PartScript {
                     cancel_clicked: true,
-                    handled: true,
                     set_clicked: Some(Some(("minecraft:diamond", 1))),
                     ..PartScript::default()
                 });
@@ -1585,7 +1550,6 @@ mod item_part_tests {
                 //    taken by vanilla BundleItem.overrideStackedOnOther, so clicked ItemPart runs.
                 set_part_script(PartScript {
                     cancel_clicked: true,
-                    handled: true,
                     set_clicked: Some(Some(("minecraft:diamond", 1))),
                     ..PartScript::default()
                 });
@@ -1630,7 +1594,6 @@ mod item_part_tests {
             with_local(|game| {
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     ..PartScript::default()
                 });
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
@@ -1683,7 +1646,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_clicked: true,
-                    handled: true,
                     set_carried: Some(None),
                     set_clicked: Some(Some(("minecraft:emerald", 3))),
                     ..PartScript::default()
@@ -1742,7 +1704,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:diamond", 2))),
                     set_clicked: Some(None),
                     ..PartScript::default()
@@ -1815,7 +1776,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(None),
                     set_clicked: Some(Some(("minecraft:diamond", 2))),
                     ..PartScript::default()
@@ -1888,7 +1848,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(None),
                     set_clicked: Some(Some(("minecraft:diamond", 1))),
                     ..PartScript::default()
@@ -1920,7 +1879,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_clicked: Some(None),
                     ..PartScript::default()
                 });
@@ -1962,7 +1920,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(None),
                     set_clicked: Some(Some(("minecraft:diamond", 4))),
                     ..PartScript::default()
@@ -2005,7 +1962,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(None),
                     set_clicked: Some(Some(("minecraft:emerald", 2))),
                     ..PartScript::default()
@@ -2036,7 +1992,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     ..PartScript::default()
                 });
                 assert!(game.click_open_inventory(Some(Creative::DISPLAY), 0, Input::Pickup));
@@ -2063,7 +2018,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(None),
                     set_clicked: Some(Some(("minecraft:diamond", 2))),
                     ..PartScript::default()
@@ -2088,7 +2042,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(None),
                     set_clicked: Some(Some(("minecraft:emerald", 1))),
                     ..PartScript::default()
@@ -2114,7 +2067,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 2));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     ..PartScript::default()
                 });
                 assert!(game.menu_ops(&[
@@ -2136,7 +2088,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     ..PartScript::default()
                 });
                 assert!(game.menu_ops(&[
@@ -2200,7 +2151,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(None),
                     set_clicked: Some(Some(("minecraft:diamond", 3))),
                     ..PartScript::default()
@@ -2235,7 +2185,6 @@ mod item_part_tests {
                 // MUST NOT dispatch any Part or mutate slots.
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(None),
                     set_clicked: Some(Some(("minecraft:diamond", 1))),
                     ..PartScript::default()
@@ -2266,7 +2215,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     ..PartScript::default()
                 });
                 game.lan_guest_packet(12, pkt(window, -999, 0, 5));
@@ -2298,7 +2246,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(None),
                     set_clicked: Some(Some(("minecraft:emerald", 2))),
                     ..PartScript::default()
@@ -2324,7 +2271,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     ..PartScript::default()
                 });
                 game.lan_guest_packet(12, pkt(0, -999, 0, 5));
@@ -2378,7 +2324,6 @@ mod item_part_tests {
                     });
                     set_part_script(PartScript {
                         cancel_carried: true,
-                        handled: true,
                         set_carried: Some(None),
                         set_clicked: Some(Some(("minecraft:diamond", 2))),
                         ..PartScript::default()
@@ -2425,7 +2370,6 @@ mod item_part_tests {
                     // 1-slot right drag on merchant slot 1 dispatches with primary == false.
                     set_part_script(PartScript {
                         cancel_carried: true,
-                        handled: true,
                         set_carried: Some(None),
                         set_clicked: Some(Some(("minecraft:emerald", 3))),
                         ..PartScript::default()
@@ -2457,7 +2401,6 @@ mod item_part_tests {
                     });
                     set_part_script(PartScript {
                         cancel_carried: true,
-                        handled: true,
                         set_carried: Some(None),
                         set_clicked: Some(Some(("minecraft:diamond", 1))),
                         ..PartScript::default()
@@ -2506,7 +2449,6 @@ mod item_part_tests {
                     });
                     set_part_script(PartScript {
                         cancel_carried: true,
-                        handled: true,
                         ..PartScript::default()
                     });
                     game.lan_guest_packet(12, pkt(mwin, -999, 0, 5));
@@ -2549,7 +2491,6 @@ mod item_part_tests {
                     });
                     set_part_script(PartScript {
                         cancel_carried: true,
-                        handled: true,
                         set_carried: Some(None),
                         set_clicked: Some(Some(("minecraft:emerald", 2))),
                         ..PartScript::default()
@@ -2576,7 +2517,6 @@ mod item_part_tests {
                     });
                     set_part_script(PartScript {
                         cancel_carried: true,
-                        handled: true,
                         set_carried: Some(None),
                         set_clicked: Some(Some(("minecraft:diamond", 1))),
                         ..PartScript::default()
@@ -2667,14 +2607,7 @@ mod item_part_tests {
                             game.lan.as_ref().unwrap().hub.guests[0].inventory[0],
                             Some(ItemStack::new(ingot, 64))
                         );
-                        assert_eq!(
-                            smelted_events(),
-                            [
-                                (Some((ingot.to_owned(), 4)), 2),
-                                (Some((ingot.to_owned(), 2)), 0)
-                            ]
-                        );
-                        assert_eq!(extracted_events(), [(ingot.to_owned(), 2)]);
+                        assert_eq!(smelted_events(), [(ingot.to_owned(), 4, 2)]);
 
                         game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
                             guest.inventory[0] = None;
@@ -2689,8 +2622,8 @@ mod item_part_tests {
                             game.lan.as_ref().unwrap().hub.guests[0].inventory[0],
                             Some(ItemStack::new(ingot, 2))
                         );
-                        assert_eq!(smelted_events(), [(Some((ingot.to_owned(), 2)), 0)]);
-                        assert_eq!(extracted_events(), [(ingot.to_owned(), 2)]);
+                        // The hotbar received the stack, but swap never increments removeCount.
+                        assert!(smelted_events().is_empty());
 
                         let BlockEntity::Furnace(furnace) =
                             game.world.block_entities.get_mut(&pos).unwrap()
@@ -2704,7 +2637,6 @@ mod item_part_tests {
                         set_part_script(PartScript {
                             carried_phase_take_clicked: Some(1),
                             cancel_clicked: true,
-                            handled: true,
                             clicked_phase_take_clicked: Some(1),
                             ..PartScript::default()
                         });
@@ -2722,12 +2654,8 @@ mod item_part_tests {
                         );
                         assert_eq!(
                             smelted_events(),
-                            [
-                                (Some((ingot.to_owned(), 1)), 1),
-                                (Some((ingot.to_owned(), 1)), 1),
-                            ]
+                            [(ingot.to_owned(), 1, 1), (ingot.to_owned(), 1, 1)]
                         );
-                        assert_eq!(extracted_events(), [(ingot.to_owned(), 2)]);
                     });
                 });
             },
@@ -2740,7 +2668,7 @@ mod item_part_tests {
         use sunrise_client::containers::{BlockEntity, Furnace, FurnaceKind};
         with_part_only_mod(|| {
             with_local(|game| {
-                // 1. Declining with edits (`Flow::Continue` + `StackResult::Set`) passes edited
+                // 1. Declining with edits (`Flow::Continue` after `set_carried` or `set_clicked`) passes edited
                 //    stacks from CarriedOnOther -> OtherStackedOnMe -> plain pickup.
                 game.inventory[9] = Some(ItemStack::new("minecraft:flint", 1));
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
@@ -2777,29 +2705,26 @@ mod item_part_tests {
                     Some(("minecraft:stick", 2))
                 );
 
-                // 2. Contradictory Part answers (`Flow::Cancel` with `handled = false`, or
-                //    `Flow::Continue` with `handled = true`) refuse the click and roll back.
-                for (cancel_carried, carried_handled) in [(true, Some(false)), (false, Some(true))]
-                {
-                    game.inventory[9] = Some(ItemStack::new("minecraft:flint", 1));
-                    game.carried = Some(ItemStack::new("minecraft:stick", 1));
-                    set_part_script(PartScript {
-                        cancel_carried,
-                        carried_handled,
-                        write_scoreboard: true,
-                        ..PartScript::default()
-                    });
-                    assert!(game.menu_ops(&[(Some(9), 0, Input::Pickup)]));
-                    assert_eq!(
-                        game.carried.as_ref().map(|s| (&*s.item, s.count)),
-                        Some(("minecraft:stick", 1))
-                    );
-                    assert_eq!(
-                        game.inventory[9].as_ref().map(|s| (&*s.item, s.count)),
-                        Some(("minecraft:flint", 1))
-                    );
-                    assert!(game.score.board.objective("part_pickup").is_none());
-                }
+                // 2. A Part answers with its `Flow` alone: cancelling with no edits takes the
+                //    click (no plain pickup), and what it wrote through the host stays.
+                game.inventory[9] = Some(ItemStack::new("minecraft:flint", 1));
+                game.carried = Some(ItemStack::new("minecraft:stick", 1));
+                set_part_script(PartScript {
+                    cancel_carried: true,
+                    write_scoreboard: true,
+                    ..PartScript::default()
+                });
+                assert!(game.menu_ops(&[(Some(9), 0, Input::Pickup)]));
+                assert_eq!(
+                    game.carried.as_ref().map(|s| (&*s.item, s.count)),
+                    Some(("minecraft:stick", 1))
+                );
+                assert_eq!(
+                    game.inventory[9].as_ref().map(|s| (&*s.item, s.count)),
+                    Some(("minecraft:flint", 1))
+                );
+                assert!(game.score.board.objective("part_pickup").is_some());
+                game.score.board.remove_objective("part_pickup");
 
                 // 3. Handled direct edit and full take on a Furnace output slot (`Role::Output`)
                 //    succeed inside the transaction and roll back on outer abort.
@@ -2825,7 +2750,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:stick", 2))),
                     set_clicked: Some(Some(("minecraft:diamond", 2))),
                     ..PartScript::default()
@@ -2851,8 +2775,8 @@ mod item_part_tests {
                     Some(("minecraft:flint", 4))
                 );
 
-                // Direct edits (`ClickedStackResult::Set`) vs explicit takes
-                // (`ClickedStackResult::Take`) on a local Furnace output slot: direct clearing
+                // Direct edits (`set_clicked`) vs explicit takes
+                // (`take_clicked`) on a local Furnace output slot: direct clearing
                 // (`Set(None)`) or count reduction (`Set(Some(...))`) writes the slot directly
                 // with NO XP orbs and preserves `recipes_used`, while `Take(4)` and `Take(2)` run
                 // `safe_take` / `on_take`, spawning XP orbs and clearing `recipes_used`.
@@ -2885,7 +2809,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:stick", 2))),
                     set_clicked: Some(None),
                     ..PartScript::default()
@@ -2915,7 +2838,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:stick", 3))),
                     set_clicked: Some(Some(("minecraft:iron_ingot", 2))),
                     ..PartScript::default()
@@ -2942,7 +2864,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:stick", 5))),
                     take_clicked: Some(4),
                     ..PartScript::default()
@@ -2969,7 +2890,6 @@ mod item_part_tests {
                 game.carried = Some(ItemStack::new("minecraft:stick", 1));
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:stick", 3))),
                     take_clicked: Some(2),
                     ..PartScript::default()
@@ -2991,46 +2911,49 @@ mod item_part_tests {
                 };
                 assert!(f.recipes_used.is_empty());
 
-                // Invalid Part takes (`Take(0)`, `Take(5)` > 4) refuse and roll back.
-                for script in [
-                    PartScript {
-                        cancel_carried: true,
-                        handled: true,
-                        take_clicked: Some(0),
-                        write_scoreboard: true,
-                        ..PartScript::default()
-                    },
-                    PartScript {
-                        cancel_carried: true,
-                        handled: true,
-                        take_clicked: Some(5),
-                        write_scoreboard: true,
-                        ..PartScript::default()
-                    },
-                ] {
-                    seed_furnace(game, pos);
-                    game.orbs.clear();
-                    game.carried = Some(ItemStack::new("minecraft:stick", 1));
-                    set_part_script(script);
-                    assert!(game.menu_ops(&[(Some(302), 0, Input::Pickup)]));
-                    assert_eq!(
-                        game.world.block_entities.get(&pos).unwrap().slots()[2]
-                            .as_ref()
-                            .map(|s| (&*s.item, s.count)),
-                        Some(("minecraft:iron_ingot", 4))
-                    );
-                    assert!(game.orbs.is_empty());
-                    assert!(game.score.board.objective("part_pickup").is_none());
-                }
+                // A take of 0 records nothing: the cancelled click takes nothing from the
+                // slot, and the Part's host write stays.
+                seed_furnace(game, pos);
+                game.orbs.clear();
+                game.carried = Some(ItemStack::new("minecraft:stick", 1));
+                set_part_script(PartScript {
+                    cancel_carried: true,
+                    take_clicked: Some(0),
+                    write_scoreboard: true,
+                    ..PartScript::default()
+                });
+                assert!(game.menu_ops(&[(Some(302), 0, Input::Pickup)]));
+                assert_eq!(
+                    game.world.block_entities.get(&pos).unwrap().slots()[2]
+                        .as_ref()
+                        .map(|s| (&*s.item, s.count)),
+                    Some(("minecraft:iron_ingot", 4))
+                );
+                assert!(game.orbs.is_empty());
+                assert!(game.score.board.objective("part_pickup").is_some());
+                game.score.board.remove_objective("part_pickup");
+
+                // A take of 5 from 4 takes the 4 the slot holds (`Slot.safeTake` takes at most
+                // what is there), with the take's smelting experience.
+                seed_furnace(game, pos);
+                game.orbs.clear();
+                game.carried = Some(ItemStack::new("minecraft:stick", 1));
+                set_part_script(PartScript {
+                    cancel_carried: true,
+                    take_clicked: Some(5),
+                    ..PartScript::default()
+                });
+                assert!(game.menu_ops(&[(Some(302), 0, Input::Pickup)]));
+                assert!(game.world.block_entities.get(&pos).unwrap().slots()[2].is_none());
+                assert_eq!(game.orbs.iter().map(|o| o.points()).sum::<u32>(), 7);
                 game.container = None;
             });
         });
 
         // 3b. LAN guest ItemPart on a Furnace output slot preserves the exact same direct-edit vs
         //     explicit-take distinction: `Set(None)` / `Set(Some)` produce NO XP, preserve
-        //     `recipes_used`, and fire NO `item_smelted` / `furnace_extract`, while `Take(4)` and
-        //     `Take(2)` spawn XP orbs, clear `recipes_used`, fire both hooks, and roll back cleanly
-        //     on outer abort.
+        //     `recipes_used`, and fire no `item_smelted`. `Take(4)` and `Take(2)` spawn XP orbs,
+        //     clear `recipes_used`, and fire `item_smelted` only on outer commit.
         with_part_and_furnace_hooks_mod(|| {
             use sunrise_protocol::packets::play::{ContainerClick, Serverbound};
             with_guests(|game| {
@@ -3086,14 +3009,13 @@ mod item_part_tests {
                 });
 
                 // LAN guest direct clear (`Set(None)`): clears output with NO XP, preserves
-                // `recipes_used`, and fires NO `item_smelted` or `furnace_extract`.
+                // `recipes_used`, and fires no `item_smelted`.
                 game.orbs.clear();
                 game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
                     guest.carried = Some(ItemStack::new("minecraft:stick", 1));
                 });
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:stick", 2))),
                     set_clicked: Some(None),
                     ..PartScript::default()
@@ -3127,10 +3049,6 @@ mod item_part_tests {
                     smelted_events().is_empty(),
                     "LAN guest direct clear Set(None) must not fire item_smelted"
                 );
-                assert!(
-                    extracted_events().is_empty(),
-                    "LAN guest direct clear Set(None) must not fire furnace_extract"
-                );
 
                 // LAN guest direct count reduction (`Set(Some(iron_ingot x2))`): NO XP, NO hooks.
                 seed_furnace(game);
@@ -3140,7 +3058,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:stick", 3))),
                     set_clicked: Some(Some(("minecraft:iron_ingot", 2))),
                     ..PartScript::default()
@@ -3158,7 +3075,6 @@ mod item_part_tests {
                 };
                 assert_eq!(f.recipes_used.get(recipe), Some(&10));
                 assert!(smelted_events().is_empty());
-                assert!(extracted_events().is_empty());
 
                 // LAN guest explicit full take (`Take(4)`).
                 seed_furnace(game);
@@ -3168,7 +3084,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:stick", 5))),
                     take_clicked: Some(4),
                     ..PartScript::default()
@@ -3197,13 +3112,8 @@ mod item_part_tests {
                 assert!(f.recipes_used.is_empty());
                 assert_eq!(
                     smelted_events(),
-                    [(Some(("minecraft:iron_ingot".to_owned(), 4)), 4)],
+                    [("minecraft:iron_ingot".to_owned(), 4, 4)],
                     "LAN guest explicit Take(4) must run FurnaceResultSlot.onTake -> item_smelted"
-                );
-                assert_eq!(
-                    extracted_events(),
-                    [("minecraft:iron_ingot".to_owned(), 4)],
-                    "LAN guest explicit Take(4) must fire furnace_extract"
                 );
 
                 // LAN guest explicit partial take (`Take(2)`).
@@ -3214,7 +3124,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:stick", 3))),
                     take_clicked: Some(2),
                     ..PartScript::default()
@@ -3237,13 +3146,12 @@ mod item_part_tests {
                 assert!(f.recipes_used.is_empty());
                 assert_eq!(
                     smelted_events(),
-                    [(Some(("minecraft:iron_ingot".to_owned(), 2)), 2)],
+                    [("minecraft:iron_ingot".to_owned(), 2, 2)],
                     "LAN guest explicit Take(2) must run remove + on_take -> item_smelted"
                 );
-                assert_eq!(extracted_events(), [("minecraft:iron_ingot".to_owned(), 2)]);
 
                 // Outer transaction abort on LAN guest furnace `Take(4)` restores furnace output
-                // and recipes_used without popping XP orbs or firing post-commit furnace hooks.
+                // and recipes_used without popping XP orbs or firing post-commit `item_smelted`.
                 seed_furnace(game);
                 game.orbs.clear();
                 game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
@@ -3251,7 +3159,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_carried: true,
-                    handled: true,
                     set_carried: Some(Some(("minecraft:stick", 5))),
                     take_clicked: Some(4),
                     ..PartScript::default()
@@ -3274,12 +3181,11 @@ mod item_part_tests {
                 assert_eq!(f.recipes_used.get(recipe), Some(&10));
                 assert!(game.orbs.is_empty());
                 assert!(smelted_events().is_empty());
-                assert!(extracted_events().is_empty());
             });
         });
 
         // 4. Documented global listener contract is preserved: setting a stack without canceling,
-        //    directly editing a Furnace output slot, or returning `ClickedStackResult::Take` are
+        //    directly editing a Furnace output slot, or taking from the slot are
         //    ALL refused for Hooks::item_stacked_on_other.
         with_mod(|| {
             with_local(|game| {
@@ -3346,7 +3252,7 @@ mod item_part_tests {
                 assert_eq!(
                     game.inventory[9].as_ref().map(|s| (&*s.item, s.count)),
                     Some(("minecraft:flint", 4)),
-                    "global listener must refuse ClickedStackResult::Take even on ordinary slots"
+                    "global listener must refuse a take even on ordinary slots"
                 );
             });
         });
@@ -3402,7 +3308,6 @@ mod item_part_tests {
             with_local(|game| {
                 set_part_script(PartScript {
                     cancel_clicked: true,
-                    handled: true,
                     set_clicked: Some(Some(("minecraft:diamond", 1))),
                     ..PartScript::default()
                 });
@@ -3423,7 +3328,6 @@ mod item_part_tests {
                 // `BundleItem.overrideStackedOnOther`, letting clicked ItemPart run.
                 set_part_script(PartScript {
                     cancel_clicked: true,
-                    handled: true,
                     set_clicked: Some(Some(("minecraft:emerald", 1))),
                     ..PartScript::default()
                 });
@@ -3493,7 +3397,6 @@ mod item_part_tests {
                 // (`paper`) does NOT suppress clicked `flint`'s `OtherStackedOnMe` Part.
                 set_part_script(PartScript {
                     cancel_clicked: true,
-                    handled: true,
                     set_clicked: Some(Some(("minecraft:diamond", 1))),
                     ..PartScript::default()
                 });
@@ -3542,7 +3445,6 @@ mod item_part_tests {
                 // `OtherStackedOnMe`.
                 set_part_script(PartScript {
                     cancel_clicked: true,
-                    handled: true,
                     set_clicked: Some(Some(("minecraft:diamond", 1))),
                     ..PartScript::default()
                 });
@@ -3604,7 +3506,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_clicked: true,
-                    handled: true,
                     set_clicked: Some(Some(("minecraft:diamond", 2))),
                     ..PartScript::default()
                 });
@@ -3662,7 +3563,6 @@ mod item_part_tests {
                 });
                 set_part_script(PartScript {
                     cancel_clicked: true,
-                    handled: true,
                     set_clicked: Some(Some(("minecraft:diamond", 2))),
                     ..PartScript::default()
                 });

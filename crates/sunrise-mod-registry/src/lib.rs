@@ -83,7 +83,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// `REGISTRY_PUBLIC_URL`, `REGISTRY_SESSION_KEY`, `REGISTRY_REPO`,
+    /// `REGISTRY_PUBLIC_URL`, `REGISTRY_SESSION_KEY`, `REGISTRY_REPO` (defaults to [`index::REGISTRY_REPO`]),
     /// `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_BOT_TOKEN`,
     /// `REGISTRY_UPDATE_KEY` (optional), `REGISTRY_DB` (default
     /// `/data/registry.sqlite3`).
@@ -101,8 +101,7 @@ impl Config {
             session_key: key.into_bytes(),
             github: GitHub::new(
                 github::Endpoints::default(),
-                std::env::var("REGISTRY_REPO")
-                    .unwrap_or_else(|_| "horizon-rust/horizon-mods".into()),
+                std::env::var("REGISTRY_REPO").unwrap_or_else(|_| index::REGISTRY_REPO.into()),
                 var("GITHUB_CLIENT_ID")?,
                 var("GITHUB_CLIENT_SECRET")?,
                 var("GITHUB_BOT_TOKEN")?,

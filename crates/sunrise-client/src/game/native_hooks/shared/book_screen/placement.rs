@@ -15,8 +15,21 @@ impl Game<'_> {
         }
         self.apply_screen(screen, owner);
         if self.native_screen_shown() {
+            if self
+                .native_net
+                .placement
+                .client
+                .window()
+                .is_some_and(|window| !self.native_book_placement_window_matches(window))
+            {
+                self.clear_mod_book_placement_screen();
+            }
             self.begin_mod_book_placement();
             self.ensure_mod_book_catalog();
+        } else if self.native_net.placement.client.window().is_some()
+            || self.native_net.placement.view.is_some()
+        {
+            self.clear_mod_book_placement_screen();
         }
     }
     fn native_book_placement_scope_matches(

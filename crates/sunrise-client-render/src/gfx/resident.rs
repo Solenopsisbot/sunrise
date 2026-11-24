@@ -2,11 +2,10 @@
 //! per-frame culling walk: a column whose box misses the frustum or lies past
 //! the render distance rejects all of its sections with one test, and the
 //! sections that remain are reached by index rather than by hashing keys.
-#[cfg(test)]
-use super::Frustum;
-use super::{Cull, SectionKey};
+use super::{Cull, Frustum, SectionKey};
 use crate::{
     fast_hash::{FxHashMap, FxHashSet},
+    section_mask::SectionMask,
     streaming::in_view_distance,
 };
 use glam::{DVec3, Vec3};
@@ -502,7 +501,7 @@ pub(super) fn outside_height_tree(
 
 /// The world AABB (min, max) of a section from its origin and optional tight bounds.
 #[inline]
-fn section_box(min: Vec3, bounds: Option<[Vec3; 2]>) -> (Vec3, Vec3) {
+pub(super) fn section_box(min: Vec3, bounds: Option<[Vec3; 2]>) -> (Vec3, Vec3) {
     match bounds {
         Some([bmin, bmax]) => (min + bmin, min + bmax),
         None => (min, min + Vec3::splat(16.0)),
@@ -585,7 +584,7 @@ impl<T> Resident<T> {
         beyond: impl Fn(i32, i32) -> bool,
         out: &mut Vec<Visible>,
     ) {
-        self.walk(camera, radius, frustum, reachable, beyond, false, out);
+        self.walk(camera, radius, frustum, reachable, beyond, false, out, None);
     }
     /// `visible`, less the sections within the render distance that are not
     /// marked (`insert_marked`) when `marked_only_near`, in the same order: GPU
@@ -600,8 +599,10 @@ impl<T> Resident<T> {
         beyond: impl Fn(i32, i32) -> bool,
         marked_only_near: bool,
         out: &mut Vec<Visible>,
+        mut primary: Option<PrimarySelection<'_>>,
     ) {
         let from = camera_column(camera);
+        let world_y = |y: i32| (i64::from(self.min_y) + i64::from(y) * 16) as f64 - camera.y;
         let clamp_y = frustum.vertical_clamp();
         let vertical = if clamp_y {
             vertical_section_range(camera_section_y(camera, self.min_y), radius, self.sections)
@@ -612,129 +613,236 @@ impl<T> Resident<T> {
             .then(|| outside_height_tree(camera, self.min_y, self.sections, radius))
             .flatten();
         let tree_frustum = outside_tree.and_then(|_| frustum.offset_for_camera_cube(camera, 8));
-        for column in &self.columns {
-            let near = in_view_distance(from, radius, column.x, column.z);
-            if !near && !beyond(column.x, column.z) {
-                continue;
+        let primary_vertical =
+            vertical_section_range(camera_section_y(camera, self.min_y), radius, self.sections);
+        let primary_outside_tree = primary
+            .as_ref()
+            .and_then(|_| outside_height_tree(camera, self.min_y, self.sections, radius));
+        let primary_tree_frustum = primary.as_ref().and_then(|p| {
+            primary_outside_tree.and_then(|_| p.frustum.offset_for_camera_cube(camera, 8))
+        });
+        // The primary and draw lists share distance, reachability, column mesh bounds and
+        // per-section tests. Mirror-only sections and GPU-list marks affect only the draw list.
+        let detail = primary.as_ref().map(|p| p.detail_columns);
+        let mut column_walk = |x: i32, z: i32, column: Option<&Column>, mut air: SectionMask| {
+            let near = in_view_distance(from, radius, x, z);
+            if !near && !beyond(x, z) {
+                return;
             }
-            let (lo_y, hi_y) = if near {
-                let Some((lo, hi)) = vertical else {
-                    continue;
-                };
-                if column.high < lo || column.low > hi {
-                    continue;
-                }
-                (lo, hi)
+            let draw_y_range = if near {
+                vertical
             } else {
-                (i32::MIN, i32::MAX)
+                Some((i32::MIN, i32::MAX))
             };
-            let list = if marked_only_near && near {
-                &column.marked
+            let primary_y_range = if near {
+                primary_vertical
             } else {
-                &column.sections
+                Some((i32::MIN, i32::MAX))
             };
-            if list.is_empty() {
-                continue;
-            }
-            let use_tree_frustum = near && outside_tree.is_some();
-            let tree_state = if let Some(tree) = outside_tree.filter(|_| near) {
-                let state = match &tree_frustum {
-                    Some(offset) => tree.branch_state(column.x, column.z, camera, offset),
-                    None => tree.branch_state(column.x, column.z, camera, frustum),
-                };
-                if state == BRANCH_OUTSIDE {
-                    continue;
-                }
-                state
-            } else {
-                BRANCH_INTERSECT
-            };
-            let ox = (i64::from(column.x) * 16) as f64 - camera.x;
-            let oz = (i64::from(column.z) * 16) as f64 - camera.z;
-            let min_x = ox as f32;
-            let min_z = oz as f32;
-            let col_low = column.low.max(lo_y);
-            let col_high = column.high.min(hi_y);
-            let low_oy =
-                ((i64::from(self.min_y) + i64::from(col_low) * 16) as f64 - camera.y) as f32;
-            let high_oy =
-                ((i64::from(self.min_y) + i64::from(col_high) * 16) as f64 - camera.y) as f32;
-            let min = Vec3::new(min_x, low_oy, min_z);
-            let max = Vec3::new(min_x + 16.0, high_oy + 16.0, min_z + 16.0);
-            let inside = if tree_state == BRANCH_INSIDE {
-                true
-            } else if use_tree_frustum && let Some(offset) = &tree_frustum {
-                let whole = offset.contains(min, max);
-                if !whole && !offset.intersects(min, max) {
-                    continue;
-                }
-                whole
-            } else {
-                let whole = frustum.contains(min, max);
-                if !whole && !frustum.intersects(min, max) {
-                    continue;
-                }
-                whole
-            };
+            let ox = (i64::from(x) * 16) as f64 - camera.x;
+            let oz = (i64::from(z) * 16) as f64 - camera.z;
+            let x0 = ox as f32;
+            let z0 = oz as f32;
             let dx8 = ox + 8.0;
             let dz8 = oz + 8.0;
             let xz_sq = dx8 * dx8 + dz8 * dz8;
-
-            if inside {
-                for &(y, slot) in list {
-                    if near && (y < lo_y || y > hi_y) {
-                        continue;
-                    }
-                    let key = (column.x, y, column.z);
-                    if near && !reachable(key) {
-                        continue;
-                    }
-                    let oy = (i64::from(self.min_y) + i64::from(y) * 16) as f64 - camera.y;
-                    let min = Vec3::new(min_x, oy as f32, min_z);
-                    let dy8 = oy + 8.0;
-                    let distance = xz_sq + dy8 * dy8;
-                    out.push(Visible {
-                        distance: distance.to_bits(),
-                        key,
-                        slot,
-                        origin: min.to_array(),
-                    });
+            let distance = |oy: f64| {
+                let dy8 = oy + 8.0;
+                (xz_sq + dy8 * dy8).to_bits()
+            };
+            let use_draw_tree = near && outside_tree.is_some();
+            let draw_tree_state = if let Some(tree) = outside_tree.filter(|_| near) {
+                match &tree_frustum {
+                    Some(offset) => tree.branch_state(x, z, camera, offset),
+                    None => tree.branch_state(x, z, camera, frustum),
                 }
             } else {
-                for &(y, slot) in list {
-                    if near && (y < lo_y || y > hi_y) {
+                BRANCH_INTERSECT
+            };
+            let use_primary_tree = near && primary_outside_tree.is_some();
+            let primary_tree_state = if let Some(p) = primary.as_ref()
+                && let Some(tree) = primary_outside_tree.filter(|_| near)
+            {
+                match &primary_tree_frustum {
+                    Some(offset) => tree.branch_state(x, z, camera, offset),
+                    None => tree.branch_state(x, z, camera, p.frustum),
+                }
+            } else {
+                BRANCH_INTERSECT
+            };
+            if let Some(column) = column {
+                let list = if marked_only_near && near && primary.is_none() {
+                    &column.marked
+                } else {
+                    &column.sections
+                };
+                let (draws_column, draws_inside, draw_lo, draw_hi) =
+                    if list.is_empty() || draw_tree_state == BRANCH_OUTSIDE {
+                        (false, false, 0, -1)
+                    } else if let Some((lo, hi)) = draw_y_range
+                        && column.high >= lo
+                        && column.low <= hi
+                    {
+                        let col_low = column.low.max(lo);
+                        let col_high = column.high.min(hi);
+                        let cmin = Vec3::new(x0, world_y(col_low) as f32, z0);
+                        let cmax = Vec3::new(x0 + 16.0, world_y(col_high) as f32 + 16.0, z0 + 16.0);
+                        let (visible, inside) = if draw_tree_state == BRANCH_INSIDE {
+                            (true, true)
+                        } else if use_draw_tree && let Some(offset) = &tree_frustum {
+                            let whole = offset.contains(cmin, cmax);
+                            (whole || offset.intersects(cmin, cmax), whole)
+                        } else {
+                            let whole = frustum.contains(cmin, cmax);
+                            (whole || frustum.intersects(cmin, cmax), whole)
+                        };
+                        (visible, inside, lo, hi)
+                    } else {
+                        (false, false, 0, -1)
+                    };
+                let primary_column = primary.as_ref().and_then(|p| {
+                    if list.is_empty() || primary_tree_state == BRANCH_OUTSIDE {
+                        return None;
+                    }
+                    let (lo, hi) = primary_y_range?;
+                    if column.high < lo || column.low > hi {
+                        return None;
+                    }
+                    let col_low = column.low.max(lo);
+                    let col_high = column.high.min(hi);
+                    let cmin = Vec3::new(x0, world_y(col_low) as f32, z0);
+                    let cmax = Vec3::new(x0 + 16.0, world_y(col_high) as f32 + 16.0, z0 + 16.0);
+                    let (visible, inside) = if primary_tree_state == BRANCH_INSIDE {
+                        (true, true)
+                    } else if use_primary_tree && let Some(offset) = &primary_tree_frustum {
+                        let whole = offset.contains(cmin, cmax);
+                        (whole || offset.intersects(cmin, cmax), whole)
+                    } else {
+                        let whole = p.frustum.contains(cmin, cmax);
+                        (whole || p.frustum.intersects(cmin, cmax), whole)
+                    };
+                    visible.then_some((inside, lo, hi))
+                });
+                if draws_column || primary_column.is_some() {
+                    for &(y, slot) in list {
+                        let draw_in_y = draws_column && (!near || (y >= draw_lo && y <= draw_hi));
+                        let primary_in_y =
+                            primary_column.is_some_and(|(_, lo, hi)| !near || (y >= lo && y <= hi));
+                        if !draw_in_y && !primary_in_y {
+                            continue;
+                        }
+                        let key = (x, y, z);
+                        if near && !reachable(key) {
+                            continue;
+                        }
+                        let oy = world_y(y);
+                        let pos = Vec3::new(x0, oy as f32, z0);
+                        let raw_bounds = self.bounds[slot as usize];
+                        if draw_in_y && (!marked_only_near || !near || self.marked[slot as usize]) {
+                            let seen = if draws_inside {
+                                true
+                            } else {
+                                let bounds =
+                                    raw_bounds.filter(|_| frustum.tight() && !use_draw_tree);
+                                let (bmin, bmax) = section_box(pos, bounds);
+                                if use_draw_tree && let Some(offset) = &tree_frustum {
+                                    offset.intersects(bmin, bmax)
+                                } else {
+                                    frustum.intersects(bmin, bmax)
+                                }
+                            };
+                            if seen {
+                                out.push(Visible {
+                                    distance: distance(oy),
+                                    key,
+                                    slot,
+                                    origin: pos.to_array(),
+                                });
+                            }
+                        }
+                        if primary_in_y
+                            && let Some(primary) = &mut primary
+                            && let Some((inside, _, _)) = primary_column
+                        {
+                            let seen = if inside {
+                                true
+                            } else {
+                                let bounds = raw_bounds
+                                    .filter(|_| primary.frustum.tight() && !use_primary_tree);
+                                let (bmin, bmax) = section_box(pos, bounds);
+                                if use_primary_tree && let Some(offset) = &primary_tree_frustum {
+                                    offset.intersects(bmin, bmax)
+                                } else {
+                                    primary.frustum.intersects(bmin, bmax)
+                                }
+                            };
+                            if seen {
+                                primary.out.push((distance(oy), key, Some(slot)));
+                            }
+                        }
+                    }
+                }
+                if !air.is_empty() {
+                    for &(y, _) in &column.sections {
+                        air.remove(y as usize);
+                    }
+                }
+            }
+            if let Some(primary) = &mut primary
+                && primary_tree_state != BRANCH_OUTSIDE
+                && let Some((lo, hi)) = primary_y_range
+            {
+                for y in air.iter().map(|y| y as i32) {
+                    if near && (y < lo || y > hi) {
                         continue;
                     }
-                    let key = (column.x, y, column.z);
+                    let key = (x, y, z);
                     if near && !reachable(key) {
                         continue;
                     }
-                    let oy = (i64::from(self.min_y) + i64::from(y) * 16) as f64 - camera.y;
-                    let min = Vec3::new(min_x, oy as f32, min_z);
-                    let bounds =
-                        self.bounds[slot as usize].filter(|_| frustum.tight() && !use_tree_frustum);
-                    let (bmin, bmax) = section_box(min, bounds);
-                    let seen = if use_tree_frustum && let Some(offset) = &tree_frustum {
-                        offset.intersects(bmin, bmax)
+                    let oy = world_y(y);
+                    let (min, max) = section_box(Vec3::new(x0, oy as f32, z0), None);
+                    let seen = if primary_tree_state == BRANCH_INSIDE {
+                        true
+                    } else if use_primary_tree && let Some(offset) = &primary_tree_frustum {
+                        offset.intersects(min, max)
                     } else {
-                        frustum.intersects(bmin, bmax)
+                        primary.frustum.intersects(min, max)
                     };
-                    if !seen {
-                        continue;
+                    if seen {
+                        primary.out.push((distance(oy), key, None));
                     }
-                    let dy8 = oy + 8.0;
-                    let distance = xz_sq + dy8 * dy8;
-                    out.push(Visible {
-                        distance: distance.to_bits(),
-                        key,
-                        slot,
-                        origin: min.to_array(),
-                    });
+                }
+            }
+        };
+        for column in &self.columns {
+            let air = detail
+                .and_then(|detail| detail.get(&(column.x, column.z)))
+                .copied()
+                .unwrap_or_default();
+            column_walk(column.x, column.z, Some(column), air);
+        }
+        if let Some(detail) = detail {
+            // Empty compiled columns have no resident GPU entry to visit.
+            for (&(x, z), &air) in detail {
+                if !self.column_index.contains_key(&(x, z)) {
+                    column_walk(x, z, None, air);
                 }
             }
         }
         out.sort_unstable_by_key(|v| (v.distance, v.key));
+        if let Some(primary) = primary {
+            primary
+                .out
+                .sort_unstable_by_key(|&(distance, key, _)| (distance, key));
+        }
     }
+}
+
+pub struct PrimarySelection<'a> {
+    pub frustum: &'a Frustum,
+    pub detail_columns: &'a FxHashMap<(i32, i32), SectionMask>,
+    pub out: &'a mut Vec<(u64, SectionKey, Option<u32>)>,
 }
 
 #[cfg(test)]
@@ -742,6 +850,12 @@ mod tests {
     use super::*;
 
     impl ResidentSize for () {
+        fn census_bytes(&self) -> (u64, usize) {
+            (0, 0)
+        }
+    }
+
+    impl ResidentSize for bool {
         fn census_bytes(&self) -> (u64, usize) {
             (0, 0)
         }
@@ -1104,7 +1218,16 @@ mod tests {
             for radius in [3, 7, 12] {
                 let (mut all, mut marked) = (Vec::new(), Vec::new());
                 r.visible(camera, radius, &view, reachable, beyond, &mut all);
-                r.walk(camera, radius, &view, reachable, beyond, true, &mut marked);
+                r.walk(
+                    camera,
+                    radius,
+                    &view,
+                    reachable,
+                    beyond,
+                    true,
+                    &mut marked,
+                    None,
+                );
                 let from = camera_column(camera);
                 let near = |v: &Visible| in_view_distance(from, radius, v.key.0, v.key.2);
                 let expected: Vec<Visible> = all

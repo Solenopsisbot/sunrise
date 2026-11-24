@@ -457,6 +457,14 @@ fn two_gui_ids_of_one_walked_name_and_a_model_only_id_keep_their_own_results() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+fn page_texel(page: &RegisteredAtlasPage, rect: Rect) -> [u8; 4] {
+    let [width, height] = page.size;
+    let x = (rect.u0 * width as f32).round() as usize;
+    let y = (rect.v0 * height as f32).round() as usize;
+    let at = (y * width as usize + x) * 4;
+    page.pixels[at..at + 4].try_into().unwrap()
+}
+
 /// A file another owner packed under a name that is also a GUI id (a registered atlas's
 /// projection is `mymod:gui/atlases/...`) is not erased by a GUI filter of that id: it stays
 /// in the packed table, while the GUI lane's answer for the id is its removal.
@@ -480,7 +488,8 @@ fn a_gui_filter_never_erases_a_registered_atlas_sprite_of_its_name() {
         .registered
         .get(name)
         .expect("the projection stays packed");
-    assert_eq!(texel_at(&atlas, packed, 0, 0), [0, 200, 0, 255]);
+    let page = &atlas.registered_pages[atlas.texture_atlas_page(name).unwrap()];
+    assert_eq!(page_texel(page, packed), [0, 200, 0, 255]);
     // The GUI list removed the id: the GUI lane says so, whatever else is packed under the name.
     assert!(matches!(atlas.gui_lookup(name), Some(GuiSprite::Missing)));
     std::fs::remove_dir_all(&root).unwrap();
@@ -525,18 +534,19 @@ fn a_registered_atlas_sprite_and_a_model_of_one_name_both_survive() {
     let atlas = HudAtlas::build(&ResourceSource::directory(root.clone())).unwrap();
     std::fs::remove_dir_all(&root).unwrap();
     let registered = *atlas.gui_rect(name).expect("the registered sprite");
+    let page = &atlas.registered_pages[atlas.gui_atlas_page(name).unwrap()];
     assert_eq!(
-        texel_at(&atlas, registered, 0, 0),
+        page_texel(page, registered),
         [0, 0, 200, 255],
         "the first frame of the staged file's animation"
     );
-    let (_, animation) = atlas
-        .sprite_animations
+    let (_, animation) = page
+        .animations
         .iter()
-        .find(|(rect, _)| rect.u0 == registered.u0 && rect.v0 == registered.v0)
+        .find(|(rect, _)| *rect == registered)
         .expect("the registered sprite animates");
     assert_eq!(
-        animation.resized_pixels(0, 1, 1),
+        animation.resized_pixels(0, 1, 1).unwrap(),
         [0, 200, 0, 255],
         "a later frame"
     );
@@ -544,7 +554,8 @@ fn a_registered_atlas_sprite_and_a_model_of_one_name_both_survive() {
     let model = *atlas.sprites.get(name).expect("the model's sprite");
     assert_eq!(texel_at(&atlas, model, 0, 0), [255, 0, 0, 255]);
     let raw = atlas.texture_rect(raw_name).expect("the exact raw name");
-    assert_eq!(texel_at(&atlas, *raw, 0, 0), [200, 100, 0, 255]);
+    let raw_page = &atlas.registered_pages[atlas.texture_atlas_page(raw_name).unwrap()];
+    assert_eq!(page_texel(raw_page, *raw), [200, 100, 0, 255]);
     assert_eq!(
         atlas.flags[raw_name],
         TextureFlags {
@@ -553,7 +564,12 @@ fn a_registered_atlas_sprite_and_a_model_of_one_name_both_survive() {
         }
     );
     let prefixed = format!("minecraft:{raw_name}");
-    assert!(atlas.texture_rect(&prefixed).is_none());
+    // A sprite name a hook resolved with its namespace draws as the raw texture too.
+    assert_eq!(atlas.texture_rect(&prefixed), Some(raw));
+    assert_eq!(
+        atlas.texture_atlas_page(&prefixed),
+        atlas.texture_atlas_page(raw_name)
+    );
     assert_eq!(atlas.gui_rect(&prefixed), Some(raw));
     assert!(
         atlas
@@ -666,9 +682,9 @@ fn a_gui_alias_animates_through_its_sources_frames() {
         .iter()
         .find(|(r, _)| r.u0 == rect.u0 && r.v0 == rect.v0)
         .expect("the alias animates");
-    assert_eq!(animation.resized_pixels(0, 1, 1), [255, 0, 0, 255]);
+    assert_eq!(animation.resized_pixels(0, 1, 1).unwrap(), [255, 0, 0, 255]);
     assert_eq!(
-        animation.resized_pixels(1, 1, 1),
+        animation.resized_pixels(1, 1, 1).unwrap(),
         [0, 255, 0, 0],
         "the strip's second frame"
     );
@@ -1885,7 +1901,7 @@ fn a_wrapped_border_repeats_the_opposite_edges() {
             .flat_map(|&v| [v, 0, 0, 255])
             .collect(),
     );
-    let (_, w, h, data) = wrap_border(&image);
+    let (_, w, h, data) = wrap_border(&image).unwrap();
     assert_eq!((w, h), (4, 4));
     let red: Vec<u8> = data.chunks(4).map(|t| t[0]).collect();
     #[rustfmt::skip]

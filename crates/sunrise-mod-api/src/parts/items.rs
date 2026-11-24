@@ -658,7 +658,7 @@ pub mod tests {
     pub(crate) fn an_entitys_items_come_from_its_types_provider_and_none_outside_the_level_in_place()
      {
         install_parts(&[], &crate::parts::tests::rule_schema(), |_| false).unwrap();
-        game_thread();
+        install_shared_parts(true);
         let entity = |id| EntityRef::new(WorldEpoch::new(1), id);
         let mut player = player_world(None);
         let host: &mut dyn ServerHost = &mut player;
@@ -779,8 +779,15 @@ pub mod tests {
         fn container_size(&self, BlockSide { pos, .. }: BlockSide) -> Option<usize> {
             (pos == SHELF).then_some(3)
         }
-        fn container_stack(&self, _: BlockSide, slot: usize) -> Option<ItemStack> {
-            self.slots.get(slot)?.clone()
+        fn lend_container_stack(
+            &self,
+            _: BlockSide,
+            slot: usize,
+            read: &mut dyn for<'a> FnMut(ItemStackView<'a>),
+        ) {
+            if let Some(Some(stack)) = self.slots.get(slot) {
+                read(ItemStackView::from_stack(stack));
+            }
         }
     }
     #[cfg(test)]
@@ -938,14 +945,19 @@ pub mod tests {
                 .unwrap_or(0)
         }
         fn resource(&self, host: &mut dyn ServerHost, index: usize) -> Option<ItemResource> {
-            Some(ItemResource::of(
-                &backend_of(&*host)?.container_stack(on(SHELF, None), index)?,
-            ))
+            let mut resource = None;
+            backend_of(&*host)?.lend_container_stack(on(SHELF, None), index, &mut |view| {
+                resource = view.project().as_ref().map(ItemResource::of);
+            });
+            resource
         }
         fn amount(&self, host: &mut dyn ServerHost, index: usize) -> u32 {
-            backend_of(&*host)
-                .and_then(|backend| backend.container_stack(on(SHELF, None), index))
-                .map_or(0, |held| held.count())
+            let mut count = 0;
+            if let Some(backend) = backend_of(&*host) {
+                backend
+                    .lend_container_stack(on(SHELF, None), index, &mut |view| count = view.count());
+            }
+            count
         }
         fn capacity(
             &self,
@@ -1932,13 +1944,16 @@ pub mod tests {
             &invalid,
             |_, at, _, _, offer| offer.offer(|| Box::new(Pipe(at))),
         );
-        assert_eq!(r.refused.len(), 3, "{:?}", r.refused);
+        assert_eq!(r.refused.len(), 4, "{:?}", r.refused);
         assert!(
             r.refused[0]
                 .contains("item places test:charms are provided twice, by first and second")
         );
         assert!(r.refused[1].contains("not a namespaced name"));
         assert!(r.refused[2].contains("invalid registry key \"minecraft:\""));
+        assert!(r.refused[3].starts_with(
+            "mod second used capability \"sunrise:items\" for an invalid block entity type key slot "
+        ));
     }
 
     #[test]
@@ -1989,8 +2004,12 @@ pub mod tests {
     pub(crate) struct HeldItem(pub(crate) ItemStack);
     #[cfg(test)]
     impl mod_api::prelude::ItemsBackend for HeldItem {
-        fn item_bundle_slots(&self, _: &ItemStack) -> Option<Vec<Option<ItemStack>>> {
-            None
+        fn bundle_slots(
+            &self,
+            _: &ItemStack,
+            _: &mod_api::BundleConfig,
+        ) -> Result<Option<Vec<Option<ItemStack>>>, mod_api::BundleReadError> {
+            Ok(None)
         }
         fn item_container_slots(&self, stack: &ItemStack) -> Option<Vec<Option<ItemStack>>> {
             (stack.damage() == 1).then(|| vec![None; 27])
@@ -2113,20 +2132,9 @@ impl ItemsRegistrar for PartRegistrar {
         name: &'static str,
         item: &str,
         before_game: bool,
-        provider: ItemProviderOf,
+        provider: NativeCapabilityProvider,
     ) {
-        self.capability(
-            |p| &mut p.item_capabilities,
-            None,
-            name,
-            ProviderTarget::Id(item),
-            before_game,
-            {
-                let handler =
-                    mod_vocab::__private::parts_installation::item_provider_handler(&provider);
-                (provider, handler)
-            },
-        );
+        self.capability(name, ProviderTarget::Item(item), before_game, provider);
     }
 
     /// Read and write the item places `ItemPlace::Mod { provider: name, .. }` with `provider`,
@@ -2162,24 +2170,30 @@ impl ItemsRegistrar for PartRegistrar {
         placement: crate::TooltipPlacement,
         appender: Arc<dyn crate::TooltipAppender>,
     ) {
+        // `RegisterTooltipAppendersEvent.registerComponentAppender`: one appender a component,
+        // the game's own among them.
         let refusal = if !namespaced(component) {
             Some(format!(
                 "{} registers a tooltip appender for {component:?}, which is not a namespaced data component id",
                 self.mod_id
             ))
+        } else if mod_vocab::VANILLA_TOOLTIP_COMPONENTS.contains(&component) {
+            Some(format!(
+                "{} registers a tooltip appender for {component}, whose lines the game adds itself",
+                self.mod_id
+            ))
+        } else if let Some(other) = self
+            .parts
+            .tooltip_appenders
+            .iter()
+            .find(|part| &*part.component == component)
+        {
+            Some(format!(
+                "tooltip appenders for {component} are registered twice, by {} and {}",
+                other.mod_id, self.mod_id
+            ))
         } else {
-            match &placement {
-                crate::TooltipPlacement::Before(anchor)
-                | crate::TooltipPlacement::After(anchor)
-                    if !TOOLTIP_DETAILS.contains(&anchor.as_str()) =>
-                {
-                    Some(format!(
-                        "{} anchors a tooltip appender for {component:?} to {anchor:?}, which is not a component detail Sunrise lists",
-                        self.mod_id
-                    ))
-                }
-                _ => None,
-            }
+            None
         };
         if let Some(refusal) = refusal {
             self.refused.push(refusal);
@@ -2191,34 +2205,229 @@ impl ItemsRegistrar for PartRegistrar {
             component: component.into(),
             placement,
             appender,
+            slot: 0,
         });
     }
 }
 
-/// The component details a tooltip lists, in the order the game lists them after the item's own
-/// lines. `TooltipPlacement::Before` and `After` name one of these.
-pub(crate) const TOOLTIP_DETAILS: &[&str] = &[
-    "minecraft:tropical_fish/pattern",
-    "minecraft:instrument",
-    "minecraft:map_id",
-    "minecraft:bees",
-    "minecraft:container",
-    "minecraft:banner_patterns",
-    "minecraft:written_book_content",
-    "minecraft:charged_projectiles",
-    "minecraft:fireworks",
-    "minecraft:potion_contents",
-    "minecraft:jukebox_playable",
-    "minecraft:trim",
-    "minecraft:stored_enchantments",
-    "minecraft:enchantments",
-    "minecraft:dyed_color",
-    "minecraft:lore",
-    "minecraft:attribute_modifiers",
-    "minecraft:unbreakable",
-    "minecraft:ominous_bottle_amplifier",
-    "minecraft:suspicious_stew_effects",
-    "minecraft:block_state",
-    "minecraft:entity_data",
-    "minecraft:block_entity_data",
-];
+impl PartRegistrar {
+    /// `ItemTooltipHandler.init`: sort the vanilla tooltip components, chained in their order,
+    /// and every appender by its placement's edge, as `CommonHooks.sortGraphChecked` does: a
+    /// topological sort whose ties go to the node added first. An anchor nothing adds lines for,
+    /// and every appender on a cycle, refuse their mods.
+    pub(crate) fn order_tooltip_appenders(&mut self) {
+        let vanilla = mod_vocab::VANILLA_TOOLTIP_COMPONENTS;
+        let appenders = &mut self.parts.tooltip_appenders;
+        let node = |id: &str| {
+            vanilla.iter().position(|v| *v == id).or_else(|| {
+                appenders
+                    .iter()
+                    .position(|part| &*part.component == id)
+                    .map(|i| vanilla.len() + i)
+            })
+        };
+        let count = vanilla.len() + appenders.len();
+        let mut edges: Vec<Vec<usize>> = vec![Vec::new(); count];
+        let mut incoming = vec![0usize; count];
+        let mut add = |from: usize, to: usize, edges: &mut Vec<Vec<usize>>| {
+            if !edges[from].contains(&to) {
+                edges[from].push(to);
+                incoming[to] += 1;
+            }
+        };
+        for i in 1..vanilla.len() {
+            add(i - 1, i, &mut edges);
+        }
+        let mut refused = Vec::new();
+        for (i, part) in appenders.iter().enumerate() {
+            let me = vanilla.len() + i;
+            let (from, to) = match &part.placement {
+                crate::TooltipPlacement::BeforeAll => (me, 0),
+                crate::TooltipPlacement::AfterAll => (vanilla.len() - 1, me),
+                crate::TooltipPlacement::Before(anchor)
+                | crate::TooltipPlacement::After(anchor) => {
+                    let Some(other) = node(anchor) else {
+                        refused.push(format!(
+                            "{} anchors its tooltip appender for {} to {anchor:?}, which no tooltip component or appender adds lines for",
+                            part.mod_id, part.component
+                        ));
+                        continue;
+                    };
+                    match part.placement {
+                        crate::TooltipPlacement::Before(_) => (me, other),
+                        _ => (other, me),
+                    }
+                }
+            };
+            add(from, to, &mut edges);
+        }
+        let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<usize>> = (0..count)
+            .filter(|&n| incoming[n] == 0)
+            .map(std::cmp::Reverse)
+            .collect();
+        let mut order = Vec::with_capacity(count);
+        while let Some(std::cmp::Reverse(n)) = ready.pop() {
+            order.push(n);
+            for &next in &edges[n] {
+                incoming[next] -= 1;
+                if incoming[next] == 0 {
+                    ready.push(std::cmp::Reverse(next));
+                }
+            }
+        }
+        if order.len() < count {
+            let name = |n: usize| {
+                vanilla
+                    .get(n)
+                    .copied()
+                    .unwrap_or_else(|| &*appenders[n - vanilla.len()].component)
+            };
+            let cycle: Vec<&str> = (0..count).filter(|&n| incoming[n] > 0).map(name).collect();
+            let owners: Vec<&str> = (vanilla.len()..count)
+                .filter(|&n| incoming[n] > 0)
+                .map(|n| appenders[n - vanilla.len()].mod_id)
+                .collect();
+            refused.push(format!(
+                "tooltip appenders of {} form a cycle through {}",
+                owners.join(", "),
+                cycle.join(" -> ")
+            ));
+        }
+        if !refused.is_empty() {
+            self.refused.extend(refused);
+            return;
+        }
+        let mut sorted = Vec::with_capacity(appenders.len());
+        let mut slot = 0;
+        let mut taken: Vec<Option<TooltipAppenderPart>> =
+            std::mem::take(appenders).into_iter().map(Some).collect();
+        for n in order {
+            match n.checked_sub(vanilla.len()) {
+                None => slot += 1,
+                Some(i) => {
+                    let mut part = taken[i].take().expect("each node is sorted once");
+                    part.slot = slot;
+                    sorted.push(part);
+                }
+            }
+        }
+        *appenders = sorted;
+    }
+}
+
+#[cfg(test)]
+mod tooltip_order_tests {
+    use super::*;
+    use crate::TooltipPlacement::{After, AfterAll, Before, BeforeAll};
+
+    struct Silent;
+    impl crate::TooltipAppender for Silent {
+        fn append(
+            &self,
+            _: &dyn crate::ClientHost,
+            _: &crate::ItemStack,
+            _: &crate::TooltipAppendContext,
+            _: &mut Vec<(crate::Text, u32)>,
+        ) {
+        }
+    }
+
+    /// Registers each (mod, component, placement) in turn and sorts them.
+    fn ordered(appenders: &[(&'static str, &str, crate::TooltipPlacement)]) -> PartRegistrar {
+        let mut registrar = PartRegistrar::new("first");
+        for (index, (mod_id, component, placement)) in appenders.iter().enumerate() {
+            registrar.mod_id = mod_id;
+            registrar.mod_index = index;
+            registrar.register_tooltip_appender(component, placement.clone(), Arc::new(Silent));
+        }
+        registrar.order_tooltip_appenders();
+        registrar
+    }
+
+    fn vanilla(id: &str) -> usize {
+        mod_vocab::VANILLA_TOOLTIP_COMPONENTS
+            .iter()
+            .position(|v| *v == id)
+            .unwrap()
+    }
+
+    fn sorted(registrar: &PartRegistrar) -> Vec<(&str, usize)> {
+        let parts = &registrar.parts.tooltip_appenders;
+        parts.iter().map(|p| (&*p.component, p.slot)).collect()
+    }
+
+    /// As FML's `TopologicalSort` with insertion order: the vanilla components come first, so an
+    /// appender that only follows one lands after the last of them, and an appender a `Before`
+    /// holds back comes just before its anchor.
+    #[test]
+    fn appenders_sort_after_their_anchors_with_ties_in_registration_order() {
+        let last = mod_vocab::VANILLA_TOOLTIP_COMPONENTS.len();
+        let registrar = ordered(&[
+            ("a", "a:tail", AfterAll),
+            ("b", "b:on_a", After("a:charge".into())),
+            ("a", "a:charge", After("minecraft:lore".into())),
+            ("b", "b:head", BeforeAll),
+            ("b", "b:before_a", Before("a:charge".into())),
+            ("a", "a:second_tail", AfterAll),
+        ]);
+        assert!(registrar.refused.is_empty(), "{:?}", registrar.refused);
+        assert_eq!(
+            sorted(&registrar),
+            [
+                ("b:head", 0),
+                ("a:tail", last),
+                ("b:before_a", last),
+                ("a:charge", last),
+                ("b:on_a", last),
+                ("a:second_tail", last),
+            ]
+        );
+        let registrar = ordered(&[
+            ("a", "a:pre_trim", Before("minecraft:trim".into())),
+            ("b", "b:on_a", After("a:pre_trim".into())),
+            ("b", "b:pre_on_a", Before("b:on_a".into())),
+        ]);
+        let trim = vanilla("minecraft:trim");
+        assert_eq!(
+            sorted(&registrar),
+            [("a:pre_trim", trim), ("b:pre_on_a", last), ("b:on_a", last)]
+        );
+    }
+
+    #[test]
+    fn a_second_appender_for_a_component_is_refused() {
+        let registrar = ordered(&[
+            ("a", "a:charge", AfterAll),
+            ("b", "a:charge", AfterAll),
+            ("b", "minecraft:lore", AfterAll),
+            ("b", "bare", AfterAll),
+        ]);
+        assert_eq!(registrar.refused.len(), 3, "{:?}", registrar.refused);
+        assert!(registrar.refused[0].contains("by a and b"));
+        assert!(registrar.refused[1].contains("minecraft:lore"));
+        assert_eq!(
+            sorted(&registrar),
+            [("a:charge", vanilla("minecraft:damage") + 1)]
+        );
+    }
+
+    #[test]
+    fn an_anchor_nothing_adds_lines_for_is_refused() {
+        let registrar = ordered(&[("a", "a:charge", After("b:missing".into()))]);
+        assert_eq!(registrar.refused.len(), 1);
+        assert!(registrar.refused[0].contains("\"b:missing\""));
+    }
+
+    #[test]
+    fn anchors_that_form_a_cycle_are_refused() {
+        let registrar = ordered(&[
+            ("a", "a:one", After("b:two".into())),
+            ("b", "b:two", After("a:one".into())),
+            ("c", "c:free", AfterAll),
+        ]);
+        assert_eq!(registrar.refused.len(), 1, "{:?}", registrar.refused);
+        let refusal = &registrar.refused[0];
+        assert!(refusal.contains("a, b") && refusal.contains("a:one -> b:two"));
+        assert!(!refusal.contains("c:free"));
+    }
+}

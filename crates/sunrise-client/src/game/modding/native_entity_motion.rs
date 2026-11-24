@@ -7,6 +7,7 @@
 use super::entity::{Entity as _, EntityHandle, with_entity, with_entity_mut};
 use super::{Game, commands::Target};
 use mod_api::{ClipBlock, ClipFluid, ClipHit, EntityRef, LevelWriteError};
+use std::ops::ControlFlow;
 use sunrise_client::{collisions::SceneCollisions, motion::player_context};
 use sunrise_core::geometry::{Aabb, Axis, Vec3};
 use sunrise_core::position::BlockPos;
@@ -139,7 +140,14 @@ impl Game<'_> {
     /// `Entity.getControllingPassenger` when it is a player.
     fn native_controlling_player(&self, t: Target, entity: EntityRef) -> Option<EntityRef> {
         let steered = self.native_steered(t);
-        let first = *self.entity_passengers(entity).ok_or(()).ok()?.first()?;
+        let mut first = None;
+        let _ = self
+            .entity_visit_passengers(entity, &mut |rider| {
+                first = Some(rider);
+                ControlFlow::Break(())
+            })
+            .ok()?;
+        let first = first?;
         let player = matches!(
             self.native_entity_target(first)?,
             Target::Player | Target::Guest(_)
@@ -398,7 +406,7 @@ impl Game<'_> {
         if let Some(target) = self.native_entity_read_target(entity) {
             return Some(self.target_eye_height(target));
         }
-        let (remote, id) = self.native_client_entity_context(entity)?;
+        let (remote, id) = self.native_client_entity_context(entity).ok()?;
         remote.tracked(id)?;
         self.interactions
             .get(&id)

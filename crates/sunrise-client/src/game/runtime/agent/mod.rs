@@ -1799,12 +1799,21 @@ impl Game<'_> {
                 if text.is_empty() {
                     return Err("command TEXT".into());
                 }
-                // A native mod's command first, as typed chat does; the
-                // server's console cannot run a client mod's command.
-                if self.client_mod_command(text) {
-                    return ok(json!({ "ok": true, "chat": self.ui.chat.recent_lines(5) }));
-                }
+                use crate::game::native_server::ClientCommandOutcome;
                 let command = format!("/{text}");
+                let remote = self.integrated.is_none() && self.remote.is_some();
+                let client = if remote {
+                    self.send_signed_chat_input(&command)
+                } else {
+                    self.run_client_native_command(text)
+                };
+                if let Some(client) = client {
+                    let outcome = match client {
+                        ClientCommandOutcome::Failed => None,
+                        ClientCommandOutcome::Success(result) => Some((true, result)),
+                    };
+                    return ok(command_reply(self.ui.chat.recent_lines(5), outcome));
+                }
                 // Single player's console is its server thread's.
                 if let Some(server) = &self.integrated {
                     let (chat, outcome) = server
@@ -1816,8 +1825,7 @@ impl Game<'_> {
                 }
                 // A server we joined answers in the chat, not to this reply:
                 // no `success`, no `result`.
-                if self.remote.is_some() {
-                    self.send_signed_chat_input(&command);
+                if remote {
                     return ok(json!({ "ok": true }));
                 }
                 let ((), outcome) = self

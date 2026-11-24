@@ -1,7 +1,7 @@
 //! The HUD's hotbar, bars and mount hearts follow `Hud.getCameraPlayer`: the local player, another
 //! player the server attached the camera to, or nothing when the camera is not a player.
 use super::Game;
-use crate::game::gui_paint_items::HotbarSource;
+use crate::game::hotbar_items::HotbarSource;
 use crate::game::remote_camera::CameraPlayer;
 use mod_api::client::hud_layout::HeartKind;
 use sunrise_client::hud_layout::{AirInputs, FoodInputs, HealthInputs, HotbarInputs};

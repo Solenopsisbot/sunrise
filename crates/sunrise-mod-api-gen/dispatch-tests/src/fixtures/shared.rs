@@ -1,10 +1,10 @@
 //! Shared exception: dispatch infrastructure and cross-area fixture types/tests; no new hooks.
-use mod_api::mod_api::BlockEntityTypeKey;
+use mod_api::mod_api::{BlockEntityDataView, BlockEntityTypeKey, BlockRemovalEffects};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use sunrise_core::game_mode::GameMode;
 
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct ItemStack {
     item: Arc<str>,
     count: u32,
@@ -12,13 +12,13 @@ struct ItemStack {
 // Dispatch tests isolate the runtime key table: the fixture key retains its name.
 // Production key resolution and slot stability are tested in mod-runtime.
 #[derive(Clone, Copy)]
-struct ItemKey<'a>(&'a str);
+struct ItemKey(&'static str);
 impl ItemStack {
     fn count(&self) -> u32 {
         self.count
     }
-    fn item(&self) -> ItemKey<'_> {
-        ItemKey(&self.item)
+    fn item(&self) -> ItemKey {
+        ItemKey(Box::leak(self.item.to_string().into_boxed_str()))
     }
 }
 #[derive(Debug)]
@@ -28,11 +28,6 @@ enum StackWriteError {
     CountExceeded,
 }
 mod content {
-    pub(super) mod crash {
-        pub fn current_native_mod() -> Option<&'static str> {
-            None
-        }
-    }
     pub(super) mod registry_keys {
         pub(in crate::tests) fn block_key(name: &str) -> Option<super::super::BlockKey> {
             match name {
@@ -46,21 +41,28 @@ mod content {
         ) -> Option<&'static str> {
             Some("test:counter")
         }
-        pub(in crate::tests) fn item_id(key: super::super::ItemKey<'_>) -> Option<&str> {
+        pub(in crate::tests) fn item_id(key: super::super::ItemKey) -> Option<&'static str> {
             Some(key.0)
+        }
+        pub(in crate::tests) fn effect_id(key: super::super::EffectKey) -> Option<&'static str> {
+            match key.0 {
+                0 => Some("test:effect"),
+                _ => None,
+            }
         }
     }
 }
 
+struct ItemPlace;
 struct BlockEntityDraw(Vec<u32>);
 use serde_json::{Map, Value};
 use stubs::*;
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Text;
+#[derive(Debug)]
+enum TextFormError {}
 #[derive(Clone)]
 struct ScreenshotImage;
-#[derive(Debug, PartialEq)]
-struct Zoom(u32);
 enum Flow {
     Continue,
     Cancel,
@@ -273,13 +275,14 @@ mod generated {
         pub struct Item {
             pub id: String,
         }
-        pub(super) use super::super::ItemStack;
+        pub(super) use super::super::{ItemKey, ItemPlace, ItemStack, ItemStackView};
         // Generated registration dispatch builds the stub `Answered` through this path.
         pub(super) use super::super::Answered;
         pub(super) use super::super::{
-            Command, CommandRegistration, Config, Dispensed, InteractionResult, MapDecoration,
-            MapInfo, Zoom,
+            ClientCommandRegistration, CommandRegistration, Dispensed, InteractionResult,
+            MapDecoration, MapInfo,
         };
+        pub(super) use super::super::{LevelRef, PlayerRef};
         #[derive(Clone)]
         pub struct FluidModel;
         #[derive(Clone, Copy)]
@@ -288,8 +291,8 @@ mod generated {
     }
     include!(concat!(env!("OUT_DIR"), "/mod_api_generated.rs"));
     pub(super) use self::mod_api::InlineImageReplacement;
-    use self::mod_api::StandaloneModelRegistration;
     pub(super) use self::mod_api::{BlockFace, BlockKey, BlockState, CrosshairTarget};
+    use self::mod_api::{GuiCanvas, StandaloneModelRegistration};
     pub use sunrise_mod_api_macros::__subscriptions;
 }
 use generated::*;
@@ -377,17 +380,33 @@ impl ModEntry {
     }
 }
 trait Registrar {}
-/// The goal registrar of the generated `EntityPart`, as the fixture sees
-/// it: no methods, its type is all the generated trait asks of the scope.
-#[expect(dead_code)]
+/// The goal registrar of the generated `EntityPart`, as the fixture sees it.
 struct GoalRegistrar<'a> {
     _lifetime: std::marker::PhantomData<&'a ()>,
 }
-/// The behavior registrar of the generated `EntityPart` (#824), as the
-/// fixture sees it: like [`GoalRegistrar`], only its type is asked for.
-#[expect(dead_code)]
+impl GoalRegistrar<'_> {
+    fn route_kind(&self) -> &str {
+        "test:mob"
+    }
+    fn set_owner(&mut self, _: &'static str, _: &'static str) {}
+    fn checkpoint(&self) -> usize {
+        0
+    }
+    fn rollback(&mut self, _: usize) {}
+}
+/// The behavior registrar of the generated `EntityPart` (#824), as the fixture sees it.
 struct BehaviorRegistrar<'a> {
     _lifetime: std::marker::PhantomData<&'a ()>,
+}
+impl BehaviorRegistrar<'_> {
+    fn route_kind(&self) -> &str {
+        "test:mob"
+    }
+    fn set_owner(&mut self, _: &'static str, _: &'static str) {}
+    fn checkpoint(&self) -> usize {
+        0
+    }
+    fn rollback(&mut self, _: usize) {}
 }
 /// Scope fixtures install their own Parts. Block attachments retain their API keys;
 /// other scopes keep their existing single-target fixture tables.
@@ -397,6 +416,7 @@ struct Parts {
     owner_slot: Option<(BlockKey, usize)>,
     block_entities: Vec<&'static dyn BlockEntityPart>,
     items: Vec<&'static dyn ItemPart>,
+    effects: Vec<&'static dyn MobEffectPart>,
     menus: Vec<&'static dyn MenuPart>,
     fluids: Vec<&'static dyn FluidPart>,
     entities: Vec<&'static dyn EntityPart>,
@@ -406,6 +426,7 @@ static NO_PARTS: Parts = Parts {
     owner_slot: None,
     block_entities: Vec::new(),
     items: Vec::new(),
+    effects: Vec::new(),
     menus: Vec::new(),
     fluids: Vec::new(),
     entities: Vec::new(),
@@ -427,6 +448,7 @@ fn has_part_hook(_: HookId) -> bool {
     !parts.blocks.is_empty()
         || !parts.block_entities.is_empty()
         || !parts.items.is_empty()
+        || !parts.effects.is_empty()
         || !parts.menus.is_empty()
         || !parts.entities.is_empty()
 }
@@ -472,6 +494,12 @@ impl Parts {
     }
     fn item<'k>(&self, _: impl FnOnce() -> Option<&'k str>) -> &[&'static dyn ItemPart] {
         &self.items
+    }
+    fn effect<'k>(&self, id: impl FnOnce() -> Option<&'k str>) -> &[&'static dyn MobEffectPart] {
+        match id() {
+            Some("test:effect") => &self.effects,
+            _ => &[],
+        }
     }
     fn menu<'k>(&self, _: impl FnOnce() -> Option<&'k str>) -> &[&'static dyn MenuPart] {
         &self.menus
@@ -522,6 +550,32 @@ fn entered_parts<'a, P: ?Sized>(
         })
         .map(|part| ("part", part))
 }
+fn entered_parts_with_owner<'a, P: ?Sized>(
+    hook: generated::HookId,
+    parts: &'a [&'a P],
+    name: &'static str,
+) -> impl Iterator<Item = (&'static str, &'static str, &'a P)> {
+    entered_parts(hook, parts, name).map(|(id, part)| (id, "Part", part))
+}
+fn entered_parts_with_slot<'a, P: ?Sized>(
+    _: generated::HookId,
+    parts: &'a [&'a P],
+    _: &'static str,
+) -> impl Iterator<Item = (&'static str, (usize, usize), &'a P)> {
+    let disabled = DISABLED_BLOCK_PART.get();
+    parts
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(move |(_, part)| disabled != Some(std::ptr::from_ref(*part).cast()))
+        .map(|(order, part)| ("part", (0, order), part))
+}
+fn part_slot<'a, P: ?Sized>(parts: &'a [&'a P], slot: (usize, usize)) -> Option<&'a [&'a P]> {
+    match slot {
+        (0, order) => parts.get(order).map(std::slice::from_ref),
+        _ => None,
+    }
+}
 
 #[test]
 fn a_disabled_owner_answers_only_at_its_dispatch_position() {
@@ -532,7 +586,7 @@ fn a_disabled_owner_answers_only_at_its_dispatch_position() {
         }
         fn use_without_item(
             &self,
-            _: &mut dyn ServerHost,
+            _: HostSide<'_>,
             _: &mut UseWithoutItemEvent<'_>,
         ) -> Option<InteractionResult> {
             self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -558,7 +612,7 @@ fn a_disabled_owner_answers_only_at_its_dispatch_position() {
         });
         let mut answer = None;
         dispatch_use_without_item(
-            &mut TestHost,
+            HostSide::Server(&mut TestHost),
             BlockState::new(BlockKey::Test, 0),
             &BlockClick(&()),
             &mut answer,
@@ -717,6 +771,7 @@ impl BlockEntityPart for Mod {
     fn block_entity_submit(&self, _: &dyn ClientHost, event: &mut BlockEntitySubmitEvent<'_>) {
         assert_eq!(event.pos, [1, 2, 3]);
         assert_eq!(event.block, "example:machine");
+        assert_eq!(event.entity.id(), "example:subject");
         event.draw.mark(self.id);
     }
 }
@@ -770,8 +825,8 @@ impl ItemPart for Mod {
     fn item_subscribed(&self) -> &'static [Option<HookId>] {
         &[]
     }
-    fn tooltip(&self, _: &dyn ClientHost, event: &mut TooltipEvent<'_>) {
-        event.lines.push((Text, self.id));
+    fn tooltip(&self, _: &dyn ClientHost, event: &mut TooltipEvent<'_, '_>) {
+        event.lines.push((Text, self.id)).unwrap();
     }
     fn use_on(&self, _: HostSide<'_>, _: &mut UseOnEvent<'_>) -> Option<InteractionResult> {
         self.calls.lock().unwrap().push(self.id);
@@ -829,9 +884,16 @@ impl Hooks for Mod {
     fn level_tick_pre(&self, _: HostSide, _: &mut LevelTickPreEvent) {
         self.calls.lock().unwrap().push(self.id);
     }
-    fn zoom(&self, _: &dyn ClientHost, _: &mut ZoomEvent) -> Option<Zoom> {
+    fn prepare_item_craft(
+        &self,
+        _: &mut dyn ServerHost,
+        _: &mut PrepareItemCraftEvent<'_>,
+    ) -> Option<ItemStack> {
         self.calls.lock().unwrap().push(self.id);
-        Some(Zoom(self.id))
+        Some(ItemStack {
+            item: "test:crafted".into(),
+            count: self.id,
+        })
     }
     fn living_incoming_damage(
         &self,
@@ -853,17 +915,24 @@ fn part(id: u32, calls: &Arc<Mutex<Vec<u32>>>) -> &'static Mod {
     })
 }
 
+// The vocabulary's own list type, so a list hook's fixture drives the real journal; the
+// fixtures use only part of it.
+#[allow(dead_code)]
+mod hook_list {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../sunrise-mod-vocab/src/hook_list.rs"
+    ));
+}
 mod stubs {
     pub(super) use super::generated::mod_api::LivingRef;
+    pub(super) use super::hook_list::{HookList, HookListJournal, HookListStorage};
     pub(super) use crate::tests::mod_api::mod_api::DamageContainer;
 }
 mod crate_root {
     // Dispatch fixtures isolate ordering; the vocabulary's own tests cover what the client
     // validators refuse. One module for every client hook's validator.
     mod client {
-        pub(crate) mod render_pipeline {
-            pub(crate) fn validate_render_pipelines<T>(_: &str, _: &[T], _: &mut Vec<T>) {}
-        }
         pub(crate) mod hud_layout {
             pub(crate) fn validate_hotbar_attack_indicator_progress(
                 _: &f32,

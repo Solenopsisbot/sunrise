@@ -224,6 +224,16 @@ impl Renderer {
         )
     }
 
+    /// Device-derived vertex and index byte capacities for the combined entity batch.
+    pub fn entity_quad_capacity(&self) -> EntityQuadCapacity {
+        EntityQuadCapacity::from_limits(&self.device.limits(), self.entity_skin.is_some())
+    }
+
+    /// Whether frame generation is enabled (duplicating first-person hand geometry in the batch).
+    pub fn frame_generation_on(&self) -> bool {
+        self.frame_gen.on
+    }
+
     pub(super) fn finish_prepared_frame(&mut self) {
         prepared_model::finish_staged(&mut self.prepared_draws);
         self.prepared_cuts.clear();

@@ -1,13 +1,15 @@
 //! A player's statistics and recipe book for native server mods, through a
 //! `PlayerRef` (docs/modding/src/how-to/native-mods.md): `ServerStatsCounter` and
-//! `ServerRecipeBook`. Reads return None for a stale handle or a player who
-//! isn't online here. Writes return false (or None) for those, for a dead
-//! player, and, inside another player's turn, for anyone but that player.
+//! `ServerRecipeBook`. Scalar reads return None for a stale or absent player;
+//! a book visit reports a typed refusal. Writes return false (or None) for
+//! those players, for a dead player, and for anyone but the acting player
+//! during a player turn.
 use super::{
     Game, lan_actions::CombatPlayer, native_server::PlayerRead, stats::Stats,
     transactions::DeferredEffect,
 };
-use mod_api::{PlayerRef, StatType};
+use core::ops::ControlFlow;
+use mod_api::{EntityReadError, PlayerRef, StatType};
 use sunrise_gameplay::stats::StatValues;
 
 use super::native_namespaced_id::namespaced;
@@ -165,17 +167,23 @@ impl Game<'_> {
             None => self.level.recipe_book.recipes.contains(&id),
         })
     }
-    /// Every recipe the player's recipe book knows (`ServerRecipeBook.recipes`), qualified ids in
-    /// order. None for a player it can't reach.
-    pub(super) fn player_discovered_recipes(&self, player: PlayerRef) -> Option<Vec<String>> {
-        if !self.native_player_current(player) {
-            return None;
+    /// Visits the player's qualified recipe ids in the resident book's order (`ServerRecipeBook.known`).
+    pub(super) fn player_visit_discovered_recipes(
+        &self,
+        player: PlayerRef,
+        visit: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, EntityReadError> {
+        if !self.is_logical_server() {
+            return Err(EntityReadError::Unavailable);
         }
-        let book = match self.native_player_resting(player) {
-            Some(g) => &g.recipe_book.recipes,
-            None => &self.level.recipe_book.recipes,
+        let book = match self
+            .player_handle_read(player)
+            .ok_or(EntityReadError::Stale)?
+        {
+            PlayerRead::Guest(guest) => &guest.recipe_book.recipes,
+            PlayerRead::Acting { .. } => &self.level.recipe_book.recipes,
         };
-        Some(book.iter().cloned().collect())
+        Ok(book.iter().map(String::as_str).try_for_each(visit))
     }
     /// `ServerPlayer.awardRecipes`, as `/recipe give` does: the recipes
     /// unlock in the player's book, with their toasts and the
@@ -229,6 +237,7 @@ mod tests {
         native_entity_refs::tests::{fixture_root, run_fresh_cases, with_game},
         native_guest_turn_tests::with_guests,
     };
+    use super::*;
     use mod_api::{Flow, Hooks, PlayerStatAwardEvent, ServerHost, StatType};
     use std::sync::{
         Arc,
@@ -510,19 +519,46 @@ mod tests {
                 game.player_has_discovered_recipe(player, "minecraft:diamond_pickaxe"),
                 Some(false)
             );
+            let mut recipes = Vec::new();
             assert_eq!(
-                game.player_discovered_recipes(player),
-                Some(vec!["minecraft:stick".to_string()])
+                player.visit_discovered_recipes(game, &mut |id| {
+                    recipes.push(id.to_owned());
+                    ControlFlow::Continue(())
+                }),
+                Ok(ControlFlow::Continue(()))
             );
-            // In the guest's turn their state is in the game.
+            assert_eq!(recipes, ["minecraft:stick"]);
+            // In the guest's turn their state is in the game, not merged with the resting book.
+            game.level.recipe_book.recipes.clear();
             game.lan_acting_uuid = Some(123);
             game.lan_acting_entity = Some(20);
             assert_eq!(jump(game), Some(3));
+            assert_eq!(
+                player.visit_discovered_recipes(game, &mut |_| panic!("empty acting book")),
+                Ok(ControlFlow::Continue(()))
+            );
+            let book = &mut game.level.recipe_book.recipes;
+            book.insert("minecraft:torch".into());
+            book.insert("minecraft:oak_planks".into());
+            let mut first = Vec::new();
+            assert_eq!(
+                player.visit_discovered_recipes(game, &mut |id| {
+                    first.push(id.to_owned());
+                    ControlFlow::Break(())
+                }),
+                Ok(ControlFlow::Break(()))
+            );
+            assert_eq!(first, ["minecraft:oak_planks"]);
             game.lan_acting_uuid = None;
             game.lan_acting_entity = None;
             // A guest without play state yet has counted nothing.
             game.lan.as_mut().unwrap().play.remove(&1);
             assert_eq!(jump(game), Some(0));
+            game.lan.as_mut().unwrap().hub.guests.remove(0);
+            assert_eq!(
+                player.visit_discovered_recipes(game, &mut |_| panic!("stale player")),
+                Err(EntityReadError::Stale)
+            );
         });
     }
 }

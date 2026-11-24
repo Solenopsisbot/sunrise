@@ -177,7 +177,7 @@ impl Hooks for Probe {
             .lock()
             .unwrap()
             .source("incoming", event.entity, event.source);
-        let item_id = |stack: Option<&mod_api::ItemStack>| {
+        let item_id = |stack: Option<&mod_api::ItemStackView<'_>>| {
             stack.and_then(|s| mod_api::__private::item_key_id(s.item()).map(str::to_owned))
         };
         let direct = item_id(event.weapon);
@@ -492,6 +492,7 @@ struct DeathOrder {
     cancel: std::sync::atomic::AtomicBool,
     revive: std::sync::atomic::AtomicBool,
     clear_cooldown: bool,
+    refuse_main_protection: bool,
     dry_out_velocity: Mutex<Option<[f64; 3]>>,
 }
 
@@ -538,7 +539,11 @@ impl Hooks for DeathProbe {
             .lock()
             .unwrap()
             .push(("totem", i64::from(event.entity)));
-        mod_api::Flow::Continue
+        if self.0.refuse_main_protection && event.hand == mod_api::Hand::Main {
+            mod_api::Flow::Cancel
+        } else {
+            mod_api::Flow::Continue
+        }
     }
     fn living_death_post(
         &self,
@@ -1116,21 +1121,21 @@ struct PufferfishProbe {
 
 fn active_poison(host: &dyn mod_api::ServerHost, victim: mod_api::LivingRef) -> Vec<(i32, i32)> {
     let poison = host.effect_key("minecraft:poison").unwrap();
-    victim
-        .effects(host)
-        .unwrap()
-        .into_iter()
-        .filter(|effect| effect.id == poison)
-        .map(|effect| (effect.duration, effect.amplifier))
-        .collect()
+    let mut effects = Vec::new();
+    assert_eq!(
+        victim.visit_effects(host, &mut |effect| {
+            if effect.id == poison {
+                effects.push((effect.duration, effect.amplifier));
+            }
+            core::ops::ControlFlow::Continue(())
+        }),
+        Ok(core::ops::ControlFlow::Continue(()))
+    );
+    effects
 }
 
 #[mod_api::__subscriptions]
 impl Hooks for PufferfishProbe {
-    fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
-        r.entity_tick_each("minecraft:pufferfish");
-    }
-
     fn living_incoming_damage(
         &self,
         _: &mut dyn HitHost,
@@ -1176,20 +1181,12 @@ impl Hooks for PufferfishProbe {
         }
     }
 
-    fn entity_tick_listened(
-        &self,
-        _: mod_api::HostSide<'_>,
-        event: &mut mod_api::EntityTickListenedEvent,
-    ) {
-        event.listened = true;
-    }
-
     fn entity_tick_post(
         &self,
         host: mod_api::HostSide<'_>,
         event: &mut mod_api::EntityTickPostEvent<'_>,
     ) {
-        if event.entities == [self.fish]
+        if event.entity == self.fish
             && let mod_api::HostSide::Server(host) = host
         {
             let victim = host.living(host.entity(self.first).unwrap()).unwrap();
@@ -1608,7 +1605,10 @@ fn borrowed_mod_effect_posts_before_the_next_action() {
 #[ignore = "daily"]
 fn guest_protection_consumes_the_item_and_posts_inside_the_hit() {
     use crate::game::native_player_death::tests::add_guest;
-    let trace = Arc::new(DeathOrder::default());
+    let trace = Arc::new(DeathOrder {
+        refuse_main_protection: true,
+        ..Default::default()
+    });
     let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
         "death-order",
         Box::new(DeathProbe(trace.clone())),
@@ -1617,21 +1617,31 @@ fn guest_protection_consumes_the_item_and_posts_inside_the_hit() {
     mod_platform::testing::with_mods(mods, || {
         with_game(|game| {
             add_guest(game);
+            let main = ItemStack::new("minecraft:totem_of_undying", 1);
+            let mut off = ItemStack::new("minecraft:stick", 2);
+            off.data_mut().set_other(
+                "minecraft:death_protection",
+                Some(sunrise_core::nbt::Tag::compound(
+                    [] as [(&str, sunrise_core::nbt::Tag); 0]
+                )),
+            );
             game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
                 guest.load_timeout = 0;
-                guest.inventory[guest.selected] =
-                    Some(ItemStack::new("minecraft:totem_of_undying", 1));
+                guest.inventory[guest.selected] = Some(main.clone());
+                guest.offhand = Some(off);
             });
             let entity = i64::from(game.lan.as_ref().unwrap().hub.guests[0].entity_id);
             game.guest_struck_by(1, |game| {
                 assert!(game.hurt_player_from(100.0, None, "minecraft:generic", Some(None), false));
-                assert!(game.inventory[game.selected].is_none());
+                assert_eq!(game.inventory[game.selected].as_ref(), Some(&main));
+                assert_eq!(game.offhand.as_ref().unwrap().count, 1);
                 assert_eq!(game.player.as_ref().unwrap().health.health(), 1.0);
                 assert_eq!(
                     *trace.heard.lock().unwrap(),
                     [
                         ("incoming", entity),
                         ("pre", entity),
+                        ("totem", entity),
                         ("totem", entity),
                         ("post", entity)
                     ]
@@ -1760,20 +1770,12 @@ impl Hooks for MobLandingProbe {
         }
     }
 
-    fn entity_tick_listened(
-        &self,
-        _: mod_api::HostSide<'_>,
-        event: &mut mod_api::EntityTickListenedEvent,
-    ) {
-        event.listened = true;
-    }
-
     fn entity_tick_post(
         &self,
         host: mod_api::HostSide<'_>,
         event: &mut mod_api::EntityTickPostEvent<'_>,
     ) {
-        if event.entities.contains(&self.id)
+        if event.entity == self.id
             && let mod_api::HostSide::Server(host) = host
         {
             let entity = host.entity(self.id).unwrap();
@@ -1861,8 +1863,9 @@ fn borrowed_mob_landing_posts_before_the_travel_tail() {
                     Some([0.0, -0.5, 0.0]),
                 ),
                 MobLandingMoment::Post,
-                MobLandingMoment::NextHit,
+                // The pig's EntityTickEvent.Post closes its own turn, before the next mob's.
                 MobLandingMoment::TickFinished(Some(mod_api::Tag::Double(0))),
+                MobLandingMoment::NextHit,
             ]);
             assert_eq!(*trace.lock().unwrap(), expected);
             let pig = &game.mobs[0];
@@ -2398,9 +2401,10 @@ fn arrow_hits_name_the_projectile_on_players_mobs_and_the_dragon() {
 
     for (target, owner, gone, entity, causing) in [
         (Who::Player, Some(Who::Mob(42)), false, 7, 42),
-        (Who::Player, None, false, 7, 0),
+        // AbstractArrow.onHitEntity: an ownerless arrow causes its own hit.
+        (Who::Player, None, false, 7, 912),
         (Who::Mob(43), Some(Who::Player), false, 43, 7),
-        (Who::Mob(43), None, false, 43, 0),
+        (Who::Mob(43), None, false, 43, 912),
         (Who::Mob(SPECIAL), Some(Who::Player), false, 44, 7),
         (Who::Mob(43), Some(Who::Mob(42)), true, 43, 42),
     ] {

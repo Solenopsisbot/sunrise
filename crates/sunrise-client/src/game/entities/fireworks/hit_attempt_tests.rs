@@ -238,6 +238,9 @@ fn remaining_hit_callers_observe_refusals_and_zero_damage() {
             .unwrap();
             let (guest, _packets) = crate::game::native_sound_refs::tests::guest(88, 88, [0.0; 3]);
             game.lan.as_mut().unwrap().hub.guests.push(guest);
+            // The egg hits above may hatch chicks (`ThrownEgg.onHit`, drawn from the level's
+            // random); they would be splash targets too, so only the guest stays near the blast.
+            game.mobs.clear();
             for dead in [true, false] {
                 fresh_player(game, GameMode::Spectator); // excluded from splash
                 let mut body = Box::new(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());

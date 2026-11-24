@@ -55,7 +55,7 @@ fn structure_biome_checks_read_the_region_at_their_own_quart() {
             &settings,
             true,
             Some((-64, 384)),
-            Some(&layout),
+            Some(BiomeOverride::Regions(&layout)),
         )
         .expect("pipeline"),
     );
@@ -65,7 +65,10 @@ fn structure_biome_checks_read_the_region_at_their_own_quart() {
         mod_biome_keys: Default::default(),
     };
     let mut worker = generator.worker();
-    assert!(matches!(pipeline.source, ResolvedBiomeSource::Regions(_)));
+    assert!(matches!(
+        pipeline.source.as_ref(),
+        ResolvedBiomeSource::Regions(_)
+    ));
     let id = |biome| pipeline.data.biome_id(biome).expect("vanilla biome");
     // Seed 12345, cell 4, weights [0, 1, 1]: independently calculated border quarts.
     for (x, expected, other) in [

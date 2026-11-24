@@ -215,6 +215,10 @@ impl Clouds {
     }
 }
 
+fn identity_matrix() -> [f32; 16] {
+    Mat4::IDENTITY.to_cols_array()
+}
+
 fn default_cloud_height() -> f32 {
     crate::clouds::CLOUD_HEIGHT
 }
@@ -225,6 +229,8 @@ pub struct FrameInputs {
     pub camera: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
+    #[serde(default)]
+    pub roll: f32,
     pub fov_degrees: f32,
     #[serde(default)]
     pub cull_fov_degrees: Option<f32>,
@@ -232,6 +238,8 @@ pub struct FrameInputs {
     pub eye_rotation: [f32; 2],
     pub first_person: bool,
     pub bob: [f32; 16],
+    #[serde(default = "identity_matrix")]
+    pub view_transform: [f32; 16],
     pub spin: [f32; 16],
     pub sky: Sky,
     pub distance: f32,
@@ -242,6 +250,7 @@ pub struct FrameInputs {
     pub underwater: bool,
     pub water_plane: Option<f32>,
     pub cave_culling: bool,
+    pub sky_pass: bool,
     pub sky_blocked: bool,
     pub skybox: bool,
     pub end_sky: bool,
@@ -470,12 +479,14 @@ impl FrameInputs {
             camera: frame.camera.to_array(),
             yaw: frame.yaw,
             pitch: frame.pitch,
+            roll: frame.roll,
             fov_degrees: frame.fov_degrees,
             cull_fov_degrees: Some(frame.cull_fov_degrees),
             eye: frame.eye.to_array(),
             eye_rotation: frame.eye_rotation,
             first_person: frame.first_person,
             bob: frame.bob.to_cols_array(),
+            view_transform: frame.view_transform.to_cols_array(),
             spin: frame.spin.to_cols_array(),
             sky: frame.sky,
             distance: frame.distance,
@@ -485,6 +496,7 @@ impl FrameInputs {
             underwater: frame.underwater,
             water_plane: frame.water_plane,
             cave_culling: frame.cave_culling,
+            sky_pass: frame.sky_pass,
             sky_blocked: frame.sky_blocked,
             skybox: frame.skybox,
             end_sky: frame.end_sky,
@@ -524,12 +536,14 @@ impl FrameInputs {
             camera: DVec3::from_array(f.camera),
             yaw: f.yaw,
             pitch: f.pitch,
+            roll: f.roll,
             fov_degrees: f.fov_degrees,
             cull_fov_degrees: f.cull_fov_degrees.unwrap_or(f.fov_degrees),
             eye: DVec3::from_array(f.eye),
             eye_rotation: f.eye_rotation,
             first_person: f.first_person,
             bob: Mat4::from_cols_array(&f.bob),
+            view_transform: Mat4::from_cols_array(&f.view_transform),
             spin: Mat4::from_cols_array(&f.spin),
             sky: f.sky,
             shadow_scene_revision: (0, 0),
@@ -542,6 +556,7 @@ impl FrameInputs {
             water_plane: f.water_plane,
             cave_culling: f.cave_culling,
             title: false,
+            sky_pass: f.sky_pass,
             sky_blocked: f.sky_blocked,
             skybox: f.skybox,
             end_sky: f.end_sky,

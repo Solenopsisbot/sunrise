@@ -1,5 +1,4 @@
 //! The `state_for_placement` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0089
 
 pub trait Hooks {
     /// Choose a block's placement candidate (`Block.getStateForPlacement(BlockPlaceContext)`),

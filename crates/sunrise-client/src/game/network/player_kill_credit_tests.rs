@@ -612,6 +612,7 @@ fn a_victim_advancement_matches_the_displaced_killers_facts() {
                     }
                 }
             }] }).into(),
+            player: None,
         }],
         requirements: vec![vec!["killed".into()]],
         rewards: Rewards::default(),

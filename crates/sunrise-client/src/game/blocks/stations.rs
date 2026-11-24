@@ -1087,7 +1087,7 @@ impl Game<'_> {
             f64::from(pos[1]) + 0.5,
             f64::from(pos[2]) + 0.5,
         ];
-        self.audio.play(sound, Some(at), volume, pitch);
+        self.play_audio(sound, Some(at), volume, pitch);
     }
     pub(super) fn give_or_drop(&mut self, stack: ItemStack) {
         if let Some(rest) = self.add_stack_to_inventory(stack)
@@ -1107,7 +1107,6 @@ impl Game<'_> {
     /// or cancel the levels, and every fifth level gained plays the level-up sound
     /// (at most every 100 ticks).
     pub(super) fn add_experience_levels(&mut self, mut levels: i32) {
-        // ServerPlayer.giveExperienceLevels
         if levels == 0 {
             return;
         }
@@ -1124,22 +1123,32 @@ impl Game<'_> {
         let level = self.experience.level;
         self.play_level_up(levels, level);
     }
-    /// `Player.onEnchantmentPerformed`: the cost leaves the level directly, not
-    /// through `giveExperienceLevels`, and the mods hear of the level change.
+    /// NeoForge's `Player.onEnchantmentPerformed` delegates the debit to
+    /// `giveExperienceLevels`; the separate enchantment seed update still follows.
     pub(super) fn enchantment_performed(&mut self, cost: i32) {
-        let old_level = self.experience.level;
-        self.experience.add_levels(-cost);
-        self.native_player_level_changed(old_level);
+        self.give_levels(-cost);
     }
     /// `Player.giveExperienceLevels`: all players near its feet hear the sound.
     pub(super) fn play_level_up(&mut self, amount: i32, level: i32) {
-        if let Some(volume) = self.level_up_sound.give_levels(amount, level) {
-            let at = self
-                .player
-                .as_ref()
-                .map(|p| [p.position.x, p.position.y, p.position.z]);
-            self.audio
-                .play("minecraft:entity.player.levelup", at, volume, 1.0);
+        let Some(volume) = self.level_up_sound.give_levels(amount, level) else {
+            return;
+        };
+        let event = "minecraft:entity.player.levelup";
+        let at = self
+            .player
+            .as_ref()
+            .map(|p| [p.position.x, p.position.y, p.position.z]);
+        if let (Some(host), Some(at)) = (self.lan.as_ref(), at) {
+            // A native write can borrow a guest's body without swapping in their level.
+            let dimension = self
+                .lan_acting
+                .and_then(|conn| host.hub.guest(conn))
+                .map_or(self.dim, |guest| super::Dim::from_id(&guest.dimension));
+            let sound = super::level_sounds::LevelSound::new(event, at, volume, 1.0)
+                .in_source(mod_api::SoundSource::Players);
+            let _ = self.queue_level_sound(dimension.id(), sound, None);
+        } else {
+            self.play_audio(event, at, volume, 1.0);
         }
     }
     /// Whether the result slot may be taken (`mayPickup`).
@@ -1356,8 +1365,7 @@ impl Game<'_> {
                 Some(*flag)
             });
             if taken {
-                self.audio
-                    .play("minecraft:ui.stonecutter.select_recipe", None, 1.0, 1.0);
+                self.play_audio("minecraft:ui.stonecutter.select_recipe", None, 1.0, 1.0);
                 self.remote_station_button(index as i32);
                 return true;
             }
@@ -1843,6 +1851,7 @@ impl Game<'_> {
         if let Some(text) = sunrise_client::item_tooltip::bees_line(stack, &display, &translate) {
             push(&mut lines, text, gray);
         }
+        details.start("minecraft:container_loot", lines.len());
         details.start("minecraft:container", lines.len());
         // ItemContainerContents.addToTooltip.
         if display.shows("minecraft:container") {
@@ -1866,6 +1875,7 @@ impl Game<'_> {
                 );
             }
         }
+        details.start("minecraft:pot_decorations", lines.len());
         details.start("minecraft:written_book_content", lines.len());
         // WrittenBookContent.addToTooltip.
         for text in sunrise_client::item_tooltip::written_book_lines(stack, &display, &translate) {
@@ -1916,9 +1926,15 @@ impl Game<'_> {
                 }
             }
         }
+        // Fireworks and FireworkExplosion.addToTooltip.
+        let (fireworks, explosion) =
+            sunrise_client::item_tooltip::firework_component_lines(stack, &translate);
         details.start("minecraft:fireworks", lines.len());
-        // Fireworks / FireworkExplosion.addToTooltip.
-        for text in sunrise_client::item_tooltip::firework_lines(stack, &translate) {
+        for text in fireworks {
+            push(&mut lines, text, rgba(170, 170, 170, 255));
+        }
+        details.start("minecraft:firework_explosion", lines.len());
+        for text in explosion {
             push(&mut lines, text, rgba(170, 170, 170, 255));
         }
         details.start("minecraft:potion_contents", lines.len());
@@ -1994,6 +2010,7 @@ impl Game<'_> {
             let text = sunrise_client::text::Text::legacy(&text);
             lines.push((if italic { text.italic() } else { text }, gray));
         }
+        details.start("minecraft:profile", lines.len());
         details.start("minecraft:lore", lines.len());
         // ItemLore.addToTooltip: after the enchantments, before the attributes
         // (ItemStack.addDetailsToTooltip).
@@ -2002,6 +2019,7 @@ impl Game<'_> {
                 lines.push((text, u32::MAX));
             }
         }
+        details.start("minecraft:sulfur_cube_content", lines.len());
         details.start("minecraft:attribute_modifiers", lines.len());
         let attributes_shown = display.shows("minecraft:attribute_modifiers");
         let (modifier_lines, added) = self.stack_attribute_tooltip(
@@ -2016,6 +2034,7 @@ impl Game<'_> {
             push(&mut lines, text, c);
         }
         lines.extend(added);
+        details.start("minecraft:intangible_projectile", lines.len());
         details.start("minecraft:unbreakable", lines.len());
         // ItemStack.UNBREAKABLE_TOOLTIP.
         if let Some(text) =
@@ -2023,6 +2042,8 @@ impl Game<'_> {
         {
             push(&mut lines, text, rgba(85, 85, 255, 255));
         }
+        details.start("minecraft:sign_text_front", lines.len());
+        details.start("minecraft:sign_text_back", lines.len());
         details.start("minecraft:ominous_bottle_amplifier", lines.len());
         // OminousBottleAmplifier.addToTooltip.
         if let Some((text, c)) =
@@ -2090,24 +2111,28 @@ impl Game<'_> {
         // AdventureModePredicate.addToTooltip under its header, for
         // can_break and then can_place_on. A block tag's blocks are listed by
         // id, as this side keeps tags unordered.
-        for (text, c) in sunrise_client::item_tooltip::adventure_lines(
-            stack,
-            &display,
-            &|tag| {
-                let mut blocks: Vec<String> = self
-                    .items()
-                    .block_tags
-                    .get(tag)
-                    .map(|s| s.iter().cloned().collect())
-                    .unwrap_or_default();
-                blocks.sort();
-                blocks
-            },
-            &translate,
-        ) {
-            push(&mut lines, text, c);
+        for component in ["minecraft:can_break", "minecraft:can_place_on"] {
+            details.start(component, lines.len());
+            for (text, c) in sunrise_client::item_tooltip::adventure_lines(
+                stack,
+                component,
+                &display,
+                &|tag| {
+                    let mut blocks: Vec<String> = self
+                        .items()
+                        .block_tags
+                        .get(tag)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    blocks.sort();
+                    blocks
+                },
+                &translate,
+            ) {
+                push(&mut lines, text, c);
+            }
         }
-        details.end(lines.len());
+        details.start("minecraft:damage", lines.len());
         if display.shows("minecraft:damage")
             && let Some(info) = item_info
             && info.max_damage > 0
@@ -2128,6 +2153,7 @@ impl Game<'_> {
                 u32::MAX,
             ));
         }
+        details.end(lines.len());
         // ItemStack.addDetailsToTooltipTail: with advanced tooltips the item id
         // and how many components the stack has.
         if advanced {
@@ -2176,7 +2202,7 @@ impl Game<'_> {
                 ));
             }
         }
-        // RegisterTooltipAppendersEvent: each registered appender's lines, where its placement puts them.
+        // ItemTooltipHandler: each registered appender's lines, in the sorted order.
         if !appenders.is_empty() {
             sunrise_client::item_tooltip::add_appender_lines(
                 &mut lines,
@@ -2197,7 +2223,7 @@ impl Game<'_> {
                 },
                 appenders
                     .iter()
-                    .map(|p| (p.component(), p.placement(), p.enabled(), p.appender())),
+                    .map(|p| (p.component(), p.slot(), p.enabled(), p.appender())),
             );
         }
         // ItemTooltipEvent, once the tooltip vanilla shows is complete.
@@ -2300,7 +2326,11 @@ impl Game<'_> {
     ) {
         let (mut background, mut border_top, mut border_bottom) =
             (0xf0100010, 0x505000ff, 0x5028007f);
-        let mut texture = None;
+        // `itemStack.get(DataComponents.TOOLTIP_STYLE)`, the style the hook starts from.
+        let mut texture = stack
+            .and_then(|s| s.data())
+            .and_then(|d| sunrise_client::save::text(d.other("minecraft:tooltip_style")))
+            .and_then(|style| mod_api::Identifier::parse(&style).ok());
         self.native_render_tooltip_texture(
             stack,
             &mut texture,
@@ -2556,27 +2586,44 @@ impl Game<'_> {
         );
         let started = was_idle && b.brew_time > 0;
         let ingredient = started.then(|| b.ingredient.clone()).flatten();
-        let hooked = !mod_api::__private::mods().is_empty();
-        let stacks = (due && hooked).then(|| b.items.clone());
         let at = [pos.0, pos.1, pos.2];
-        let mut post = false;
         if due {
-            // `doBrew`, with PotionBrewEvent.Pre before it and .Post after.
-            let asked = stacks.map(|mut stacks| {
+            let pre = mod_api::__private::listened(mod_api::HookId::PotionBrewPre)
+                .then(|| b.items.clone());
+            let replacement = pre.and_then(|mut stacks| {
                 let mut cancel = false;
                 self.native_potion_brew_pre(at, &mut stacks, &mut cancel);
-                (stacks, cancel)
+                cancel.then_some(stacks)
             });
-            // A cancelled Pre fires Post itself, with the slots the mods left.
-            let cancelled = matches!(asked, Some((_, true)));
-            let rest = self.brewing_ingredient_remainder(pos, cancelled);
             let Some(BlockEntity::Brewing(b)) = self.world.block_entities.get_mut(&pos) else {
                 return Ok(());
             };
-            let brewing = &world_stations!(self).brewing;
-            b.brew_after_pre(asked, brewing, &|_| rest.clone(), &mut out);
+            // `EventHooks.onPotionAttemptBrew` still posts after cancellation
+            // if any slot matches its prior value. Otherwise `doBrew` posts
+            // after replacing the bottles, with the captured ingredient intact.
+            let (ingredient, post) = if let Some(stacks) = replacement {
+                let post = b.items.iter().zip(&stacks).any(|(old, new)| old == new);
+                b.items = stacks;
+                (None, post)
+            } else {
+                let ingredient = b.brew_bottles(&world_stations!(self).brewing);
+                let post = ingredient.is_some();
+                (ingredient, post)
+            };
+            if post && mod_api::__private::listened(mod_api::HookId::PotionBrewPost) {
+                let mut stacks = b.items.clone();
+                self.native_potion_brew_post(at, &mut stacks);
+                if let Some(BlockEntity::Brewing(b)) = self.world.block_entities.get_mut(&pos) {
+                    b.items = stacks;
+                }
+            }
+            if let Some(ingredient) = ingredient {
+                let rest = self.crafting_remainder(&ingredient);
+                if let Some(BlockEntity::Brewing(b)) = self.world.block_entities.get_mut(&pos) {
+                    b.finish_brew(ingredient, rest, &mut out);
+                }
+            }
             self.world.modified.insert((pos.0 >> 4, pos.2 >> 4));
-            post = hooked && (out.brewed || cancelled);
         }
         if out.fuel_taken
             && let Some(item) = fuel_item
@@ -2597,17 +2644,7 @@ impl Game<'_> {
             self.drop_item_stack_containers(at, d);
         }
         if out.brewed {
-            self.native_brewing_complete(at);
             self.play_at("minecraft:block.brewing_stand.brew", at, 1.0, 1.0);
-        }
-        // PotionBrewEvent.Post ends `doBrew`, after its sound and the
-        // ingredient's remainder; the bottles' block state follows it.
-        if post && let Some(BlockEntity::Brewing(b)) = self.world.block_entities.get(&pos) {
-            let mut stacks = b.items.clone();
-            self.native_potion_brew_post(at, &mut stacks);
-            if let Some(BlockEntity::Brewing(b)) = self.world.block_entities.get_mut(&pos) {
-                b.items = stacks;
-            }
         }
         let Some(BlockEntity::Brewing(b)) = self.world.block_entities.get_mut(&pos) else {
             return Ok(());
@@ -3104,11 +3141,12 @@ mod tests {
         struct Part(Arc<Mutex<Vec<TooltipAppendContext>>>);
         #[mod_api::sunrise_part]
         impl ItemPart for Part {
-            fn tooltip(&self, _: &dyn ClientHost, event: &mut TooltipEvent<'_>) {
+            fn tooltip(&self, _: &dyn ClientHost, event: &mut TooltipEvent<'_, '_>) {
                 self.0.lock().unwrap().push(*event.context);
                 event
                     .lines
-                    .push((mod_api::Text::literal("context"), u32::MAX));
+                    .push((mod_api::Text::literal("context"), u32::MAX))
+                    .unwrap();
             }
         }
         struct Mod(Part);
@@ -3240,9 +3278,12 @@ mod tests {
         struct Lore;
         #[mod_api::sunrise_part]
         impl ItemPart for Lore {
-            fn tooltip(&self, _: &dyn ClientHost, event: &mut TooltipEvent<'_>) {
+            fn tooltip(&self, _: &dyn ClientHost, event: &mut TooltipEvent<'_, '_>) {
                 assert!(event.lines.is_empty());
-                event.lines.push((mod_api::Text::literal("part"), u32::MAX));
+                event
+                    .lines
+                    .push((mod_api::Text::literal("part"), u32::MAX))
+                    .unwrap();
             }
         }
         struct Mod;

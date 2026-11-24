@@ -19,7 +19,7 @@ const VALUE: AttachmentType<i32> = AttachmentType {
         },
     }),
     copy_on_death: true,
-    sync: false,
+    sync_codec: None,
 };
 const OTHER: AttachmentType<i32> = AttachmentType {
     name: "other",
@@ -207,7 +207,7 @@ fn nested_player_turns_preserve_binding_and_rollback_whole_membership() {
             .attachment_slot(Holder::Player(112), AttachmentAccess::Existing)
             .unwrap()
             .clone();
-        let saved_nbt = saved.to_nbt();
+        let saved_nbt = saved.try_to_nbt().unwrap();
         let before = index
             .lock()
             .unwrap()
@@ -238,7 +238,7 @@ fn nested_player_turns_preserve_binding_and_rollback_whole_membership() {
         assert_eq!(rows(&index, "value"), [(112, 7), (113, 8)]);
         assert_eq!(rows(&index, "other"), [(112, 4)]);
         assert_eq!(VALUE.get_existing(&mut saved, Holder::Level), Ok(Some(7)));
-        assert_eq!(saved.to_nbt(), saved_nbt);
+        assert_eq!(saved.try_to_nbt().unwrap(), saved_nbt);
         assert_eq!(before[0].entry.read(&VALUE), Ok(&7));
         for binding in bindings {
             assert!(

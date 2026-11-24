@@ -1,11 +1,14 @@
 # Read and write the scoreboard
 
 A server mod reaches the world's scoreboard through objective handles, as it reaches a custom
-boss bar. `host.objective(name)` finds an objective, `host.objectives()` lists them,
-`host.add_objective(name, criteria, display_name, render_type)` adds one, and
+boss bar. `host.objective(name)` finds an objective, `host.visit_objectives(&mut visit)`
+visits their handles, `host.add_objective(name, criteria, display_name, render_type)` adds one, and
 `display_slot_objective` and `set_display_slot` read and change what each display slot shows.
 The handle, an `ObjectiveRef`, reads and writes the rest: the criteria, display name, render
-type, number format, display slots and the scores.
+type, number format, display slots and the scores. An objective's `name(host)` and
+`criteria(host)` and a team's `name(host)` borrow `&str` from the board. Use
+`.map(str::to_owned)` only if the text needs to outlive the host borrow. `DisplaySlot::name()`
+returns the slot's static name.
 
 ```rust,ignore
 let kills = host.add_objective("kills", "dummy", Text::literal("Kills"), ObjectiveRenderType::Integer)?;
@@ -70,8 +73,38 @@ A score holder is a `ScoreHolder`:
 An objective's handle holds the world's open and an identity the board gave the objective when
 it was added. After the objective is removed (by `remove` or by `/scoreboard objectives remove`)
 the handle stays stale for good, also when an objective of the same name is added again: reads
-answer `None` or `ObjectiveError::Stale`, and writes change nothing. Ask the host for the
-objective by name again to get a handle to the new one.
+answer `None`, `ObjectiveError::Stale` or `ObjectiveReadError::Stale`, and writes change nothing.
+Ask the host for the objective by name again to get a handle to the new one.
+
+## Visit scores and slots
+
+`objective.visit_scores(host, &mut visit)` visits `ScoreEntry<'_>` rows in the board's holder
+order (vanilla leaves the order unspecified). Each row lends its holder key as `&str` and gives
+its `i32` value. Zero scores are included; a holder without a score has no row. The visit does not
+filter offline or hidden holders. To keep a row, copy the key inside the callback.
+For a later write, keep `ScoreHolder::Name(row.holder.to_owned())`.
+
+```rust,ignore
+use core::ops::ControlFlow::{Break, Continue};
+
+let mut first_match = None;
+let _ = kills.visit_scores(host, &mut |row| {
+    if row.value >= 5 {
+        first_match = Some((row.holder.to_owned(), row.value));
+        Break(())
+    } else {
+        Continue(())
+    }
+})?;
+```
+
+`objective.visit_slots(host, &mut visit)` visits the occupied slots for that objective in
+vanilla display-ID order. Both visits return `Ok(Break(()))` on an early stop or
+`Ok(Continue(()))` on completion, including an empty visit. A refused visit calls no visitor:
+`ObjectiveReadError::Stale` means the objective is gone, and `ObjectiveReadError::Unavailable`
+means the board cannot be read from this side or phase. The server-wide objective and team visits
+follow the same stop and completion convention; they return `ServerReadError::Unavailable` if
+the server scoreboard cannot be read.
 
 ## Writes
 
@@ -87,12 +120,10 @@ Inside `host.transaction` the writes apply at once, and an abort puts the board 
 when the transaction first wrote it. The board is copied once, when the first scoreboard write
 of the transaction happens, and not at all in a transaction that writes none.
 
-`scores()` lists in the board's own order. Vanilla's order is a hash map's, so do not rely on
-one.
-
 ## Teams
 
-`host.team(name)`, `host.teams()` and `host.add_team(name)` give `TeamRef` handles, and
+`host.team(name)` and `host.add_team(name)` give `TeamRef` handles.
+`host.visit_teams(&mut visit)` visits the board's resident team handles, and
 `host.holder_team(holder)` finds the team a holder is on. As an objective's, a team's handle holds
 an identity the board gave the team, so a removed team's handle stays stale after the same name is
 added again. A team name is any string; only a taken one is refused (`TeamError::NameTaken`).
@@ -141,8 +172,34 @@ objective's are.
 
 ## On a client
 
-`ClientHost::client_scoreboard()` is what this client has been sent: the objectives shown in a
-display slot, with their slots and scores, and every team, as plain values. The server does not
-send a team's death message visibility, so a client has none to read. A client has no handles and
-cannot write. A text with unrepresentable opaque metadata refuses the whole snapshot with its
-`TextFormError`; nothing is flattened or skipped.
+`host.client_scoreboard()` borrows the live board this client has received. `Ok(None)` means
+there is no logged-in client world, not that the board is empty. Handle
+`Err(ClientSessionReadError::Unavailable)` when the current phase or host cannot supply the read.
+
+Use `board.visit_objectives(&mut visit)` and `board.visit_teams(&mut visit)` to read the board in
+its resident order. Each objective is visited once even if it occupies several slots, or if it
+has just arrived and has no slot yet. Use `board.with_slot(slot, &mut visit)` to read just the
+objective in a slot; an empty slot returns `None` without calling the visitor. Objective, score
+and team views last for their callback only. The `visit_*` methods return `Break(())` if the
+visitor stops the traversal, and `Continue(())` if it completes, including an empty visit.
+
+```rust,ignore
+use core::ops::ControlFlow::Continue;
+
+let mut retained = Vec::new();
+if let Some(board) = host.client_scoreboard()? {
+    let _ = board.with_slot(DisplaySlot::Sidebar, &mut |objective| {
+        let _ = objective.visit_scores(&mut |row| {
+            retained.push((row.holder().to_owned(), row.value()));
+            Continue(())
+        });
+    });
+}
+```
+
+`visit_scores` includes sent `#` holder keys even though the sidebar does not draw them. Read names
+and scalars with `name()`, `holder()`, `value()` and the other view methods. To retain a name, copy
+it inside the callback. Use `copy_display_name()`, `copy_number_format()`, `copy_display()`,
+`copy_prefix()` or `copy_suffix()` only when needed; `TextFormError` refuses that copy, not the view
+or any other field. Client views have no handles or writes and expose only what the server sends,
+which does not include a team's death message visibility.

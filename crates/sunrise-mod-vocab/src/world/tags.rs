@@ -75,6 +75,16 @@ pub trait Tags {
     fn item_tag_names(&self) -> Option<Vec<Identifier>> {
         unimplemented!("Tags::item_tag_names")
     }
+    /// Whether `block` is in the current block tag (`BlockState.is(TagKey)`). An unknown tag
+    /// is false; unavailable authoritative tags or block mappings answer None.
+    fn block_in_tag(&self, _block: BlockKey, _tag: TagKey) -> Option<bool> {
+        unimplemented!("Tags::block_in_tag")
+    }
+    /// Whether `fluid` is in the current fluid tag (`FluidState.is(TagKey)`). An unknown tag
+    /// is false; unavailable authoritative tags or fluid mappings answer None.
+    fn fluid_in_tag(&self, _fluid: FluidKey, _tag: TagKey) -> Option<bool> {
+        unimplemented!("Tags::fluid_in_tag")
+    }
     /// Read the current item tag in vanilla's order, including unrequested vanilla items.
     fn items(&self, _tag: TagKey) -> TagMembers<ItemKey> {
         unimplemented!("Tags::items")

@@ -266,6 +266,90 @@ pub struct RenderedText {
     pub spans: Vec<Span>,
 }
 
+/// Reusable temporary text for laying out borrowed ranges of a styled component.
+/// Neither the borrowed source nor the canonical `Text` tree needs to be shortened at a break.
+#[derive(Default)]
+pub struct TextSpanScratch {
+    spans: Vec<Span>,
+    strings: Vec<String>,
+}
+
+impl TextSpanScratch {
+    pub const fn new() -> Self {
+        Self {
+            spans: Vec::new(),
+            strings: Vec::new(),
+        }
+    }
+
+    /// Resolve legacy codes in each borrowed range with its effective starting style. Temporarily
+    /// lend the result as flattened text, then reuse the same span and string storage.
+    pub fn with_resolved<'a, T>(
+        &mut self,
+        ranges: impl IntoIterator<Item = (&'a Span, &'a str, &'a Style)>,
+        visit: impl FnOnce(&Text) -> T,
+    ) -> T {
+        for (part, text, style) in ranges {
+            self.push_resolved(part.origin, text, style);
+        }
+        let text = Text::from_spans(std::mem::take(&mut self.spans));
+        let result = visit(&text);
+        self.spans = text.rendered.spans;
+        for mut span in self.spans.drain(..).rev() {
+            span.text.clear();
+            self.strings.push(span.text);
+        }
+        result
+    }
+
+    fn push_resolved(&mut self, origin: Origin, raw: &str, initial: &Style) {
+        let mut current = self.strings.pop().unwrap_or_default();
+        if !raw.contains('§') {
+            if !raw.is_empty() {
+                current.push_str(raw);
+                self.spans.push(Span {
+                    origin,
+                    text: current,
+                    style: initial.clone(),
+                });
+            } else if current.capacity() != 0 {
+                self.strings.push(current);
+            }
+            return;
+        }
+        let mut style = std::borrow::Cow::Borrowed(initial);
+        let mut chars = raw.chars();
+        while let Some(c) = chars.next() {
+            if c != '§' {
+                current.push(c);
+                continue;
+            }
+            let Some(code) = chars.next() else { break };
+            let next = legacy_format(&style, code, initial);
+            if next != *style {
+                if !current.is_empty() {
+                    self.spans.push(Span {
+                        origin,
+                        text: current,
+                        style: style.into_owned(),
+                    });
+                    current = self.strings.pop().unwrap_or_default();
+                }
+                style = std::borrow::Cow::Owned(next);
+            }
+        }
+        if !current.is_empty() {
+            self.spans.push(Span {
+                origin,
+                text: current,
+                style: style.into_owned(),
+            });
+        } else if current.capacity() != 0 {
+            self.strings.push(current);
+        }
+    }
+}
+
 /// An immutable component tree with per-node provenance and its rendered cache.
 /// Structured nodes retain their JSON and a private provenance index; flattened
 /// literal leaves use the spans themselves as their canonical tree. Both export
@@ -669,6 +753,31 @@ impl Text {
         self.refresh();
         self
     }
+    /// Replace raw component fields (wrapping a plain literal if needed) and
+    /// regenerate the rendered cache, as `MutableComponent.withStyle(UnaryOperator)`
+    /// does for `Entity.getDisplayName`. Nested components supplied as JSON are always remote.
+    pub fn set_component_fields(mut self, fields: Vec<(String, Value)>) -> Self {
+        let mut c = self.component();
+        if let Value::String(s) = c {
+            c = json!({ "text": s });
+        }
+        if let Value::Object(o) = &mut c {
+            for (k, v) in fields {
+                if k == "hover_event" {
+                    o.remove("hoverEvent");
+                }
+                if k == "click_event" {
+                    o.remove("clickEvent");
+                }
+                o.insert(k, v);
+            }
+        }
+        // Raw JSON fields are decoded input, even when attached to a local root.
+        std::sync::Arc::make_mut(&mut self.origins).remove("");
+        self.replace_component(c);
+        self.refresh();
+        self
+    }
     /// Replace the canonical component with decoded input. Every node is remote;
     /// serialized fields cannot grant provenance.
     pub fn with_component(self, component: Value) -> Self {
@@ -911,38 +1020,11 @@ impl Text {
         if !self.rendered.spans.iter().any(|s| s.text.contains('§')) {
             return self.clone();
         }
-        let mut out = Text::default();
+        let mut scratch = TextSpanScratch::default();
         for span in &self.rendered.spans {
-            let mut style = span.style.clone();
-            let mut current = String::new();
-            let mut chars = span.text.chars();
-            while let Some(c) = chars.next() {
-                if c != '§' {
-                    current.push(c);
-                    continue;
-                }
-                let Some(code) = chars.next() else { break };
-                let next = legacy_format(&style, code, &span.style);
-                if next != style {
-                    if !current.is_empty() {
-                        out.rendered.spans.push(Span {
-                            origin: span.origin,
-                            text: std::mem::take(&mut current),
-                            style: style.clone(),
-                        });
-                    }
-                    style = next;
-                }
-            }
-            if !current.is_empty() {
-                out.rendered.spans.push(Span {
-                    origin: span.origin,
-                    text: current,
-                    style,
-                });
-            }
+            scratch.push_resolved(span.origin, &span.text, &span.style);
         }
-        Self::from_spans(out.rendered.spans)
+        Self::from_spans(scratch.spans)
     }
     /// `resolve_legacy` borrowing `self` when no span holds a `§` code (the
     /// common case).

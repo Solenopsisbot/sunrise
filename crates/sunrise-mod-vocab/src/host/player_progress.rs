@@ -34,27 +34,29 @@ pub trait PlayerProgressBackendMut {
     /// chat line and rewards, as the game's own triggers award.
     ///
     /// The acting player is reached inside their hook; another live player
-    /// is reached in their own level, including during a guest's turn. An
-    /// outer player displaced by a nested turn is unavailable. `Ok(())`
-    /// means the player was reached, whether or not anything was granted.
-    /// A stale/offline/displaced handle, a remote client, or a `minecraft:`
-    /// trigger or empty id is refused with a typed reason.
+    /// is reached in their own level. An outer player displaced by a nested turn or a player
+    /// whose level could not be entered is unavailable. `Ok(())` means the player was reached,
+    /// whether or not anything was granted. A malformed
+    /// id is refused, as is an exact built-in trigger key (which uses its own event matcher).
+    /// A namespace by itself does not reserve a key.
     ///
-    /// `test` is lent to this call only. A failed test stops further testing
-    /// and reports `Test`; earlier matching criteria may already be granted.
+    /// `test` and the parsed conditions are borrowed for this call only. A failed test stops
+    /// further tests in this invocation; earlier matching criteria may already be granted.
+    /// A panic is logged and shown in an error toast; later invocations may lend another test.
     fn player_trigger_criterion(
         &mut self,
         player: PlayerRef,
         trigger: &Identifier,
-        test: Arc<dyn CriterionTest>,
+        test: &mut dyn CriterionTest,
     ) -> Result<(), TriggerCriterionError>;
     /// Side: server. Fires only `default_block_use`, without a tool.
     /// The engine fires `any_block_use` once when the enclosing block use consumes.
     /// It sees the hand after the use; a replacement stack is visible, unlike vanilla's original object.
     /// Evaluates vanilla predicates and rewards in the player's own level; never reads inventory.
-    /// `Ok(())` means reached, even if no criterion matched. Refuses remote clients
-    /// (`NotServer`), stale/offline/displaced players (`PlayerUnavailable`), and
-    /// unloaded positions (`UnloadedChunk`).
+    /// `Ok(())` means reached, even if no criterion matched. Refuses clients (`NotServer`) and
+    /// unreachable players or levels (`PlayerUnavailable`). The game resolves the event block
+    /// as vanilla does (`BlockUnavailable` on read failure); separate location predicates
+    /// check the chunks they need themselves.
     fn player_trigger_block_use(
         &mut self,
         player: PlayerRef,
@@ -67,9 +69,10 @@ pub trait PlayerProgressBackendMut {
     /// Call this helper only when the mod also intends the inner criterion.
     /// An invalid stack returns `Stack(StackWriteError)` before the trigger fires.
     /// Evaluates vanilla predicates and rewards in the player's own level.
-    /// `Ok(())` means reached, even if nothing matched. Refuses remote clients
-    /// (`NotServer`), stale/offline/displaced players (`PlayerUnavailable`), and
-    /// unloaded positions (`UnloadedChunk`).
+    /// `Ok(())` means reached, even if nothing matched. Refuses clients (`NotServer`) and
+    /// unreachable players or levels (`PlayerUnavailable`). The event carries the actual block
+    /// state and optional block entity (`BlockUnavailable` on state read failure). The position
+    /// need not already be resident; predicates that read other locations check them themselves.
     fn player_trigger_item_used_on_block(
         &mut self,
         player: PlayerRef,
@@ -81,8 +84,8 @@ pub trait PlayerProgressBackendMut {
     /// to NeoForge mods. Fires only `minecraft:consume_item` through the food-eating
     /// criterion path, without consuming a stack, awarding a used statistic or reading inventory.
     /// Predicates and rewards run in the player's own level. `Ok(())` means reached,
-    /// even if nothing matched. Refuses clients (`NotServer`), stale/offline/displaced
-    /// players (`PlayerUnavailable`) and invalid stacks (`Stack(StackWriteError)`)
+    /// even if nothing matched. Refuses clients (`NotServer`), unreachable players or levels
+    /// (`PlayerUnavailable`) and invalid stacks (`Stack(StackWriteError)`)
     /// before firing.
     fn player_trigger_consume_item(
         &mut self,

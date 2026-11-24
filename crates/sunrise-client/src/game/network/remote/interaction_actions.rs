@@ -264,7 +264,7 @@ impl Game<'_> {
             return;
         };
         self.particles
-            .tracking_emitter(ParticleOptions::simple(particle), target, body);
+            .tracking_emitter(ParticleOptions::simple(particle), target, body, None);
     }
     /// `ServerPlayer.dismountTo` lands a rider at the ghast's own (x, maxY, z)
     /// (`HappyGhast.getDismountLocationForPassenger`). A vanilla client
@@ -356,7 +356,9 @@ impl Game<'_> {
                 })
             }
             "minecraft:pumpkin" => held
-                .is_some_and(|s| &*s.item == "minecraft:shears")
+                .is_some_and(|s| {
+                    self.stack_shears(s, super::super::item_abilities::ability::SHEARS_CARVE)
+                })
                 .then_some(InteractionResult::Success),
             "minecraft:copper_golem_statue" => held
                 .is_some_and(|s| self.item_in_tag("minecraft:axes", &s.item))
@@ -383,18 +385,19 @@ impl Game<'_> {
             self.apply_predicted_item(at, stack);
         }
         self.predict_blocks(rest, seq);
-        let state = primary.1;
+        let state = placed.sound_state;
         if !self.res.facts().is_air(state) {
-            let sound = self.own_sound_type(at, state, mod_api::BlockSoundCause::Place);
-            self.play_client_local_sound(
-                LevelSound::new(
-                    &sound.place,
-                    at.map(|n| f64::from(n) + 0.5),
-                    (sound.volume + 1.0) / 2.0,
-                    sound.pitch * 0.8,
-                )
-                .in_source(mod_api::SoundSource::Blocks),
-            );
+            let sound = self
+                .own_block_sound(at, state, mod_api::BlockSoundCause::Place)
+                .for_placement(&stack.item);
+            self.play_client_local_sound(LevelSound {
+                name: sound.event.as_str(),
+                at: at.map(|n| f64::from(n) + 0.5),
+                volume: sound.volume,
+                pitch: sound.pitch,
+                source: mod_api::SoundSource::Blocks,
+                emitter: None,
+            });
         }
     }
     /// Whether `held`'s `Item.use` needs a target this client sees none of
@@ -498,20 +501,20 @@ impl Game<'_> {
     /// in the same tick, when a keybind opens a screen.
     pub(super) fn release_remote_use(&mut self) {
         self.send_action(6);
-        // a mod's Stop may skip the item's release, and a mod's own release follows.
+        // a mod's Stop may skip the item's release; a mod's release, then on_stop_using, follow.
         let hand = self.used_hand();
         if let Some((slot, ticks)) = self.using.take()
             && let Some(hand) = hand
             && let Some(stack) = self.stack_in(slot).cloned()
         {
             self.with_hand(hand, |g| {
-                if !g.use_item_stopped(&stack, ticks) {
-                    return;
+                if g.use_item_stopped(&stack, ticks) {
+                    if &*stack.item == "minecraft:trident" {
+                        g.release_trident(g.ticks_held(&stack, ticks));
+                    }
+                    g.mod_release_using(&stack, ticks);
                 }
-                if &*stack.item == "minecraft:trident" {
-                    g.release_trident(g.ticks_held(&stack, ticks));
-                }
-                g.mod_release_using(&stack, ticks);
+                g.stopped_using(&stack, None, hand, ticks_left(g.use_duration, ticks));
             });
         }
     }

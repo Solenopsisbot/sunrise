@@ -1119,6 +1119,8 @@ fn stock_menu_data_sync_round_trips_above_255_and_enforces_signed_short_boundary
                     links: Vec::new(),
                     opening_item: None,
                     asks_still_valid: false,
+                    opener_block: None,
+                    removed: false,
                     slot_changed_seen: None,
                 });
                 hub.guests.push(guest);

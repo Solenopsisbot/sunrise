@@ -639,14 +639,35 @@ impl Game<'_> {
         let state = self.world.block(pos[0], pos[1], pos[2]);
         self.destroy_progress_for(pos, state)
     }
-    /// `BlockBehaviour.getDestroyProgress` for a supplied state at `pos`: the game's own
-    /// dig math, including the `player_break_speed` hook. The caller checks that `state`
-    /// is a known state when it comes from a mod.
+    /// `BlockBehaviour.getDestroyProgress` for a supplied state at `pos`: a block Part's
+    /// `destroy_progress` answer, or the game's own dig math, including the
+    /// `player_break_speed` hook. The caller checks that `state` is a known state when it
+    /// comes from a mod.
     pub(super) fn destroy_progress_for(
         &mut self,
         pos: [i32; 3],
         state: sunrise_world::registry::BlockStateId,
     ) -> f32 {
+        // The block's own `getDestroyProgress`, which a Part's answer overrides whole. Inside
+        // that answer a query gives the game's math, as the default method below would.
+        if !DestroyProgressDispatch::running()
+            && crate::game::api_values::block_state::block_listens(
+                mod_api::HookId::DestroyProgress,
+                state,
+            )
+            && let Some(player) = if self.is_logical_server() {
+                self.native_acting_player()
+            } else {
+                self.local_player()
+            }
+        {
+            let mut answer = None;
+            let _dispatching = DestroyProgressDispatch::enter();
+            self.native_destroy_progress(player, pos, state, &mut answer);
+            if let Some(progress) = answer {
+                return progress;
+            }
+        }
         let facts = self.res.facts().get(state);
         if facts.hardness == -1.0 {
             return 0.0;
@@ -1461,6 +1482,36 @@ impl Drop for BreakSpeedDispatch {
 std::thread_local! {
     /// Whether a dig's break-speed hook is running on this thread.
     static BREAK_SPEED_DISPATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A block Part's `destroy_progress` answer running, given back when dropped (a panic unwinding
+/// included). A Part that mines as another block asks the destroy-progress query meanwhile;
+/// asking Parts again could run without bound, so the dig math skips them while this is held
+/// ([`DestroyProgressDispatch::running`]).
+struct DestroyProgressDispatch {
+    outer: bool,
+}
+
+impl DestroyProgressDispatch {
+    fn enter() -> Self {
+        Self {
+            outer: DESTROY_PROGRESS_DISPATCH.replace(true),
+        }
+    }
+    fn running() -> bool {
+        DESTROY_PROGRESS_DISPATCH.get()
+    }
+}
+
+impl Drop for DestroyProgressDispatch {
+    fn drop(&mut self) {
+        DESTROY_PROGRESS_DISPATCH.set(self.outer);
+    }
+}
+
+std::thread_local! {
+    /// Whether a block Part's destroy-progress answer is running on this thread.
+    static DESTROY_PROGRESS_DISPATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The harvest hooks of one `mod_harvest_check` running, given back when dropped (a panic

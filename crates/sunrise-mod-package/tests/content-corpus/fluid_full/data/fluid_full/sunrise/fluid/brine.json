@@ -4,11 +4,14 @@
   "temperature": 295,
   "density": 1100,
   "viscosity": 1200,
+  "light_level": 7,
+  "bucket_item": "fluid_full:brine_jar",
   "world": {
     "tick_delay": 11,
     "drop_off": 2,
     "slope_find_distance": 3,
     "source_conversion": true,
-    "bucket": false
+    "bucket": false,
+    "flowing": "fluid_full:brine_flowing"
   }
 }

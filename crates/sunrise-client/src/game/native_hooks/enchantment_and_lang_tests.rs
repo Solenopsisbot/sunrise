@@ -101,3 +101,46 @@ fn a_trait_mod_measures_text_through_its_draw_context() {
         assert_eq!(draw.text_width(""), 0.0);
     });
 }
+
+/// On a server, a mod reads an enchantment's definition through its `Host` (#5392): the server's
+/// own registry answers the maximum level, the minimum cost and the supported items.
+#[test]
+#[ignore = "daily"]
+fn a_server_host_reads_enchantment_definitions() {
+    crate::game::in_own_process(
+        "game::native_hooks::enchantment_and_lang_tests::a_server_host_reads_enchantment_definitions",
+        || {
+            super::super::native_entity_refs::tests::with_game(|game| {
+                game.options.dedicated = Some(Vec::new());
+                let host: &dyn mod_api::ServerHost = game;
+                let sharpness = host
+                    .enchantments()
+                    .into_iter()
+                    .find(|e| e.id == "minecraft:sharpness")
+                    .unwrap();
+                // data/minecraft/enchantment/sharpness.json of 26.3: max level 5, and its
+                // min_cost {base 1, per_level_above_first 11} gives 12 at level 2.
+                assert_eq!(sharpness.max_level, 5);
+                assert_eq!(
+                    host.enchantment_min_cost("minecraft:sharpness", 2),
+                    Some(12)
+                );
+                assert_eq!(host.enchantment_min_cost("missing:unknown", 1), None);
+                let key = |id: &str| {
+                    host.item_key(&mod_api::Identifier::parse(id).unwrap())
+                        .unwrap()
+                };
+                assert!(
+                    host.enchantment_supports(
+                        "minecraft:sharpness",
+                        key("minecraft:diamond_sword")
+                    )
+                );
+                assert!(!host.enchantment_supports("minecraft:sharpness", key("minecraft:stick")));
+                assert!(
+                    !host.enchantment_supports("missing:unknown", key("minecraft:diamond_sword"))
+                );
+            });
+        },
+    );
+}

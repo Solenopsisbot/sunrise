@@ -762,7 +762,7 @@ pub fn play_step(
                 pitch,
             ));
         }
-    } else if is_wood_sound_type(sound_type) {
+    } else if is_wood_sound_type(sound_type.identity) {
         events.push(MobEvent::Sound(
             "entity.horse.step_wood",
             at,
@@ -780,23 +780,9 @@ pub fn play_step(
 }
 /// `AbstractHorse.isWoodSoundType`: WOOD, NETHER_WOOD, STEM, CHERRY_WOOD and
 /// BAMBOO_WOOD (not HARD_CROP, which only shares WOOD's step).
-fn is_wood_sound_type(sounds: &mod_api::BlockSoundType) -> bool {
-    let step = sounds
-        .step
-        .strip_prefix("minecraft:")
-        .unwrap_or(&sounds.step);
-    let place = sounds
-        .place
-        .strip_prefix("minecraft:")
-        .unwrap_or(&sounds.place);
-    match step {
-        "block.wood.step" => place == "block.wood.place",
-        "block.nether_wood.step"
-        | "block.stem.step"
-        | "block.cherry_wood.step"
-        | "block.bamboo_wood.step" => true,
-        _ => false,
-    }
+fn is_wood_sound_type(identity: mod_api::BlockSoundTypeIdentity) -> bool {
+    use mod_api::BlockSoundTypeIdentity::*;
+    matches!(identity, Wood | NetherWood | Stem | CherryWood | BambooWood)
 }
 /// The mount takes its rider's input (`getRiddenInput`, `tickRidden`).
 pub fn ridden_step(m: &mut Mob, context: &LoopContext) {

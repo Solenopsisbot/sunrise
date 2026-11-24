@@ -76,6 +76,17 @@ impl Remote {
             .filter_map(move |(&id, seat)| (seat.vehicle == vehicle).then_some((id, seat.index)))
     }
 
+    /// The lowest packet seat index strictly after `after` (or the first seat).
+    pub(super) fn next_passenger_seat(
+        &self,
+        vehicle: u32,
+        after: Option<usize>,
+    ) -> Option<(u32, usize)> {
+        self.passenger_seats(vehicle)
+            .filter(|&(_, index)| after.is_none_or(|after| index > after))
+            .min_by_key(|&(_, index)| index)
+    }
+
     pub(super) fn has_passengers(&self, vehicle: u32) -> bool {
         self.passenger_seats(vehicle).next().is_some()
     }

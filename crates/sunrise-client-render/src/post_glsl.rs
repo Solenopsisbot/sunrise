@@ -27,7 +27,7 @@ pub struct Program {
     pub blocks: Vec<(String, u32)>,
     /// Every sampler (`NameSampler`): the texture's binding; the sampler object is the next.
     pub samplers: Vec<(String, u32)>,
-    /// What each stage reads (`core_shader::bindings_read`, from the stages' validation).
+    /// What each stage reads (`sunrise_glsl::bindings_read`, from the stages' validation).
     pub read: Vec<(u32, wgpu::ShaderStages)>,
 }
 
@@ -70,7 +70,7 @@ pub enum Refused {
     /// A stage file missing or that can't be read (naming it).
     Source(String),
     /// A stage's includes (`core_shader::expand_imports`).
-    Imports(String, crate::core_shader::ImportRefusal),
+    Imports(String, sunrise_glsl::ImportRefusal),
     /// The stages declare more uniform blocks or samplers than the device can bind.
     Declares {
         what: &'static str,
@@ -342,7 +342,7 @@ pub fn translate(
         declarable.interface,
     )
     .map_err(|e| Refused::Translator(format!("{fragment}: {e}")))?;
-    let read = crate::core_shader::bindings_read([
+    let read = sunrise_glsl::bindings_read([
         (&vertex_module.0, &vertex_module.1),
         (&fragment_module.0, &fragment_module.1),
     ]);
@@ -358,8 +358,8 @@ pub fn translate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core_shader::ImportRefusal;
     use std::path::Path;
+    use sunrise_glsl::ImportRefusal;
 
     /// Room for any test shader's declarations.
     const ANY: Declarable = Declarable {
@@ -678,7 +678,7 @@ mod tests {
         ]));
         let program = translate(&source, "p:post/a", "p:post/a", ANY).unwrap();
         let binding = |name: &str| program.blocks.iter().find(|(n, _)| n == name).unwrap().1;
-        let reading = |name: &str| crate::core_shader::stages_reading(&program.read, binding(name));
+        let reading = |name: &str| sunrise_glsl::stages_reading(&program.read, binding(name));
         assert_eq!(reading("ZeroToOne"), wgpu::ShaderStages::VERTEX_FRAGMENT);
         assert_eq!(reading("MinusOneToOne"), wgpu::ShaderStages::NONE);
     }

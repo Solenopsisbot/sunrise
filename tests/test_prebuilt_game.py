@@ -39,6 +39,33 @@ def write_build_data(root: Path, identity: dict | None = None, commit: str = COM
 
 
 class StageToolTests(unittest.TestCase):
+    def test_lower_crate_cfgs_use_target_library_artifacts_not_host_or_game_features(self):
+        staged = Path("staged")
+        target = Path("target") / "build-target"
+        metadata = {"packages": [
+            {"id": "lower", "name": "sunrise-lower", "manifest_path": str(staged / "crates/sunrise-lower/Cargo.toml")},
+            {"id": "game", "name": prebuilt_game.GAME, "manifest_path": str(staged / "crates/sunrise-client/Cargo.toml")},
+        ]}
+
+        def artifact(package_id, path, feature, debug_assertions):
+            return {"reason": "compiler-artifact", "package_id": package_id, "target": {"kind": ["lib"]},
+                    "filenames": [str(path / "lib.rlib")], "features": [feature],
+                    "profile": {"debug_assertions": debug_assertions}}
+
+        messages = [
+            artifact("game", target, "game-only", False),
+            artifact("lower", target, "lower-only", False),
+            artifact("lower", Path("target/host"), "host-only", True),
+            {"reason": "build-script-executed", "package_id": "lower",
+             "out_dir": str(target / "out"), "cfgs": ['backend="target"']},
+            {"reason": "build-script-executed", "package_id": "lower",
+             "out_dir": "target/host/out", "cfgs": ['backend="host"']},
+        ]
+        self.assertEqual(
+            prebuilt_game.lower_crate_cfgs(metadata, messages, staged, target, {"unix", "debug_assertions"}),
+            {"sunrise_lower": ['backend="target"', 'feature="lower-only"', "unix"]},
+        )
+
     def test_stage_sync_only_rewrites_different_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1015,6 +1042,38 @@ class LauncherCheckoutTests(unittest.TestCase):
                 self.assertNotEqual(done.returncode, 0)
             finally:
                 pin_file.write_text(original)
+
+
+class SmokeBuildTests(unittest.TestCase):
+    def test_both_smoke_dylibs_use_platform_link_args(self):
+        for platform, expected in (
+            ("linux", ["-Wl,--disable-new-dtags", "-Wl,-rpath,$ORIGIN"]),
+            ("darwin", ["-Wl,-rpath,@loader_path"]),
+            ("win32", []),
+        ):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory, \
+                 patch.object(prebuilt_game.sys, "platform", platform):
+                out = Path(directory) / "sdk"
+                out.mkdir()
+                write_build_data(out, {"facade_crates": [], "rustc": "release: fixture\n"})
+                (out / "deps/libsunrise_mod_package.rmeta").touch()
+                linked = {}
+
+                def run(command, **kwargs):
+                    if command == ["git", "rev-parse", "HEAD"]:
+                        return COMMIT
+                    self.assertEqual(command[0], "rustc")
+                    self.assertEqual(command[command.index("--crate-type") + 1], "dylib")
+                    name = command[command.index("--crate-name") + 1]
+                    linked[name] = [arg.removeprefix("link-arg=") for arg in command if arg.startswith("link-arg=")]
+                    Path(command[command.index("-o") + 1]).touch()
+                    return ""
+
+                with patch.object(prebuilt_game, "run", side_effect=run), \
+                     patch.object(prebuilt_game, "runtime_libraries", return_value=[]), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    prebuilt_game.smoke(out)
+                self.assertEqual(linked, {"smoke": expected, "smoke_user": expected})
 
 
 class SmokeStartTests(unittest.TestCase):

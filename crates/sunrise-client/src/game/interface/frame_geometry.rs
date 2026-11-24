@@ -106,6 +106,10 @@ impl Game<'_> {
                 sunrise_client::block_entity_render::diffuse_lights(self.dim == Dim::Nether),
                 std::mem::take(out),
             )
+            .with_quad_budget(
+                self.entity_quad_capacity(),
+                self.entity_batch_reserved_quads(),
+            )
             .animated(self.animation_time());
             let mut canceled = false;
             self.native_render_arm(

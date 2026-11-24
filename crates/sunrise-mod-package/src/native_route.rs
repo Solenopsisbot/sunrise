@@ -68,7 +68,6 @@ pub fn manifest_game_code(manifest: &Manifest) -> Option<&'static str> {
         mixin,
         module,
         bridge,
-        state,
         r#loop,
     }) = &manifest.native
     {
@@ -76,7 +75,6 @@ pub fn manifest_game_code(manifest: &Manifest) -> Option<&'static str> {
             (mixin.is_empty(), "[[native.mixin]]"),
             (module.is_empty(), "[[native.module]]"),
             (bridge.is_empty(), "[[native.bridge]]"),
-            (state.is_empty(), "[[native.state]]"),
             (r#loop.is_empty(), "[[native.loop]]"),
         ] {
             if !empty {

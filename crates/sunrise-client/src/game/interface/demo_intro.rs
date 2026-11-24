@@ -196,7 +196,7 @@ impl Game<'_> {
         }) else {
             return false;
         };
-        self.audio.play_button_click();
+        self.play_audio_button_click();
         if button == 0 {
             self.confirm_trusted_link(BUY_MINECRAFT_JAVA, Screen::Playing);
         } else {

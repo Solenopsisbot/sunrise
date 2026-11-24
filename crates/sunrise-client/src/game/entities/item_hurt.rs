@@ -5,19 +5,22 @@ use sunrise_core::geometry::Vec3;
 use sunrise_world::damage_source::DamageTypeId;
 
 impl Game<'_> {
-    /// `ItemEntity.hurtServer`: the item branch reached by `DamageCommand.damage`.
-    pub(in crate::game) fn hurt_item_entity(
+    /// `ItemEntity.hurtServer` over a caller-owned item row: runs invulnerability,
+    /// mob-griefing, fall/fire/stack-immunity checks, float health subtraction,
+    /// `entity_damage` game event, and container/bundle content drops on death.
+    pub(in crate::game) fn hurt_lent_item_entity(
         &mut self,
-        id: u32,
+        item: &mut sunrise_client::entities::ItemEntity,
         amount: f32,
         damage_type: &str,
         direct: Option<Target>,
         causing: Option<Target>,
         position: Option<[f64; 3]>,
     ) -> bool {
-        let Some(index) = self.dropped.iter().position(|item| item.id == id) else {
+        if item.health <= 0 || !amount.is_finite() || amount < 0.0 {
             return false;
-        };
+        }
+        let id = item.id;
         let entity_id = |target| match target {
             Some(Target::Player) => self.own_entity_id(),
             Some(Target::Guest(conn)) => self.command_guest(conn).map_or(0, |g| g.entity_id),
@@ -34,51 +37,24 @@ impl Game<'_> {
             position,
         };
         if self.item_damage_kind(id, source, causing).is_none()
-            || !self.item_stack_takes_damage(&self.dropped[index].stack, damage_type)
+            || !self.item_stack_takes_damage(&item.stack, damage_type)
         {
             return false;
         }
-        let item = &mut self.dropped[index];
         mark_item_hurt(item, amount);
         let at = item.position;
         self.post_item_damage(at, causing);
-        if self.dropped[index].health <= 0 {
-            let contents = self.destroy_item_entity_drops(index, damage_type);
-            if let Some(index) = self.dropped.iter().position(|item| item.id == id) {
-                self.dropped.remove(index);
+        if item.health <= 0 {
+            if mod_api::__private::item_listens(mod_api::HookId::ItemDestroyed, &item.stack.item) {
+                self.item_destroyed_damage = Some((item.id, damage_type.to_owned()));
+            } else {
+                let contents = item.hurt(self.res.items(), 0).unwrap_or_default();
+                self.spawn_destroyed_contents(
+                    contents.into_iter().map(|stack| (stack, at)).collect(),
+                );
             }
-            self.spawn_destroyed_contents(contents.into_iter().map(|stack| (stack, at)).collect());
         }
         true
-    }
-
-    /// Block contact damage during the tick, while the item belongs to its mover.
-    pub(super) fn hurt_moving_item(
-        &mut self,
-        item: &mut ItemEntity,
-        damage_type: &str,
-        amount: f32,
-    ) {
-        let source = HurtSource {
-            damage_type,
-            causing: 0,
-            direct: 0,
-            position: None,
-        };
-        if self.item_damage_kind(item.id, source, None).is_none()
-            || !self.item_stack_takes_damage(&item.stack, source.damage_type)
-        {
-            return;
-        }
-        mark_item_hurt(item, amount);
-        let at = item.position;
-        self.post_item_damage(at, None);
-        if item.health <= 0
-            && !mod_api::__private::item_listens(mod_api::HookId::ItemDestroyed, &item.stack.item)
-            && let Some(contents) = item.hurt(0)
-        {
-            self.spawn_destroyed_contents(contents.into_iter().map(|stack| (stack, at)).collect());
-        }
     }
 
     fn item_damage_kind(
@@ -127,6 +103,55 @@ impl Game<'_> {
         };
         let context = self.who_context(who, None);
         self.post_game_event("minecraft:entity_damage", [at.x, at.y, at.z], context);
+    }
+
+    /// `ItemEntity.hurtServer`: the item branch reached by `DamageCommand.damage`.
+    pub(in crate::game) fn hurt_item_entity(
+        &mut self,
+        id: u32,
+        amount: f32,
+        damage_type: &str,
+        direct: Option<Target>,
+        causing: Option<Target>,
+        position: Option<[f64; 3]>,
+    ) -> bool {
+        let Some(index) = self.dropped.iter().position(|item| item.id == id) else {
+            return false;
+        };
+        let mut items = self.dropped.lift();
+        let hurt = self.hurt_lent_item_entity(
+            &mut items[index],
+            amount,
+            damage_type,
+            direct,
+            causing,
+            position,
+        );
+        if items[index].health <= 0 {
+            let at = items[index].position;
+            let deferred = self
+                .item_destroyed_damage
+                .take_if(|(destroyed_id, _)| *destroyed_id == id)
+                .map(|(_, ty)| ty);
+            if let Some(ty) = deferred {
+                self.put_back_dropped(items);
+                let contents = if let Some(k) = self.dropped.iter().position(|item| item.id == id) {
+                    self.destroy_item_entity_drops(k, &ty)
+                } else {
+                    Vec::new()
+                };
+                if let Some(k) = self.dropped.iter().position(|item| item.id == id) {
+                    self.dropped.remove(k);
+                }
+                self.spawn_destroyed_contents(
+                    contents.into_iter().map(|stack| (stack, at)).collect(),
+                );
+                return hurt;
+            }
+            items.remove(index);
+        }
+        self.put_back_dropped(items);
+        hurt
     }
 }
 

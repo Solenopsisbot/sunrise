@@ -58,10 +58,15 @@ fn stand(game: &mut Game<'_>, teleport: i32) {
 
 /// Joins as entity [`PLAYER`] in the overworld.
 fn join(game: &mut Game<'_>) -> (ConnReader, ConnWriter) {
+    join_world(game, false)
+}
+
+/// Joins as [`join`] does, in a hardcore world or not.
+fn join_world(game: &mut Game<'_>, hardcore: bool) -> (ConnReader, ConnWriter) {
     let connection = super::connect_menu_test(game);
     game.handle_packet(C::Login(play::Login {
         player_id: PLAYER as i32,
-        hardcore: false,
+        hardcore,
         levels: vec!["minecraft:overworld".into()],
         max_players: 20,
         chunk_radius: 2,
@@ -159,14 +164,15 @@ fn a_client_counts_its_copies_ticks_and_a_respawned_player_starts_at_zero() {
 }
 
 /// The count follows the client's entity pass, not the player's motion: an admitted local player
-/// counts before `LocalPlayer.tick`'s loaded-only update and while it sleeps, a frozen level
-/// still ticks the player and the cart carrying it (`TickRateManager.isEntityFrozen`). A root
-/// counts at its own visit, after its `EntityTickEvent.Pre`; `PlayerTickEvent.Pre`, inside the
-/// player's tick, already sees the player's new count.
+/// is told and counts before `LocalPlayer.tick`'s loaded-only update and while it sleeps, a frozen
+/// level still ticks the player and the cart carrying it (`TickRateManager.isEntityFrozen`). A
+/// root counts at its own visit, after its `EntityTickEvent.Pre`; a passenger counts before its
+/// Pre (`tickPassenger`); `PlayerTickEvent.Pre`, inside the player's tick, already sees the
+/// player's new count.
 #[test]
 #[ignore = "daily"]
 fn the_client_count_follows_the_entity_tick_not_the_motion() {
-    use mod_api::{EntityTickListenedEvent, EntityTickPreEvent, HostSide, PlayerTickPreEvent};
+    use mod_api::{EntityTickPreEvent, HostSide, PlayerTickPreEvent};
     use std::sync::{Arc, Mutex};
     crate::game::in_own_process(
         "game::remote::tests::client_vanilla_reads_tests::the_client_count_follows_the_entity_tick_not_the_motion",
@@ -175,21 +181,18 @@ fn the_client_count_follows_the_entity_tick_not_the_motion() {
             struct Seen(Arc<Mutex<Vec<(u32, Option<i32>)>>>);
             #[mod_api::__subscriptions]
             impl mod_api::Hooks for Seen {
-                fn entity_tick_listened(
+                fn entity_tick_pre(
                     &self,
-                    _: HostSide<'_>,
-                    event: &mut EntityTickListenedEvent,
-                ) {
-                    event.listened = true;
-                }
-                fn entity_tick_pre(&self, host: HostSide<'_>, event: &mut EntityTickPreEvent<'_>) {
+                    host: HostSide<'_>,
+                    event: &mut EntityTickPreEvent<'_>,
+                ) -> mod_api::Flow {
                     let HostSide::Client(host) = host else {
-                        return;
+                        return mod_api::Flow::Continue;
                     };
-                    for &id in event.entities {
-                        let count = host.entity(id).and_then(|e| e.tick_count(host));
-                        self.0.lock().unwrap().push((id, count));
-                    }
+                    let id = event.entity;
+                    let count = host.entity(id).and_then(|e| e.tick_count(host));
+                    self.0.lock().unwrap().push((id, count));
+                    mod_api::Flow::Continue
                 }
                 fn player_tick_pre(&self, host: HostSide<'_>, event: &mut PlayerTickPreEvent) {
                     let HostSide::Client(host) = host else {
@@ -235,8 +238,9 @@ fn the_client_count_follows_the_entity_tick_not_the_motion() {
                     assert_eq!(counts(game), [Some(3), Some(2), Some(3)]);
 
                     let seen = seen.lock().unwrap();
-                    // The pig's Pre read 0 then 1 (before its visit counts it), the player's
-                    // (once loaded) 2 then 3.
+                    // The pig's Pre read 0 then 1 (before its visit counts it). The player's
+                    // Pre read 0 before loading, 1 asleep, then 3 as the cart's passenger,
+                    // counted first; its PlayerTickEvent.Pre (once loaded) read 2 and 3.
                     let of = |id: u32| {
                         seen.iter()
                             .filter(|(seen, _)| *seen == id)
@@ -244,7 +248,7 @@ fn the_client_count_follows_the_entity_tick_not_the_motion() {
                             .collect::<Vec<_>>()
                     };
                     assert_eq!(of(20), [Some(0), Some(1)]);
-                    assert_eq!(of(PLAYER), [Some(2), Some(3)]);
+                    assert_eq!(of(PLAYER), [Some(0), Some(1), Some(2), Some(3), Some(3)]);
                 });
             });
         },
@@ -257,7 +261,7 @@ fn the_client_count_follows_the_entity_tick_not_the_motion() {
 #[test]
 #[ignore = "daily"]
 fn a_canceled_root_does_not_count_and_a_passenger_does() {
-    use mod_api::{EntityTickListenedEvent, EntityTickPreEvent, HostSide};
+    use mod_api::{EntityTickPreEvent, HostSide};
     use std::sync::{Arc, Mutex};
     crate::game::in_own_process(
         "game::remote::tests::client_vanilla_reads_tests::a_canceled_root_does_not_count_and_a_passenger_does",
@@ -266,23 +270,21 @@ fn a_canceled_root_does_not_count_and_a_passenger_does() {
             struct Cancel(Arc<Mutex<Vec<(u32, Option<i32>)>>>);
             #[mod_api::__subscriptions]
             impl mod_api::Hooks for Cancel {
-                fn entity_tick_listened(
+                fn entity_tick_pre(
                     &self,
-                    _: HostSide<'_>,
-                    event: &mut EntityTickListenedEvent,
-                ) {
-                    event.listened = true;
-                }
-                fn entity_tick_pre(&self, host: HostSide<'_>, event: &mut EntityTickPreEvent<'_>) {
+                    host: HostSide<'_>,
+                    event: &mut EntityTickPreEvent<'_>,
+                ) -> mod_api::Flow {
                     let HostSide::Client(host) = host else {
-                        return;
+                        return mod_api::Flow::Continue;
                     };
-                    for &id in event.entities {
-                        let count = host.entity(id).and_then(|e| e.tick_count(host));
-                        self.0.lock().unwrap().push((id, count));
-                        if id == 20 || id == 22 {
-                            event.canceled.push(id);
-                        }
+                    let id = event.entity;
+                    let count = host.entity(id).and_then(|e| e.tick_count(host));
+                    self.0.lock().unwrap().push((id, count));
+                    if id == 20 || id == 22 {
+                        mod_api::Flow::Cancel
+                    } else {
+                        mod_api::Flow::Continue
                     }
                 }
             }
@@ -315,11 +317,11 @@ fn a_canceled_root_does_not_count_and_a_passenger_does() {
                             .map(|(_, count)| *count)
                             .collect::<Vec<_>>()
                     };
-                    // Told together, the family's Pre runs before any of its visits: each reads
-                    // the count its last tick left.
+                    // A root's Pre reads the count its last tick left; a passenger's, told inside
+                    // its ride visit (`Entity.rideTick`), the count that visit just added.
                     assert_eq!(of(20), [Some(0), Some(0)]);
                     assert_eq!(of(21), [Some(0), Some(1)]);
-                    assert_eq!(of(22), [Some(0), Some(1)]);
+                    assert_eq!(of(22), [Some(1), Some(2)]);
                     assert_eq!(of(23), [Some(0), Some(1)]);
                 });
             });
@@ -334,7 +336,7 @@ fn a_canceled_root_does_not_count_and_a_passenger_does() {
 #[test]
 #[ignore = "daily"]
 fn callbacks_read_other_entities_counts_as_their_visits_left_them() {
-    use mod_api::{EntityTickListenedEvent, EntityTickPostEvent, EntityTickPreEvent, HostSide};
+    use mod_api::{EntityTickPostEvent, EntityTickPreEvent, HostSide};
     use std::sync::{Arc, Mutex};
     crate::game::in_own_process(
         "game::remote::tests::client_vanilla_reads_tests::callbacks_read_other_entities_counts_as_their_visits_left_them",
@@ -350,31 +352,24 @@ fn callbacks_read_other_entities_counts_as_their_visits_left_them() {
                     };
                     let counts =
                         [20, 21, 22].map(|id| host.entity(id).and_then(|e| e.tick_count(host)));
-                    for &id in entities {
+                    // The pigs' own turns only: the local player's is another test's.
+                    for &id in entities.iter().filter(|id| (20..=22).contains(*id)) {
                         self.0.lock().unwrap().push((moment, id, counts));
                     }
                 }
             }
             #[mod_api::__subscriptions]
             impl mod_api::Hooks for Read {
-                fn register(
+                fn entity_tick_pre(
                     &self,
-                    registrar: &mut dyn mod_api::Registrar,
-                    _: &mod_api::RegistrationContext,
-                ) {
-                    registrar.entity_tick_each("minecraft:pig");
-                }
-                fn entity_tick_listened(
-                    &self,
-                    _: HostSide<'_>,
-                    event: &mut EntityTickListenedEvent,
-                ) {
-                    event.listened = true;
-                }
-                fn entity_tick_pre(&self, host: HostSide<'_>, event: &mut EntityTickPreEvent<'_>) {
-                    self.read(host, "pre", event.entities);
-                    if event.entities.contains(&21) {
-                        event.canceled.push(21);
+                    host: HostSide<'_>,
+                    event: &mut EntityTickPreEvent<'_>,
+                ) -> mod_api::Flow {
+                    self.read(host, "pre", std::slice::from_ref(&event.entity));
+                    if event.entity == 21 {
+                        mod_api::Flow::Cancel
+                    } else {
+                        mod_api::Flow::Continue
                     }
                 }
                 fn entity_tick_post(
@@ -382,7 +377,7 @@ fn callbacks_read_other_entities_counts_as_their_visits_left_them() {
                     host: HostSide<'_>,
                     event: &mut EntityTickPostEvent<'_>,
                 ) {
-                    self.read(host, "post", event.entities);
+                    self.read(host, "post", std::slice::from_ref(&event.entity));
                 }
             }
             let seen = Arc::new(Mutex::new(Vec::new()));
@@ -641,6 +636,57 @@ fn has_channel_follows_what_the_server_negotiated() {
                     );
                 });
             });
+        },
+    );
+}
+
+/// `Entity.showVehicleHealth` is `instanceof LivingEntity` with no override: on a client the
+/// local player and a tracked horse answer true, a tracked boat and minecart false.
+#[test]
+#[ignore = "daily"]
+fn a_client_reads_whether_a_vehicle_shows_its_health_from_its_type() {
+    crate::game::in_own_process(
+        "game::remote::tests::client_vanilla_reads_tests::a_client_reads_whether_a_vehicle_shows_its_health_from_its_type",
+        || {
+            with_client_game(|game| {
+                let _connection = join(game);
+                add(game, 30, "minecraft:horse");
+                add(game, 31, "minecraft:oak_boat");
+                add(game, 32, "minecraft:minecart");
+                let shows = |game: &Game<'_>, id: u32| {
+                    game.entity(id)?
+                        .shows_vehicle_health(game as &dyn ClientHost)
+                };
+                assert_eq!(shows(game, PLAYER), Some(true));
+                assert_eq!(shows(game, 30), Some(true));
+                assert_eq!(shows(game, 31), Some(false));
+                assert_eq!(shows(game, 32), Some(false));
+            });
+        },
+    );
+}
+
+/// `LevelData.isHardcore` on a client is the login packet's flag (`ClientPacketListener.handleLogin`
+/// builds the client level's data from it), read through the level the client is in.
+#[test]
+#[ignore = "daily"]
+fn a_client_reads_hardcore_from_the_login_for_the_level_it_is_in() {
+    crate::game::in_own_process(
+        "game::remote::tests::client_vanilla_reads_tests::a_client_reads_hardcore_from_the_login_for_the_level_it_is_in",
+        || {
+            for hardcore in [false, true] {
+                with_client_game(|game| {
+                    let _connection = join_world(game, hardcore);
+                    let overworld = game.level("minecraft:overworld").unwrap();
+                    assert_eq!(
+                        overworld.is_hardcore(game as &dyn ClientHost),
+                        Some(hardcore)
+                    );
+                    let elsewhere =
+                        mod_api::LevelRef::new(overworld.epoch(), mod_api::DimensionKey::NETHER);
+                    assert_eq!(elsewhere.is_hardcore(game as &dyn ClientHost), None);
+                });
+            }
         },
     );
 }

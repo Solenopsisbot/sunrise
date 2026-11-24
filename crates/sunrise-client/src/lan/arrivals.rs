@@ -463,7 +463,8 @@ pub fn export_record(
     }
     let id = freeze.then(new_handover_id).transpose()?;
     let g = &hub.guests[i];
-    let tag = super::playerdata::player_tag(g, &hub.encoder.items);
+    let tag = super::playerdata::try_player_tag(g, &hub.encoder.items)
+        .map_err(|error| error.to_string())?;
     let bytes = write_named(
         &NamedTag {
             name: "".into(),
@@ -986,7 +987,7 @@ mod hub_tests {
         let mut world = crate::world::World::new(sunrise_world::registry::BlockStateId(0), 0);
         let border = crate::worldborder::WorldBorder::default();
         let mut next = 100;
-        let mut ctx = TickCtx {
+        let ctx = TickCtx {
             sea_level: 63,
             world: &mut world,
             entities: &[],
@@ -1004,7 +1005,10 @@ mod hub_tests {
             border: &border,
             streaming: None,
         };
-        hub.place_new_player(conn, &mut ctx);
+        if let Some(i) = hub.begin_player_join(conn, &ctx) {
+            hub.send_commands(i, hub.commands_packet(hub.guests[i].permission));
+            hub.finish_player_join(i, &ctx);
+        }
     }
 
     fn tick_context<'a>(
@@ -1645,11 +1649,11 @@ mod hub_tests {
 
     /// The keys a vanilla server writes in every player's file, read with `javap` from the
     /// 26.3 server jar: `Player.addAdditionalSaveData` (Inventory, SelectedItemSlot,
-    /// EnderItems, XpLevel, XpP, XpTotal, XpSeed, abilities), `FoodData` (foodLevel,
+    /// EnderItems, XpLevel, XpP, XpTotal, XpSeed, Score, abilities), `FoodData` (foodLevel,
     /// foodSaturationLevel, foodExhaustionLevel, foodTickTimer), `ServerPlayer` (Dimension),
     /// `Entity.saveWithoutId` (Pos, Motion, Rotation, OnGround, Air, Fire) and
     /// `LivingEntity` (Health, AbsorptionAmount).
-    const VANILLA_PLAYER_KEYS: [&str; 21] = [
+    const VANILLA_PLAYER_KEYS: [&str; 22] = [
         "Inventory",
         "SelectedItemSlot",
         "EnderItems",
@@ -1657,6 +1661,7 @@ mod hub_tests {
         "XpP",
         "XpTotal",
         "XpSeed",
+        "Score",
         "abilities",
         "foodLevel",
         "foodSaturationLevel",

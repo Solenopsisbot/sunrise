@@ -76,7 +76,7 @@ Arrow.handleEntityEvent	port	crates/sunrise-client/src/game/network/remote_proje
 ThrownTrident.defineSynchedData	skip:java		loyalty and foil synced fields; Sunrise keeps loyalty on the trident struct
 ThrownTrident.isAcceptibleReturnOwner	port	crates/sunrise-client/src/game/items/trident.rs::Game::tick_tridents	the loyalty return needs the owner's eye position; gap: minor: no separate alive or spectator check
 ThrownTrident.findHitEntities	port	crates/sunrise-client/src/arrows.rs::Ticker::step_move_and_hit	one entity hit per trident, none once it has dealt damage
-ThrownTrident.hitBlockEnchantmentEffects	port	crates/sunrise-client/src/game/items/trident.rs::Game::channel_rod_hit	gap: minor: only Channeling's hit_block effect (lightning on a rod in a storm) is modelled
+ThrownTrident.hitBlockEnchantmentEffects	port	crates/sunrise-client/src/game/items/trident.rs::Game::trident_block_effects	gap: minor: only Channeling's hit_block effect (lightning on a rod in a storm) is modelled
 ThrownTrident.tryPickup	port	crates/sunrise-client/src/game/items/trident.rs::Game::trident_taken	all three pickup modes and the no-physics owner's return; gap: inventory overflow drops instead of refusing pickup
 ThrownTrident.readAdditionalSaveData	port	crates/sunrise-client/src/entity_nbt/trident.rs::trident_from_nbt	pickup, Owner, LeftOwner, HasBeenShot and DealtDamage survive load; ThrownTrident::from_nbt reads loyalty from the saved stack
 ThrownTrident.getLoyaltyFromItem	port	crates/sunrise-client/src/game/items/trident.rs::Game::release_trident	loyalty level read from the thrown stack when the trident is released

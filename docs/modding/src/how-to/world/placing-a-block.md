@@ -1,7 +1,11 @@
 # Placing a block from code
 
 `level.set_block(host, pos, state, flags)` writes a state without running `Block.setPlacedBy`.
-These are all server operations on the level in place.
+The placement operations below run on the server level in place. To change one property
+instead of replacing the whole state, use `level.set_block_property(host, pos, key, value, flags)`.
+It preserves the holder and the other properties. It returns `Ok(false)` if there is no
+change or the position refuses the write. This property write also works in parked server
+levels, except inside an open Host transaction (`LevelWriteError::InTransaction`).
 
 - `level.update_from_neighbour_shapes(host, pos, state)` is `Block.updateFromNeighbourShapes`: it returns
   the state fitted to the blocks around `pos` (a fence gets its connections, a stair its corner). Nothing

@@ -1,13 +1,6 @@
 //! Host method declarations; access defaults and game forwarders are generated.
 #![allow(unused_variables)]
 use crate::*;
-/// The host's methods both sides share of the `client_view` area, implemented by the game and reached through [`Host`].
-#[sunrise_mod_api_macros::host_area]
-pub trait ClientViewHost {
-    /// Side: both.
-    /// Collision boxes in block-local coordinates with an empty collision context.
-    fn block_collision(&self, pos: [i32; 3]) -> Vec<[f64; 6]>;
-}
 /// The client host's methods of the `client_view` area, implemented by the game and reached through [`crate::ClientHost`].
 #[sunrise_mod_api_macros::host_area]
 pub trait ClientViewClientHost {
@@ -15,6 +8,15 @@ pub trait ClientViewClientHost {
     /// The HUD tick counter (`Hud.getGuiTicks`): advances once per unpaused client tick,
     /// including on the title screen, independently of server tick freeze. Wraps as a Java int.
     fn gui_ticks(&self) -> i32;
+    /// Side: client.
+    /// How far above the bottom edge the HUD's status rows reach, left and right in GUI pixels
+    /// (NeoForge's `Hud.leftHeight` and `rightHeight`), as they stand when the current HUD layer
+    /// starts: both are 39 (the hotbar and experience bar) before `minecraft:player_health`,
+    /// and each vanilla row adds its height as it draws (health and armour on the left, food,
+    /// a vehicle's hearts and air on the right). A layer placed `Below` a vanilla row sees the
+    /// height that row draws at, and one placed `Above` it the height after it. A vanilla row
+    /// that is hidden, canceled or replaced adds nothing. None outside the HUD layer pass.
+    fn gui_status_heights(&self) -> Option<[i32; 2]>;
     /// Side: client.
     /// Read effective HUD visibility independently of first-person hands.
     fn hud_mode(&self) -> HudMode;
@@ -40,9 +42,11 @@ pub trait ClientViewClientHost {
     /// Side: client.
     /// Request the window's camera type without cycling, also from shared-host callbacks.
     /// The last request wins and [`Self::camera_type`] reports it immediately. Requests before
-    /// or during `camera_pose` apply to that frame's camera, FOV and spectator post effects;
-    /// later requests apply at the next frame's camera extraction. Explicit pose overrides
-    /// remain unchanged when vanilla placement is refreshed. No cycle hook is emitted.
+    /// or during `compute_camera_angles` apply before that frame's detached camera placement,
+    /// FOV and spectator post effects. Requests during `camera_position` re-align an entity-bound
+    /// camera with the already-computed angles, keeping only coordinates explicitly pinned by listeners.
+    /// The selected custom camera is not re-aligned. Later requests apply at the next frame's
+    /// camera extraction. No cycle hook is emitted.
     fn set_camera_type(&self, camera_type: CameraType);
     /// Side: client.
     /// The applied client pause state, not whether a pause screen is open.
@@ -54,10 +58,12 @@ pub trait ClientViewClientHost {
     /// on the title screen.
     fn clock(&self) -> Option<Clock>;
     /// Side: client.
-    /// The first block along the view within `distance` (at most 1024), in loaded chunks only; `None` on a miss.
+    /// The first block along the view within `distance`, in loaded chunks only;
+    /// `None` on a miss or a nonpositive or non-finite `distance`.
     fn raycast(&self, distance: f32) -> Option<Hit>;
     /// Side: client.
-    /// The first block along the view within 1024 blocks, in loaded chunks only, and its distance; `None` on a miss.
+    /// The first block along the view across loaded chunks only, and its distance; `None` on a miss.
+    /// The shape clip does not depend on how far away other chunks are loaded.
     fn view_hit(&self) -> Option<(f32, Hit)>;
     /// Side: client.
     /// The most recently extracted world frame's camera, if one exists.
@@ -91,17 +97,6 @@ pub trait ClientViewClientHost {
     /// The entity the view follows (`Minecraft.getCameraEntity`): the entity a server attached
     /// the camera to, else the local player. None outside a client world.
     fn camera_entity(&self) -> Option<EntityRef>;
-    /// Side: client.
-    /// Each column's height by `heightmap` in the world this window shows
-    /// (`LevelReader.getHeight(type, x, z)` on a client level): one above the highest block that
-    /// counts on that map, from the blocks the server has sent, none for a column whose chunk this
-    /// client does not hold. `Err`, reading nothing, for no client world (the title screen) or more
-    /// than 65,536 columns (`MAX_COLUMNS`).
-    fn client_surface_heights(
-        &self,
-        columns: &[(i32, i32)],
-        heightmap: Heightmap,
-    ) -> Result<Vec<Option<i32>>, String>;
     /// Side: client.
     /// Points the view at `entity` (`Minecraft.setCameraEntity`), as a server's camera packet
     /// does; the local player's own ref puts it back. True when the view now follows it; false,

@@ -77,6 +77,8 @@ pub enum PhaseContext {
     ClientIdentity,
     /// Repository discovery before any world is opened.
     PackDiscovery,
+    /// An item ability check from gameplay (`Host` + tags) or a loot predicate (tags + `LootParamsView`).
+    ItemAbility,
 }
 
 /// How a game hook borrows its receiver. Free dispatchers have no game receiver.
@@ -152,7 +154,7 @@ pub enum StackCount {
     Trim,
 }
 
-/// How a registration collector exposes its append-only output.
+/// How a collector exposes its append-only output.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RegistrationAppend {
@@ -160,6 +162,9 @@ pub enum RegistrationAppend {
     Register,
     /// The vocabulary crate supplies the event methods in an inherent impl.
     Custom,
+    /// The vocabulary crate supplies attributed append-only methods in an inherent impl;
+    /// dispatch sets `pub(super) mod_id: &'static str` on the event before each listener.
+    Attributed,
 }
 
 /// One hook point: a moment the game tells mods about.
@@ -182,9 +187,7 @@ pub struct Hook {
     /// A listener about one mod's own things: the event field naming that mod, whose
     /// subscription alone is told.
     pub owner: Option<String>,
-    /// Validate a collector's edits at the per-listener ownership boundary.
-    pub collect_validator: Option<String>,
-    /// Hide the output vector of a registration collector behind append-only methods.
+    /// Hide the output vector of a collector behind append-only methods.
     pub registration_append: Option<RegistrationAppend>,
     /// Mutable registrar field, or `host` for a direct listener whose owner journals its writes.
     pub staged_surface: Option<String>,
@@ -220,6 +223,9 @@ pub struct Hook {
     pub stack_count: Option<StackCount>,
     /// Rebuild a listener event from its original inputs for every subscriber.
     pub event_per_listener: bool,
+    /// A setter callback skips its own reentry. A fault quarantines that subscriber without
+    /// aborting an enclosing action that called the setter.
+    pub independent_listener: bool,
 }
 
 /// A drawing surface of the game's that drawing hooks get as a trait object (the catalog's
@@ -250,7 +256,6 @@ pub enum CatalogError {
     OwnerNeedsGlobalListener(String),
     ScopeNeedsKey(String),
     NoHooks,
-    Retired(String),
 }
 
 impl fmt::Display for CatalogError {
@@ -258,11 +263,6 @@ impl fmt::Display for CatalogError {
         match self {
             Self::Read { path, error } => write!(f, "{path}: {error}"),
             Self::Declaration { path, error } => write!(f, "{path}: {error}"),
-            Self::Retired(path) => write!(
-                f,
-                "{path}: hooks are declared in Rust now, in {DECLARATIONS}/<area>.rs; move the entry there as a \
-                 `#[hook(...)]` declaration (the old keys are the attribute's arguments) and delete this file"
-            ),
             Self::NamelessHook => f.write_str("hook name missing"),
             Self::DuplicateHook(name) => write!(f, "duplicate hook {name}"),
             Self::InvalidHook { hook, error } => write!(f, "hook {hook}: {error}"),
@@ -349,6 +349,8 @@ struct HookEntry {
     stack_count: Option<StackCount>,
     #[serde(default)]
     event_per_listener: bool,
+    #[serde(default)]
+    independent_listener: bool,
     inert: Option<String>,
     neoforge: Option<serde_json::Value>,
     fabric: Option<serde_json::Value>,
@@ -365,7 +367,6 @@ struct ModApiEntry {
     part: Option<PartKind>,
     answered_by: Option<AnsweredBy>,
     owner: Option<String>,
-    collect_validator: Option<String>,
     registration_append: Option<RegistrationAppend>,
     staged_surface: Option<String>,
     output_validator: Option<String>,
@@ -421,10 +422,10 @@ impl Hook {
                 || api.contract != Contract::Cancel
                 || api.answered_by.is_some()
                 || api.owner.is_some()
-                || api.collect_validator.is_some()
                 || api.output_validator.is_some()
                 || entry.context.is_some()
                 || entry.event_per_listener
+                || entry.independent_listener
             {
                 return Err(CatalogError::InvalidHook {
                     hook: name,
@@ -476,13 +477,12 @@ impl Hook {
         let effect = scope
             .as_ref()
             .is_some_and(|scope| scope.kind == PartKind::Effect);
-        if effect != (entry.target == EFFECT_TICK_TARGET)
-            || effect
-                && !matches!(
-                    name.as_str(),
-                    "apply_effect_tick" | "should_apply_effect_tick_this_tick"
-                )
-        {
+        let is_effect_tick = effect
+            && matches!(
+                name.as_str(),
+                "apply_effect_tick" | "should_apply_effect_tick_this_tick"
+            );
+        if is_effect_tick != (entry.target == EFFECT_TICK_TARGET) {
             return Err(CatalogError::InvalidHook {
                 hook: name,
                 error: format!("effect tick hooks must target {EFFECT_TICK_TARGET}"),
@@ -494,13 +494,13 @@ impl Hook {
         let mut effect_count = false;
         for (param, ty) in &entry.engine {
             match (param.as_str(), ty.as_str()) {
-                ("ticks", "& mut Ticks") if !effect => engine_ticks = true,
-                ("inert", "& mut bool") if !effect => engine_inert = true,
-                ("tick_count", "i32") if name == "apply_effect_tick" && effect => {
+                ("ticks", "& mut Ticks") if !is_effect_tick => engine_ticks = true,
+                ("inert", "& mut bool") if !is_effect_tick => engine_inert = true,
+                ("tick_count", "i32") if name == "apply_effect_tick" && is_effect_tick => {
                     effect_count = true
                 }
                 ("make_call", "impl FnOnce (EffectKey , i32) -> ApplyEffectTickCall < '_ >")
-                    if effect =>
+                    if is_effect_tick =>
                 {
                     effect_factory = true
                 }
@@ -519,7 +519,7 @@ impl Hook {
                     .into(),
             });
         }
-        if effect && (!effect_factory || effect_count != (name == "apply_effect_tick")) {
+        if is_effect_tick && (!effect_factory || effect_count != (name == "apply_effect_tick")) {
             return Err(CatalogError::InvalidHook {
                 hook: name,
                 error:
@@ -538,24 +538,25 @@ impl Hook {
         }
         if let Some(field) = &api.staged_surface
             && (api.contract != Contract::Listen
-                || scope.is_some()
-                || api.owner.as_ref() == Some(field))
+                || api.owner.as_ref() == Some(field)
+                || scope.as_ref().is_some_and(|scope| scope.key == *field))
         {
             return Err(CatalogError::InvalidHook {
                 hook: name,
-                error: "staged_surface requires a global listener and cannot be the owner filter"
-                    .into(),
+                error:
+                    "staged_surface requires a listener and cannot be its owner filter or Part key"
+                        .into(),
             });
         }
-        // A validator checks the entries a mod edits in place; an answered collector's mods
-        // only push into their own batch.
-        if let Some(validator) = &api.collect_validator
-            && (api.contract != Contract::Collect
-                || scope.is_some()
-                || answered_by_mod
-                || syn::parse_str::<syn::Path>(validator).is_err())
+        if api.registration_append == Some(RegistrationAppend::Attributed)
+            && (api.contract != Contract::Collect || scope.is_some() || answered_by_mod)
         {
-            return Err(CatalogError::InvalidContract(name));
+            return Err(CatalogError::InvalidHook {
+                hook: name.clone(),
+                error:
+                    "registration_append = \"attributed\" requires a global non-answered collect hook"
+                        .into(),
+            });
         }
         if let Some(validator) = &api.output_validator
             && (!matches!(api.contract, Contract::Cancel | Contract::Listen)
@@ -588,7 +589,6 @@ impl Hook {
             out: api.out,
             answered_by_mod,
             owner: api.owner,
-            collect_validator: api.collect_validator,
             registration_append: api.registration_append,
             staged_surface: api.staged_surface,
             inert: entry.inert,
@@ -607,6 +607,7 @@ impl Hook {
             engine_inert,
             stack_count: entry.stack_count,
             event_per_listener: entry.event_per_listener,
+            independent_listener: entry.independent_listener,
         })
     }
 }
@@ -653,7 +654,7 @@ pub(crate) fn validate_stack_count_output(
 /// Everything the generator reads from the catalog.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Catalog {
-    /// In declaration order: base first, then files by name, each file's declarations in order.
+    /// In declaration order: files by name, each file's declarations in order.
     pub hooks: Vec<Hook>,
     pub draw_contexts: Vec<DrawContext>,
     /// Prose that belongs to no one hook, from the `Notes` trait's `#[notes]`.
@@ -662,9 +663,6 @@ pub struct Catalog {
 
 /// Where the declarations live, relative to the checkout root.
 pub const DECLARATIONS: &str = "crates/sunrise-mod-vocab/src/hooks";
-
-/// What the catalog was declared in before the declarations: a file here is refused, never ignored.
-pub(crate) const RETIRED: &[&str] = &["native-hooks.json", "tools/native-hook-fragments"];
 
 /// The default binding for a game hook in the same-named `native_hooks` module.
 fn default_target(name: &str, area: &str) -> String {
@@ -878,7 +876,6 @@ impl Declared {
                             "part",
                             "answered_by",
                             "owner",
-                            "collect_validator",
                             "registration_append",
                             "staged_surface",
                             "output_validator",
@@ -905,87 +902,26 @@ impl Declared {
 }
 
 impl Catalog {
-    /// The catalog of the checkout at `root`: every file of the declarations directory, `base.rs` first and
-    /// then by name, so the order never depends on a list a PR edits.
-    /// The retired JSON catalog is refused wherever it still exists.
+    /// The catalog of the checkout at `root`: every file of the declarations directory, sorted by
+    /// name, so the order never depends on a list a PR edits.
     pub fn load(root: &Path) -> Result<Self, CatalogError> {
-        let read_error = |path: &Path, e: std::io::Error| CatalogError::Read {
+        let read_error = |path: &Path, error: String| CatalogError::Read {
             path: path.display().to_string(),
-            error: e.to_string(),
+            error,
         };
-        for retired in RETIRED {
-            let path = root.join(retired);
-            if path.is_file() {
-                return Err(CatalogError::Retired((*retired).to_string()));
-            }
-            if path.is_dir() {
-                let mut entries = fs::read_dir(&path).map_err(|e| read_error(&path, e))?;
-                if let Some(entry) = entries.next() {
-                    let entry = entry.map_err(|e| read_error(&path, e))?;
-                    return Err(CatalogError::Retired(format!(
-                        "{retired}/{}",
-                        entry.file_name().to_string_lossy()
-                    )));
-                }
-            }
-        }
         let dir = root.join(DECLARATIONS);
-        let modules = Self::modules(&dir)?;
+        let modules =
+            sunrise_game_discovery::module_files(&dir).map_err(|error| read_error(&dir, error))?;
         let files = modules
             .iter()
             .map(|module| {
                 let path = dir.join(format!("{module}.rs"));
-                let text = fs::read_to_string(&path).map_err(|e| read_error(&path, e))?;
+                let text =
+                    fs::read_to_string(&path).map_err(|e| read_error(&path, e.to_string()))?;
                 Ok((path.display().to_string(), text))
             })
             .collect::<Result<Vec<_>, CatalogError>>()?;
         Self::parse(&files)
-    }
-
-    pub(crate) fn modules(dir: &Path) -> Result<Vec<String>, CatalogError> {
-        let read_error = |path: &Path, e: std::io::Error| CatalogError::Read {
-            path: path.display().to_string(),
-            error: e.to_string(),
-        };
-        // The one enumerator of source modules, shared with the static inventories.
-        let mut modules =
-            sunrise_game_discovery::module_files(dir).map_err(|error| CatalogError::Read {
-                path: dir.display().to_string(),
-                error,
-            })?;
-        // Split declarations retain their original HookId positions in per-item metadata.
-        // Unnumbered additions are discovered alphabetically, without a shared registry.
-        let mut order = std::collections::HashMap::new();
-        for module in &modules {
-            let path = dir.join(format!("{module}.rs"));
-            let source = fs::read_to_string(&path).map_err(|e| read_error(&path, e))?;
-            if let Some(value) = source
-                .lines()
-                .find_map(|line| line.strip_prefix("// catalog-order: "))
-            {
-                let ordinal = value
-                    .parse::<usize>()
-                    .map_err(|e| CatalogError::Declaration {
-                        path: path.display().to_string(),
-                        error: format!("invalid catalog-order: {e}"),
-                    })?;
-                if order.values().any(|previous| *previous == ordinal) {
-                    return Err(CatalogError::Declaration {
-                        path: path.display().to_string(),
-                        error: format!("duplicate catalog-order: {ordinal}"),
-                    });
-                }
-                order.insert(module.clone(), ordinal);
-            }
-        }
-        modules.sort_by(|a, b| {
-            (a != "base", order.get(a).copied().unwrap_or(usize::MAX), a).cmp(&(
-                b != "base",
-                order.get(b).copied().unwrap_or(usize::MAX),
-                b,
-            ))
-        });
-        Ok(modules)
     }
 
     /// The catalog of declaration files given as (path, source), in the order given.
@@ -1040,7 +976,6 @@ impl Hook {
             out: None,
             answered_by_mod: false,
             owner: None,
-            collect_validator: None,
             registration_append: None,
             staged_surface: None,
             inert: None,
@@ -1059,6 +994,7 @@ impl Hook {
             engine_inert: false,
             stack_count: None,
             event_per_listener: false,
+            independent_listener: false,
         }
     }
 }
@@ -1160,44 +1096,47 @@ mod tests {
     }
 
     #[test]
-    fn the_retired_json_catalog_is_refused_wherever_it_is() {
-        let base = format!("{DECLARATIONS}/base.rs");
-        let index = format!("{DECLARATIONS}/mod.rs");
-        for retired in ["native-hooks.json", "tools/native-hook-fragments/late.json"] {
-            let root = checkout(&[(&base, HOOK), (&index, "mod base;"), (retired, "{}")]);
-            let error = Catalog::load(&root).unwrap_err().to_string();
-            assert!(error.starts_with(retired), "{error}");
-            assert!(error.contains("declared in Rust now"), "{error}");
-            fs::remove_dir_all(root).unwrap();
-        }
-    }
-
-    #[test]
     fn the_order_comes_from_the_directory_without_a_shared_module_list() {
-        let second = "pub trait Hooks { /// Doc.\n #[hook(side = \"server\", contract = \"listen\")] fn two(); }";
-        let base = format!("{DECLARATIONS}/base.rs");
-        let alpha = format!("{DECLARATIONS}/alpha.rs");
+        let zeta = "pub trait Hooks { /// Doc.\n #[hook(side = \"server\", contract = \"listen\")] fn zeta(); }";
+        let alpha = r#"
+            pub trait Hooks {
+                /// Doc.
+                #[hook(side = "server", contract = "listen")]
+                fn alpha_second();
+                /// Doc.
+                #[hook(side = "server", contract = "listen")]
+                fn alpha_first();
+            }
+        "#;
+        let ignored = "pub trait Hooks { /// Doc.\n #[hook(side = \"server\", contract = \"listen\")] fn ignored(); }";
         let index = format!("{DECLARATIONS}/mod.rs");
         let root = checkout(&[
-            (&alpha, second),
-            (&base, HOOK),
-            (&index, "mod base;\nmod alpha;"),
+            (&format!("{DECLARATIONS}/zeta.rs"), zeta),
+            (&format!("{DECLARATIONS}/base.rs"), HOOK),
+            (&format!("{DECLARATIONS}/alpha.rs"), alpha),
+            (&index, ignored),
         ]);
-        let catalog = Catalog::load(&root).unwrap();
-        let names = catalog
-            .hooks
-            .iter()
-            .map(|h| h.name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(names, ["one", "two"], "base.rs first, then by name");
+        let names = |catalog: Catalog| {
+            catalog
+                .hooks
+                .into_iter()
+                .map(|h| h.name)
+                .collect::<Vec<_>>()
+        };
+        let expected = ["alpha_second", "alpha_first", "one", "zeta"];
+        assert_eq!(names(Catalog::load(&root).unwrap()), expected);
         fs::remove_file(root.join(&index)).unwrap();
-        assert_eq!(Catalog::load(&root).unwrap().hooks.len(), 2);
+        assert_eq!(names(Catalog::load(&root).unwrap()), expected);
         fs::write(root.join(DECLARATIONS).join("not-valid.rs"), HOOK).unwrap();
+        let error = Catalog::load(&root).unwrap_err();
+        let expected_dir = root.join(DECLARATIONS).display().to_string();
         assert!(
-            Catalog::load(&root)
-                .unwrap_err()
-                .to_string()
-                .contains("not-valid.rs")
+            matches!(&error, CatalogError::Read { path, .. } if path.as_str() == expected_dir.as_str()),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("not a Rust identifier"),
+            "{error}"
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -1467,30 +1406,6 @@ mod tests {
             );
         }
     }
-    #[test]
-    fn split_file_order_is_stable_and_validated() {
-        let dir = std::env::temp_dir().join(format!("hook-order-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("z.rs"), "// catalog-order: 1\n").unwrap();
-        fs::write(dir.join("a.rs"), "// catalog-order: 2\n").unwrap();
-        fs::write(dir.join("b.rs"), "").unwrap();
-        assert_eq!(Catalog::modules(&dir).unwrap(), ["z", "a", "b"]);
-        fs::write(dir.join("b.rs"), "// catalog-order: 2\n").unwrap();
-        assert!(
-            Catalog::modules(&dir)
-                .unwrap_err()
-                .to_string()
-                .contains("duplicate catalog-order")
-        );
-        fs::write(dir.join("b.rs"), "// catalog-order: bad\n").unwrap();
-        assert!(
-            Catalog::modules(&dir)
-                .unwrap_err()
-                .to_string()
-                .contains("invalid catalog-order")
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
 
     #[test]
     fn part_option_requires_a_plain_global_cancel_hook() {
@@ -1506,7 +1421,8 @@ mod tests {
             json!({"mod_api": {"contract": "cancel", "out": "canceled", "part": "item", "scope": "item", "key": "stack"}}),
             json!({"mod_api": {"contract": "listen", "part": "item"}}),
             json!({"mod_api": {"contract": "collect", "out": "drops", "part": "item"}}),
-            json!({"mod_api": {"contract": "cancel", "out": "canceled", "part": "item", "isolate": true}}),
+            json!({"mod_api": {"contract": "cancel", "out": "canceled", "part": "item"}, "event_per_listener": true}),
+            json!({"mod_api": {"contract": "cancel", "out": "canceled", "part": "item"}, "independent_listener": true}),
         ] {
             assert!(Hook::parse(hook("bad", bad)).is_err());
         }

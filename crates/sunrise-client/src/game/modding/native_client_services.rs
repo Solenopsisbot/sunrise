@@ -18,17 +18,15 @@ impl Game<'_> {
         top: u32,
         bottom: u32,
     ) {
-        let [x, y, w, h] = rect;
-        if !rect.iter().all(|v| v.is_finite()) || w == 0.0 || h == 0.0 || (w > 0.0) != (h > 0.0) {
-            return;
+        if rect.into_iter().all(f32::is_finite) {
+            sunrise_client::hud_layout::paint_fill_gradient(
+                batch,
+                &self.gui.atlas,
+                rect,
+                top,
+                bottom,
+            );
         }
-        let ((x, y, w, h), top, bottom) = if w < 0.0 {
-            ((x + w, y + h, -w, -h), bottom, top)
-        } else {
-            ((x, y, w, h), top, bottom)
-        };
-        let abgr = sunrise_client::hud_layout::abgr;
-        batch.fill_gradient(&self.gui.atlas, (x, y, w, h), abgr(top), abgr(bottom));
     }
     /// Vanilla's nine-slice widget rendering. `color` is ARGB, as `fill` uses.
     pub(super) fn native_gui_nine_slice(
@@ -63,8 +61,8 @@ impl Game<'_> {
         at: [f32; 2],
         text: Option<&str>,
     ) {
-        self.draw_item_model(batch, stack, at[0], at[1]);
-        self.draw_item_decorations(batch, stack, at[0], at[1], text.map(str::to_owned));
+        self.draw_item_model(batch, stack, at[0], at[1], 0);
+        self.draw_item_decorations(batch, stack, at[0], at[1], text);
     }
     /// Whether a specific key is currently held down.
     /// `key` is the vanilla physical key or mouse button name (`key.keyboard.left.shift`,

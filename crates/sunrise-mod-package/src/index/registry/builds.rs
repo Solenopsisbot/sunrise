@@ -341,19 +341,19 @@ pub(super) fn verify(
                 "must cover every SDK host: missing {missing:?}, unexpected {extra:?}"
             )));
         }
-        let identity = library_identity(
-            &descriptor.build,
+        let identity = [
+            descriptor.build.as_str(),
             &descriptor.id,
             &canonical,
             &descriptor.rust,
-        );
+        ];
         for archive in descriptor.archives {
             if revoked.iter().any(|r| r.covers(&entry.id, &archive.sha256)) {
                 continue;
             }
             let checked = read_regular(src.files, Path::new(&archive.sha256), archive.size)
                 .map_err(|e| e.to_string())
-                .and_then(|bytes| check_archive(bytes, &archive, &identity, submission.key));
+                .and_then(|bytes| check_archive(bytes, &archive, identity, submission.key));
             checked.map_err(|e| format!("{}: {e}", archive.name))?;
             records.push(NativeBinary {
                 build: release.commit.clone(),
@@ -379,7 +379,7 @@ pub(super) fn verify(
 fn check_archive(
     bytes: Vec<u8>,
     archive: &Archive,
-    identity: &str,
+    identity: [&str; 4],
     key: &str,
 ) -> Result<(), String> {
     if bytes.len() as u64 != archive.size || crate::index::sha256(&bytes) != archive.sha256 {
@@ -389,9 +389,80 @@ fn check_archive(
     verify_archive_identity(bytes, &archive.target, identity)
 }
 
-/// The five-field identity the builder stamps on the library and the registry checks.
-pub fn library_identity(build: &str, id: &str, version: &str, rust: &str) -> String {
-    format!("{build} {id} {version} {rust} unwind")
+/// A native library's build identity, which the builder stamps on the library, the build record
+/// keeps and the loader compares, fields separated by spaces:
+/// `<build> <mod id> <version> <rustc> <source> <dependencies> <panic strategy>`.
+///
+/// `source` is the digest of the mod's files; a library built with crates.io dependencies adds
+/// `+<graph>`, the digest of the crates.io packages it is compiled with as that build resolved
+/// them (version, source and the features of each compilation unit, target and host apart), since
+/// one build unifies them across every mod it compiles. `dependencies` names each native mod the library
+/// links, as `<id>=<SHA-256 of that library's identity>`, sorted and joined by `,`, or `none`: a
+/// library built against another build of a dependency, or of a dependency's own dependency, has
+/// another identity, so the loader refuses the pair before any of their code runs.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LibraryIdentity<'a> {
+    pub build: &'a str,
+    pub id: &'a str,
+    pub version: &'a str,
+    pub rust: &'a str,
+    pub source: &'a str,
+    pub dependencies: &'a str,
+    pub panic: &'a str,
+}
+
+impl<'a> LibraryIdentity<'a> {
+    pub fn parse(identity: &'a str) -> Option<Self> {
+        let mut fields = identity.split(' ');
+        let mut next = || fields.next().filter(|field| !field.is_empty());
+        let parsed = Self {
+            build: next()?,
+            id: next()?,
+            version: next()?,
+            rust: next()?,
+            source: next()?,
+            dependencies: next()?,
+            panic: next()?,
+        };
+        fields.next().is_none().then_some(parsed)
+    }
+
+    /// Each linked native mod's id and the SHA-256 of the identity it was built against; `None`
+    /// for a malformed list.
+    pub fn dependencies(&self) -> Option<Vec<(&'a str, &'a str)>> {
+        if self.dependencies == "none" {
+            return Some(Vec::new());
+        }
+        self.dependencies
+            .split(',')
+            .map(|dependency| {
+                dependency
+                    .split_once('=')
+                    .filter(|(id, digest)| !id.is_empty() && crate::index::hex64(digest).is_ok())
+            })
+            .collect()
+    }
+}
+
+/// A library's identity before its panic strategy, which the library appends itself: built for
+/// `build` with `rust` from the mod files `source` digests, against the native mods in `linked`
+/// (each one's id and full identity).
+pub fn library_identity<'a>(
+    [build, id, version, rust]: [&str; 4],
+    source: &str,
+    linked: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> String {
+    let mut dependencies: Vec<_> = linked
+        .into_iter()
+        .map(|(id, identity)| format!("{id}={}", crate::index::sha256(identity.as_bytes())))
+        .collect();
+    dependencies.sort();
+    let dependencies = if dependencies.is_empty() {
+        "none".to_owned()
+    } else {
+        dependencies.join(",")
+    };
+    format!("{build} {id} {version} {rust} {source} {dependencies}")
 }
 
 /// The library suffix the SDK host can load, including hosts with a `-server` suffix.
@@ -467,7 +538,11 @@ fn check_library(bytes: &[u8], host: &str, extension: &str) -> Result<(), String
 
 /// Check an archive's structure, encoded library and stamp without loading it. This does not
 /// authenticate the bytes; an archive submitted to the registry must also pass signature checks.
-pub fn verify_archive_identity(bytes: Vec<u8>, target: &str, expected: &str) -> Result<(), String> {
+pub fn verify_archive_identity(
+    bytes: Vec<u8>,
+    target: &str,
+    expected: [&str; 4],
+) -> Result<(), String> {
     let extension = library_extension(target)?;
     // Two files only; raw iteration does not allocate PAX/GNU extension entries. Bound both the
     // decoder dictionary and total output, including tar headers, zero padding and the trailer.
@@ -534,12 +609,15 @@ pub fn verify_archive_identity(bytes: Vec<u8>, target: &str, expected: &str) -> 
     let stamp = stamp.ok_or("the archive has no identity.json")?;
     let (name, sha256) = library.ok_or("the archive has no library")?;
     if stamp.target != target
-        || stamp.identity != expected
+        || LibraryIdentity::parse(&stamp.identity).is_none_or(|identity| {
+            [identity.build, identity.id, identity.version, identity.rust] != expected
+                || identity.panic != "unwind"
+        })
         || stamp.file != name
         || stamp.sha256 != sha256
     {
         return Err(format!(
-            "identity.json does not match host {target}, its library or expected identity {expected:?}"
+            "identity.json does not match host {target}, its library or expected build, mod, version and Rust release {expected:?}"
         ));
     }
     Ok(())
@@ -550,12 +628,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_dependency_list_needs_an_id_and_a_sha256_per_entry() {
+        let digest = "a".repeat(64);
+        let dependencies = |list: &str| {
+            let identity = format!("build mod 1 rust source {list} unwind");
+            LibraryIdentity::parse(&identity)
+                .unwrap()
+                .dependencies()
+                .map(|pairs| pairs.len())
+        };
+        assert_eq!(dependencies("none"), Some(0));
+        assert_eq!(
+            dependencies(&format!("base={digest},other={digest}")),
+            Some(2)
+        );
+        for malformed in [
+            "base".to_owned(),
+            format!("={digest}"),
+            "base=".to_owned(),
+            format!("base={digest}=x"),
+            format!("base={}", &digest[1..]),
+        ] {
+            assert_eq!(dependencies(&malformed), None, "{malformed}");
+        }
+    }
+
+    #[test]
     fn the_right_extension_does_not_make_a_library_fit_the_wrong_architecture() {
         let bytes = include_bytes!(
             "../../../tests/index/stable-native/release_probe-1.0.0+26.3-0.1.1-x86_64-unknown-linux-gnu.tar.xz"
         );
-        let error =
-            verify_archive_identity(bytes.to_vec(), "aarch64-unknown-linux-gnu", "").unwrap_err();
+        let error = verify_archive_identity(bytes.to_vec(), "aarch64-unknown-linux-gnu", [""; 4])
+            .unwrap_err();
         assert!(
             error.contains("Aarch64") && error.contains("X86_64"),
             "{error}"
@@ -571,7 +675,7 @@ mod tests {
             ("x86_64-pc-windows-gnu", "dll"),
             ("aarch64-apple-darwin", "dylib"),
         ] {
-            let error = verify_archive_identity(bytes.to_vec(), host, "").unwrap_err();
+            let error = verify_archive_identity(bytes.to_vec(), host, [""; 4]).unwrap_err();
             assert!(
                 error.contains(&format!("SDK host {host} requires a .{extension} library")),
                 "{error}"

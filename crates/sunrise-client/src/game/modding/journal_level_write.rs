@@ -8,9 +8,9 @@ use super::native_level_signals::ReadLevel;
 use super::transactions::After;
 use mod_api::{
     AttachmentBatch, AttachmentStore, BlockEntityRef, BlockKey, BlockPos, BlockSide, BlockState,
-    BlockUpdateFlags, Compound, Direction, FeatureFlags, FluidState, ItemStack, LevelHost,
+    BlockUpdateFlags, Compound, Direction, FeatureFlags, FluidState, ItemStackView, LevelHost,
     LevelRandomHost, LevelRef, LevelTicksHost, LevelWriteHost, LightLayer, PartStateError,
-    ParticleOptions, PlayerRef, RandomDraw, Tags,
+    ParticleOptions, PlayerRef, RandomDraw, SoundSource, Tags,
 };
 use sunrise_core::{random::RandomSource, ticks::TickPriority};
 use sunrise_world::{
@@ -37,27 +37,122 @@ impl<'g, 'a> JournalLevelWrite<'g, 'a> {
     }
 
     pub(super) fn write_block(&mut self, pos: [i32; 3], state: BlockStateId, flags: i32) -> bool {
+        let old = self.game.world.block(pos[0], pos[1], pos[2]);
+        self.can_replace_block(pos, old, state) && self.replace_block(pos, old, state, flags)
+    }
+
+    fn can_replace_block(&self, pos: [i32; 3], old: BlockStateId, state: BlockStateId) -> bool {
         let [x, y, z] = pos;
-        if self.game.world_debug
-            || !(-30_000_000..30_000_000).contains(&x)
-            || !(-30_000_000..30_000_000).contains(&z)
-            || !self.game.world.is_loaded_at(x, y, z)
-            || self.game.world.carrier_fences.locks_cell(&pos)
-            || self.game.pack.assets.registry.state(state).is_none()
-        {
+        old != state
+            && !self.game.world_debug
+            && (-30_000_000..30_000_000).contains(&x)
+            && (-30_000_000..30_000_000).contains(&z)
+            && self.game.world.shape.contains_y(y)
+            && self
+                .game
+                .world
+                .chunks
+                .get(&(x >> 4, z >> 4))
+                .is_some_and(|chunk| chunk.section_index(y).is_some())
+            && !self.game.world.carrier_fences.locks_cell(&pos)
+            && self.game.pack.assets.registry.state(state).is_some()
+    }
+
+    fn replace_block(
+        &mut self,
+        pos: [i32; 3],
+        old: BlockStateId,
+        state: BlockStateId,
+        flags: i32,
+    ) -> bool {
+        if !self.game.journal_set_block_flags(pos, state, flags, true) {
             return false;
         }
-        let old = self.game.world.block(x, y, z);
-        if old == state || !self.game.journal_set_block_flags(pos, state, flags, true) {
-            return false;
-        }
-        let b = self.game.res.behaviours();
-        if !b.keeps_block_entity(old, state)
-            && self.game.world.block_entities.get(&(x, y, z)).is_some()
+        let [x, y, z] = pos;
+        if !self.game.res.behaviours().keeps_block_entity(old, state)
+            && self.game.world.block_entities.contains_key(&(x, y, z))
         {
             self.game.journal_block_replacement((x, y, z));
         }
         true
+    }
+
+    /// `Level.destroyBlock` in this level's journal. Resolve the loot and experience while
+    /// the old state and block entity are still visible; publication follows vanilla order.
+    pub(super) fn destroy_block(
+        &mut self,
+        pos: [i32; 3],
+        drop: bool,
+        tool: Option<&sunrise_client::items::ItemStack>,
+        collect: bool,
+    ) -> Option<Vec<sunrise_client::items::ItemStack>> {
+        let [x, y, z] = pos;
+        let old = self.game.world.block(x, y, z);
+        let behaviours = self.game.res.behaviours();
+        let replacement = behaviours.legacy_block(behaviours.fluid(old));
+        if behaviours.is_air(old) || !self.can_replace_block(pos, old, replacement) {
+            return None;
+        }
+        if let Some(id) = behaviours.destroy_particle_event(old) {
+            self.queue(PendingWrite::Event {
+                level: self.game.dim,
+                id,
+                pos,
+                data: old.0 as i32,
+            });
+        }
+        let mut collected = Vec::new();
+        if drop && self.game.level_rules().block_drops {
+            self.game.journal_block_loot_random();
+            // First access to container loot can fill the inventory and consume its loot table.
+            let key = (x, y, z);
+            if self.game.world.block_entities.contains_key(&key)
+                && self
+                    .game
+                    .world
+                    .chunks
+                    .get(&(x >> 4, z >> 4))
+                    .and_then(|chunk| chunk.saved.as_ref())
+                    .is_some_and(|saved| saved.pending_loot.contains_key(&key))
+            {
+                self.game.journal_attachments(
+                    sunrise_mod_runtime::attachments::Holder::BlockEntity(pos),
+                );
+            }
+            self.game.ensure_stateful_entity_table();
+            let (kept, items, orbs) = self.game.with_level_access(false, |b, level, ticks| {
+                let items = level.spill.spawns.len();
+                let orbs = level.spill.orbs.len();
+                level.drop_tool = Some((key, tool.cloned()));
+                level.drop_into = collect.then(Vec::new);
+                b.drop_resources(
+                    level,
+                    ticks,
+                    sunrise_core::position::BlockPos::new(x, y, z),
+                    old,
+                );
+                (
+                    level.drop_into.take().unwrap_or_default(),
+                    level.spill.spawns.split_off(items),
+                    level.spill.orbs.split_off(orbs),
+                )
+            });
+            collected = kept;
+            if !items.is_empty() || !orbs.is_empty() {
+                self.game.after_commit(After::BlockDropSpawns(items, orbs));
+            }
+        }
+        // Only storage (not listeners) is touched by this already-validated write.
+        if !self.replace_block(pos, old, replacement, flags::UPDATE_ALL) {
+            return None;
+        }
+        self.game.after_commit(After::BlockGameEvent(
+            "minecraft:block_destroy",
+            pos,
+            None,
+            old,
+        ));
+        Some(collected)
     }
 
     fn queue(&mut self, write: PendingWrite) -> bool {
@@ -67,8 +162,8 @@ impl<'g, 'a> JournalLevelWrite<'g, 'a> {
 }
 
 macro_rules! read_level {
-    ($(fn $method:ident(&self $(, $arg:ident: $ty:ty)*) -> $result:ty;)*) => {$(
-        fn $method(&self $(, $arg: $ty)*) -> $result {
+    ($(fn $method:ident(&self $(, $arg:ident: $ty:ty)*) $(-> $result:ty)?;)*) => {$(
+        fn $method(&self $(, $arg: $ty)*) $(-> $result)? {
             self.read().$method($($arg),*)
         }
     )*};
@@ -85,7 +180,7 @@ impl LevelHost for JournalLevelWrite<'_, '_> {
         fn block_entity(&self, pos: [i32; 3]) -> Option<BlockEntityRef>;
         fn has_item_capability(&self, pos: [i32; 3], side: Option<Direction>) -> Option<bool>;
         fn container_size(&self, at: BlockSide) -> Option<usize>;
-        fn container_stack(&self, at: BlockSide, slot: usize) -> Option<ItemStack>;
+        fn lend_container_stack(&self, at: BlockSide, slot: usize, read: &mut dyn for<'a> FnMut(ItemStackView<'a>));
         fn block_entity_part_snapshot(&self, entity: BlockEntityRef, namespace: &str, name: &str) -> Result<AttachmentBatch, PartStateError>;
         fn block_state(&self, pos: [i32; 3]) -> Option<BlockState>;
         fn block_state_id(&self, name: &str) -> Option<BlockState>;
@@ -93,15 +188,14 @@ impl LevelHost for JournalLevelWrite<'_, '_> {
         fn state_string(&self, state: BlockState) -> Option<String>;
         fn min_y(&self) -> i32;
         fn height(&self) -> i32;
-        fn block_in_tag(&self, block: BlockKey, tag: &str) -> Option<bool>;
         fn fluid_state(&self, pos: [i32; 3]) -> Option<FluidState>;
-        fn state_fluid_state(&self, state: BlockState) -> Option<FluidState>;
-        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> Option<bool>;
         fn state_with_property(&self, state: BlockState, key: &str, value: &str) -> Option<BlockState>;
         fn brightness(&self, layer: LightLayer, pos: [i32; 3]) -> i32;
         fn raw_brightness(&self, pos: [i32; 3], sky_darken: i32) -> i32;
         fn is_loaded(&self, pos: [i32; 3]) -> bool;
         fn is_raining_at(&self, pos: [i32; 3]) -> bool;
+        fn is_raining(&self) -> Option<bool>;
+        fn sky_darken(&self) -> Option<i32>;
         fn enabled_features(&self) -> FeatureFlags;
     }
     fn state_block(&self, state: BlockState) -> Option<&str> {
@@ -133,15 +227,15 @@ impl LevelHost for JournalLevelWrite<'_, '_> {
     fn has_neighbor_signal(&self, pos: [i32; 3]) -> Option<bool> {
         Some(self.game.level_has_neighbor_signal(self.level, pos))
     }
-    fn collision_shape(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {
+    fn collision_shape(&self, pos: [i32; 3]) -> Option<mod_api::VoxelShape> {
         self.is_loaded(pos).then(|| {
             let [x, y, z] = pos;
-            super::native_state_shapes::collision_boxes(
+            mod_api::__private::voxel_shape_from_core(super::native_state_shapes::collision_shape(
                 self.game.collision,
                 &self.game.world,
                 self.game.world.block(x, y, z),
                 pos,
-            )
+            ))
         })
     }
 }
@@ -194,7 +288,13 @@ impl LevelWriteHost for JournalLevelWrite<'_, '_> {
         let (replacement, flags) = self.game.level_removal_write(pos, moved);
         self.write_block(pos, replacement, flags)
     }
-    fn set_block_property(&mut self, pos: [i32; 3], key: &str, value: &str, flags: i32) -> bool {
+    fn set_block_property(
+        &mut self,
+        pos: [i32; 3],
+        key: &str,
+        value: &str,
+        flags: BlockUpdateFlags,
+    ) -> bool {
         let [x, y, z] = pos;
         super::native_hooks::with_property(
             self.game.pack.assets.registry,
@@ -202,27 +302,26 @@ impl LevelWriteHost for JournalLevelWrite<'_, '_> {
             key,
             value,
         )
-        .is_some_and(|state| self.write_block(pos, state, flags))
+        .is_some_and(|state| self.write_block(pos, state, flags.bits()))
     }
     fn play_sound(
         &mut self,
         sound: &str,
         at: [f64; 3],
-        source: usize,
+        source: SoundSource,
         volume: f32,
         pitch: f32,
     ) -> bool {
-        if self.game.lan.is_none()
-            || !super::native_hooks::mod_sound_ok(sound, at, source, volume, pitch)
-        {
+        if self.game.lan.is_none() || !super::native_hooks::sound_id(sound) {
             return false;
         }
         self.game.emit_level_effect(PendingWrite::Sound {
             sound: NativeSound {
                 dimension: self.level.dimension_id(),
                 sound: sound.to_owned(),
+                inline_range: None,
                 at,
-                source: source as i32,
+                source: source.index() as i32,
                 volume,
                 pitch,
                 seed: 0,
@@ -254,7 +353,7 @@ impl LevelWriteHost for JournalLevelWrite<'_, '_> {
             &options,
             state,
             |id| registry.state(id).is_some(),
-            at,
+            std::slice::from_ref(&at),
             spread,
             speed,
         ) {
@@ -540,7 +639,8 @@ impl Game<'_> {
         }
     }
 
-    /// A part that refuses or falls through does not keep its tentative writes.
+    /// `LiquidBlockContainer.placeLiquid`: what the part writes stays in the ambient transaction
+    /// whatever it answers. A panicking part's scope aborts with it.
     pub(super) fn journalled_place_liquid(
         &mut self,
         level: LevelRef,
@@ -561,7 +661,7 @@ impl Game<'_> {
             self.storage_scope(|game, _| {
                 let reply = JournalLevelWrite::new(game, level)
                     .and_then(|mut host| part.place_liquid(&mut host, event));
-                (reply, reply == Some(true))
+                (reply, true)
             })
         });
         answer

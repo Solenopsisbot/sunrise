@@ -61,7 +61,7 @@ fn send_types(game: &mut Game<'_>, types: &[(&str, serde_json::Value)]) {
             })
             .collect(),
     );
-    game.set_registries(Arc::new(registries));
+    game.set_registries(Arc::new(registries)).unwrap();
 }
 
 /// The `Login` packet a server sends, into `entered`.
@@ -156,7 +156,11 @@ fn reload(game: &mut Game<'_>, server: &[sunrise_client::packs::Pack]) {
         &[],
         server,
         &game.mods,
-        game.register_client_reload_listeners(),
+        game.register_client_reload_listeners(
+            &game
+                .capture_candidate_settings(&game.options.resources)
+                .unwrap(),
+        ),
         &[],
         &game.pack.assets,
         &game.res,

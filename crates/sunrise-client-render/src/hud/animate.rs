@@ -43,53 +43,61 @@ impl super::HudRenderer {
     ) {
         let inputs = animator.mode_inputs();
         let inputs = Some(&inputs);
-        let Some(texture) = &self.atlas_texture else {
-            return;
-        };
-        for (placement, animation, previous) in &mut self.sprite_animations {
-            // `SpriteContents.AnimationState`: the frame from the mcmeta's
-            // list, blended into the next one by the sub-frame's thousandths
-            // when the sprite interpolates; or what a Polytone `mode` picks.
-            let blend = animation.blend_with(tick, inputs);
-            let state = (blend.frame, blend.next, blend.millis);
-            if state == *previous {
-                continue;
-            }
-            let (w, h) = (placement.w, placement.h);
-            let pixels = if blend.millis == 0 {
-                animation.resized_pixels(blend.frame, w, h)
-            } else {
-                let current = animation.resized_pixels(blend.frame, w, h);
-                let next = animation.resized_pixels(blend.next, w, h);
-                let millis = blend.millis;
-                current
-                    .iter()
-                    .zip(next)
-                    .map(|(&a, b)| {
-                        ((u32::from(a) * (1000 - millis) + u32::from(b) * millis + 500) / 1000)
-                            as u8
-                    })
-                    .collect()
-            };
-            let (origin_x, origin_y, up_w, up_h, upload_bytes) =
-                animation_upload_region(*placement, &pixels);
-            uploads.texture(
-                encoder,
-                wgpu::TexelCopyTextureInfo {
-                    texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: origin_x,
-                        y: origin_y,
-                        z: 0,
+        for (texture, animations) in self
+            .atlas_texture
+            .as_ref()
+            .zip(Some(&mut self.sprite_animations))
+            .into_iter()
+            .chain(
+                self.atlas_pages
+                    .iter_mut()
+                    .flatten()
+                    .map(|p| (&p.page.texture, &mut p.page.animations)),
+            )
+        {
+            for (placement, animation, previous) in animations {
+                // `SpriteContents.AnimationState`: the frame from the mcmeta's
+                // list, blended into the next one by the sub-frame's thousandths
+                // when the sprite interpolates; or what a Polytone `mode` picks.
+                let blend = animation.blend_with(tick, inputs);
+                let state = (blend.frame, blend.next, blend.millis);
+                if state == *previous {
+                    continue;
+                }
+                let (w, h) = (placement.w, placement.h);
+                let Ok(mut pixels) = animation.resized_pixels(blend.frame, w, h) else {
+                    continue;
+                };
+                if blend.millis != 0 {
+                    let Ok(next) = animation.resized_pixels(blend.next, w, h) else {
+                        continue;
+                    };
+                    let millis = blend.millis;
+                    for (a, b) in pixels.iter_mut().zip(next) {
+                        *a = ((u32::from(*a) * (1000 - millis) + u32::from(b) * millis + 500)
+                            / 1000) as u8;
+                    }
+                }
+                let (origin_x, origin_y, up_w, up_h, upload_bytes) =
+                    animation_upload_region(*placement, &pixels);
+                uploads.texture(
+                    encoder,
+                    wgpu::TexelCopyTextureInfo {
+                        texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: origin_x,
+                            y: origin_y,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
                     },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                up_w,
-                up_h,
-                &upload_bytes,
-            );
-            *previous = state;
+                    up_w,
+                    up_h,
+                    &upload_bytes,
+                );
+                *previous = state;
+            }
         }
     }
 }

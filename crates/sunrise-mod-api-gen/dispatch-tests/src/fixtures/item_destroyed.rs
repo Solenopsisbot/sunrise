@@ -8,12 +8,13 @@ impl ItemPart for DestroyedSpillPart {
     fn item_subscribed(&self) -> &'static [Option<HookId>] {
         &[hook_ids::item_destroyed]
     }
-    fn item_destroyed(&self, _: &mut dyn ServerHost, event: &mut ItemDestroyedEvent<'_>) {
+    fn item_destroyed(&self, _: &mut dyn ServerHost, event: &mut ItemDestroyedEvent<'_, '_>) {
         self.seen_damage
             .lock()
             .unwrap()
             .push(event.damage_type.to_owned());
-        event.drops.push(ItemStack {
+        // A refused stack leaves the list as it was; the part goes on.
+        let _ = event.drops.push(ItemStack {
             item: Arc::from(self.add_item),
             count: self.count,
         });
@@ -41,9 +42,9 @@ fn install_destroyed_spill_parts(seen: &Arc<Mutex<Vec<String>>>) {
 }
 
 /// Runs the dispatch for a destroyed `test:pouch` with no vanilla spill and `validate` as the
-/// engine's per-part drop check, returning the final drops as `(item, count)`.
+/// engine's check of each submitted drop, returning the final drops as `(item, count)`.
 fn dispatch_pouch_destroyed(
-    validate: &mut dyn FnMut(&Vec<ItemStack>) -> Result<(), StackWriteError>,
+    validate: impl Fn(&ItemStack) -> Result<ItemStack, StackWriteError>,
 ) -> Vec<(String, u32)> {
     let mut host = TestHost;
     let stack = ItemStack {
@@ -51,13 +52,18 @@ fn dispatch_pouch_destroyed(
         count: 1,
     };
     let mut drops = Vec::new();
+    let mut journal = HookListJournal::new(
+        HookListStorage::Resizable(&mut drops),
+        |stack: &ItemStack| Some(stack.clone()),
+        validate,
+    );
+    let mut list = HookList::new(&mut journal, "item_destroyed", "drops");
     dispatch_item_destroyed(
         &mut host,
         &stack,
         ItemEntityRef,
         "minecraft:lava",
-        &mut drops,
-        validate,
+        &mut list,
     );
     destroyed_drops(&drops)
 }
@@ -77,34 +83,35 @@ fn expected_drops(drops: &[(&str, u32)]) -> Vec<(String, u32)> {
 }
 
 #[test]
-fn item_destroyed_rolls_back_only_the_part_whose_drops_the_validator_refuses() {
+fn item_destroyed_refuses_only_the_drop_the_boundary_check_refuses() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     install_destroyed_spill_parts(&seen);
 
-    // The engine's check converts the whole list and refuses a count above the stack limit.
-    let mut candidates = Vec::new();
-    let mut validate = |drops: &Vec<ItemStack>| {
-        candidates.push(destroyed_drops(drops));
-        if drops.iter().any(|stack| stack.count > 64) {
+    // The engine's check converts each submitted stack and refuses a count above the stack limit.
+    let checked = Mutex::new(Vec::new());
+    let drops = dispatch_pouch_destroyed(|stack| {
+        checked
+            .lock()
+            .unwrap()
+            .push(destroyed_drops(std::slice::from_ref(stack)));
+        if stack.count > 64 {
             Err(StackWriteError::CountExceeded)
         } else {
-            Ok(())
+            Ok(stack.clone())
         }
-    };
-    let drops = dispatch_pouch_destroyed(&mut validate);
+    });
 
-    // Every part heard the hook, and each part's edit was checked on its own: the overstack
-    // was refused, and the emerald part started from the list with that edit rolled back.
+    // Every part heard the hook, and each stack was checked on its own.
     assert_eq!(*seen.lock().unwrap(), vec!["minecraft:lava".to_owned(); 3]);
     assert_eq!(
-        candidates,
+        checked.into_inner().unwrap(),
         vec![
             expected_drops(&[("minecraft:diamond", 2)]),
-            expected_drops(&[("minecraft:diamond", 2), ("invalid:overstack", 999)]),
-            expected_drops(&[("minecraft:diamond", 2), ("minecraft:emerald", 3)]),
+            expected_drops(&[("invalid:overstack", 999)]),
+            expected_drops(&[("minecraft:emerald", 3)]),
         ]
     );
-    // The refused part's stack is gone; the parts before and after it keep their drops.
+    // The refused stack never joined the list; the parts before and after it keep their drops.
     assert_eq!(
         drops,
         expected_drops(&[("minecraft:diamond", 2), ("minecraft:emerald", 3)])
@@ -118,7 +125,7 @@ fn item_destroyed_keeps_every_parts_drops_the_validator_accepts() {
 
     // The dispatch refuses nothing itself: with a check that accepts everything, even the
     // overstack stays, so the refusal above is the validator's alone.
-    let drops = dispatch_pouch_destroyed(&mut |_| Ok(()));
+    let drops = dispatch_pouch_destroyed(|stack| Ok(stack.clone()));
 
     assert_eq!(*seen.lock().unwrap(), vec!["minecraft:lava".to_owned(); 3]);
     assert_eq!(

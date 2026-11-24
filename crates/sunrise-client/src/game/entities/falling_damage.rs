@@ -49,11 +49,9 @@ impl Game<'_> {
                     if self.mobs[index].removed {
                         continue;
                     }
-                    let plan = self.prepare_knockback_credit(
-                        self.mobs[index].id as i32,
-                        None,
-                        self.combat.attack(),
-                    );
+                    let mob_id = self.mobs[index].id;
+                    let plan =
+                        self.prepare_knockback_credit(mob_id as i32, None, self.combat.attack());
                     let mut credit = plan.lend(&mut self.last_hurt_by_player);
                     self.mobs[index].damage(
                         crate::game::entity::damage_level_of!(self, &attack, &mut credit, None),
@@ -124,7 +122,17 @@ impl Game<'_> {
 
     /// `FallingBlockEntity.tick`: finish a landing, including the placed block
     /// entity and the carried `TileEntityData` applied through loadWithComponents.
-    pub(super) fn finish_falling_block(&mut self, block: FallingBlock, pos: [i32; 3]) {
+    pub(super) fn finish_falling_block(
+        &mut self,
+        block: FallingBlock,
+        pos: [i32; 3],
+    ) -> Option<FallingBlock> {
+        // A moving piston's cell skips the place, drop and discard branch
+        // before cancelDrop is even read: the block stays and is pushed on.
+        let at = self.world.block(pos[0], pos[1], pos[2]);
+        if &*self.res.facts().get(at).name == "minecraft:moving_piston" {
+            return Some(block);
+        }
         let name = self.res.facts().get(block.state).name.clone();
         let anvil = name.ends_with("anvil");
         // Fallable.onBrokenAfterFall: the anvil's, the pointed dripstone's and
@@ -164,7 +172,7 @@ impl Game<'_> {
                     state: None,
                 });
             }
-            return;
+            return None;
         }
         let landing = self.with_level(|b, level, ticks| {
             b.falling_block_landed(
@@ -175,6 +183,9 @@ impl Game<'_> {
                 false,
             )
         });
+        if landing == Landing::Continue {
+            return Some(block);
+        }
         if let Landing::Placed(state) = landing {
             let name = self.res.facts().get(state).name.clone();
             // LevelChunk.setBlockState creates the new block entity even when
@@ -235,6 +246,7 @@ impl Game<'_> {
             // came to rest (on top of a turtle egg, not inside its cell).
             self.drop_falling_block(block.state, block.position);
         }
+        None
     }
     /// The falling block `entity` at `position`, whose box is `bounds`, hits the acting player.
     fn falling_hurt_player(

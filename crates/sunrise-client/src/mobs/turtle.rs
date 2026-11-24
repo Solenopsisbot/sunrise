@@ -19,7 +19,7 @@ use crate::blocks::Fluid;
 use crate::health::DamageLevel;
 use std::ops::ControlFlow;
 use sunrise_core::{
-    geometry::{Vec3, trig},
+    geometry::{Axis, Vec3, trig},
     random::RandomSource,
 };
 
@@ -166,9 +166,9 @@ pub(super) fn travel(
 ) -> ControlFlow<super::living::TravelPause> {
     m.move_relative(0.1, input);
     m.travel_move(w, level, events, pause, |m, _, _, _| {
-        m.velocity = m.velocity.scale(0.9);
+        m.set_velocity(m.velocity.scale(0.9));
         if m.ai.target.is_none() && (!going_home(m) || !close_to_home(m, 20.0)) {
-            m.velocity.y -= 0.005;
+            m.set_velocity(m.velocity.with_component(Axis::Y, m.velocity.y - 0.005));
         }
     })
 }

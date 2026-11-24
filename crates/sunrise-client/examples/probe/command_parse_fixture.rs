@@ -43,7 +43,9 @@ fn parser_id(ty: &ArgType) -> String {
         // A mod's registered type never appears in vanilla's tree; it goes over the wire as the
         // Brigadier type its kind names.
         ArgType::Custom(custom) => match custom.kind() {
-            CustomArgumentKind::Word | CustomArgumentKind::Greedy => "brigadier:string".into(),
+            CustomArgumentKind::Word
+            | CustomArgumentKind::Quotable
+            | CustomArgumentKind::Greedy => "brigadier:string".into(),
             CustomArgumentKind::Integer { .. } => "brigadier:integer".into(),
             CustomArgumentKind::Long { .. } => "brigadier:long".into(),
         },
@@ -104,7 +106,7 @@ fn parser_id(ty: &ArgType) -> String {
         ArgType::Slots => "minecraft:slots".into(),
         ArgType::Slot => "minecraft:item_slot".into(),
         ArgType::SlotSource => "minecraft:slot_source".into(),
-        ArgType::ResourceOrId(r) => match *r {
+        ArgType::ResourceOrId(r) => match r.as_str() {
             "minecraft:loot_table" => "minecraft:loot_table".into(),
             "minecraft:item_modifier" => "minecraft:loot_modifier".into(),
             "minecraft:predicate" => "minecraft:loot_predicate".into(),

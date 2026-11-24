@@ -116,12 +116,19 @@ Content {
                     slope_find_distance: 3,
                     source_conversion: true,
                     bucket: false,
+                    flowing: Some(
+                        "fluid_full:brine_flowing",
+                    ),
                 },
+            ),
+            bucket_item: Some(
+                "fluid_full:brine_jar",
             ),
             measures: FluidMeasures {
                 temperature: 295,
                 density: 1100,
                 viscosity: 1200,
+                light_level: 7,
             },
         },
     ],

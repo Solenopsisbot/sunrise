@@ -47,7 +47,7 @@ impl Game<'_> {
                 // ClientChunkCache.updateViewRadius copies the in-range slots into new
                 // storage and abandons the rest. Their data is freed here, so each tells
                 // its `client_chunk_unload`, unlike a centre move's hidden slots.
-                let mut gone = self
+                let mut gone: FxHashSet<Column> = self
                     .world
                     .chunks
                     .resident_keys()

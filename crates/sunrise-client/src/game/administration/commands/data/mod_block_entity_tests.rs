@@ -119,6 +119,7 @@ fn actual_data_commands_preserve_same_mod_entity_runtime_state() {
         let mut types = sunrise_client::block_entity_types::BlockEntityTypes::new(
             [(BLOCK.to_owned(), ENTITY.to_owned())].into(),
             vec![ENTITY.to_owned(), "fixture:replacement".to_owned()],
+            [ENTITY.to_owned(), "fixture:replacement".into()],
         );
         types.add_valid(BLOCK, "fixture:replacement").unwrap();
         sunrise_client::block_entity_types::install(types).unwrap();
@@ -203,6 +204,8 @@ fn actual_data_commands_preserve_same_mod_entity_runtime_state() {
             stack.data().unwrap().other("minecraft:custom_data"),
             Some(&Tag::compound([("stamp", Tag::Byte(8))]))
         );
+        assert!(loaded.items[2].is_none());
+        assert!(loaded.items[3].is_none());
 
         let before = run(&mut game, "data remove block 2 64 2 Opaque.typed");
         changed(&game, before);
@@ -222,6 +225,10 @@ fn actual_data_commands_preserve_same_mod_entity_runtime_state() {
             "removing the saved inventory clears the slots without shrinking the container"
         );
         assert!(!entity(&game).nbt.contains_key(&"Items".into()));
+        assert_eq!(
+            game.data_of(&DataRef::Block(POS)).unwrap().get("Items"),
+            None
+        );
         let before = run(&mut game, "data remove block 2 64 2 Opaque");
         changed(&game, before);
         assert!(!entity(&game).nbt.contains_key(&"Opaque".into()));
@@ -261,7 +268,7 @@ fn actual_data_commands_preserve_same_mod_entity_runtime_state() {
         assert_eq!(game.data_of(&DataRef::Block(POS)).unwrap(), saved);
 
         game.native_lifecycle
-            .begin_open(mod_api::Authority::IntegratedServer);
+            .begin_open(Some(mod_api::Authority::IntegratedServer));
         game.options.dedicated = Some(Vec::new());
         let level = game.level("minecraft:overworld").unwrap();
         let handle = game.block_entity(level, POS).unwrap();

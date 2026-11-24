@@ -317,6 +317,7 @@ impl Game<'_> {
                 position_packet_pitch(m.previous_head_pitch, p.pitch, relative_pitch);
             m.head_pitch = pitch;
         }
+        self.ensure_player_model();
         if let Some(id) = self.remote.as_mut().and_then(|r| r.ghast_dismount.take()) {
             self.place_ghast_under(id, position);
         }
@@ -394,7 +395,7 @@ impl Game<'_> {
             out.push(S::MovePlayerRot(play::MovePlayerRot {
                 yaw,
                 pitch,
-                flags: u8::from(on_ground) | u8::from(collision) << 1,
+                flags: play::pack_move_player_flags(on_ground, collision),
             }));
             if !vehicle.is_empty() {
                 out.extend(vehicle);

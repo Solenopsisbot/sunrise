@@ -93,8 +93,8 @@ pub trait EntityPhysicsBackendMut {
     /// the last set; an empty slice clears it, and so do a change of level, a respawn and
     /// leaving. Nothing is saved, and nothing reaches the player's client: its own half sets the
     /// same boxes with `ClientHost::set_collision_exclusions`. Refused, keeping the set there
-    /// was: more than 64 boxes, a value that isn't finite, a minimum above its maximum, an
-    /// entity that isn't a player, a stale handle.
+    /// was: a value that isn't finite, a minimum above its maximum, an entity that isn't a
+    /// player, a stale handle.
     fn entity_set_collision_exclusions(
         &mut self,
         entity: EntityRef,

@@ -3,8 +3,9 @@
 use super::api_values::{TryIntoApi, TryIntoEngine, block_state};
 use super::{Dim, Game, boats::Boat};
 use mod_api::{
-    __private::game::Fields, BlockEntityRef, BlockKey, BlockState, Compound, FeatureFlags,
-    FluidState, LevelHost, LevelReadError, LevelRef, LightLayer,
+    __private::game::Fields, BlockEntityRef, BlockKey, BlockState, Compound, EntityRef,
+    EntityTypeKey, FeatureFlags, FluidState, LevelHost, LevelReadError, LevelRef, LightLayer,
+    WorldEpoch,
 };
 use std::cell::RefCell;
 use sunrise_client::{
@@ -14,7 +15,6 @@ use sunrise_client::{
 };
 use sunrise_core::position::BlockPos;
 use sunrise_world::{
-    fluid::FluidState as EngineFluidState,
     native_load_context::LoopSide,
     registry::{BlockRegistry, BlockStateId},
 };
@@ -27,6 +27,7 @@ pub(crate) struct GameSide<'a> {
     /// The level handle of the open world, absent before a world has an epoch.
     pub(in crate::game) level: Option<LevelRef>,
     pub(in crate::game) facts: &'a sunrise_client::blocks::BlockFacts,
+    pub(in crate::game) tables: super::native_block_tables::BlockTables<'a>,
     pub(in crate::game) biomes: &'a sunrise_client::biome::Biomes,
     pub(in crate::game) behaviours: &'a sunrise_world::level::Behaviours,
     pub(in crate::game) features: &'a std::sync::Arc<[String]>,
@@ -115,6 +116,14 @@ impl sunrise_client::motion::SideLevel for GameSide<'_> {
             world, registry, self.items, entity,
         )
     }
+
+    fn world_epoch(&self) -> Option<WorldEpoch> {
+        self.level.map(LevelRef::epoch)
+    }
+
+    fn block_states(&self) -> Option<mod_api::BlockStates<'_>> {
+        Some(mod_api::BlockStates::of(&self.tables))
+    }
 }
 
 /// The game's own side, for a tick that only reads it: each query builds the borrowed tables.
@@ -155,9 +164,17 @@ impl sunrise_client::motion::SideLevel for Game<'_> {
     ) -> Option<Compound> {
         game_side!(self).block_entity_data(world, registry, entity)
     }
+
+    fn world_epoch(&self) -> Option<WorldEpoch> {
+        self.native_lifecycle.epoch()
+    }
+
+    fn block_states(&self) -> Option<mod_api::BlockStates<'_>> {
+        Some(mod_api::BlockStates::of(self))
+    }
 }
 
-type Query = (*const World, BlockPos, BlockStateId, Option<u32>);
+type Query = (*const World, BlockPos, BlockStateId, Option<EntityRef>);
 thread_local! {
     static ACTIVE_FRICTION: RefCell<[Option<Query>; 16]> = const { RefCell::new([None; 16]) };
 }
@@ -181,32 +198,45 @@ pub(crate) fn friction(
     if !block_state::block_listens(mod_api::HookId::Friction, state) {
         return true;
     }
-    let query = (
-        std::ptr::from_ref(level.world),
-        pos,
-        state,
-        entity.map(|(id, _)| id),
-    );
-    let Some(_guard) = ACTIVE_FRICTION.with_borrow_mut(|active| {
-        if active.contains(&Some(query)) {
-            return None;
-        }
-        let slot = active.iter().position(Option::is_none)?;
-        active[slot] = Some(query);
-        Some(QueryGuard(slot))
-    }) else {
-        return false;
-    };
-    FrictionView(level).native_friction(pos, state, entity, friction);
-    true
+    let entity = entity.and_then(|(id, kind)| {
+        let handle = EntityRef::new(level.side.world_epoch()?, id);
+        Some((handle, mod_api::__private::resolved_entity_type_key(kind)))
+    });
+    FrictionView(level, entity).adjust(pos, state, friction)
 }
 
-pub(crate) struct FrictionView<'a>(pub(in crate::game) FrictionLevel<'a>);
+pub(crate) struct FrictionView<'a>(
+    pub(in crate::game) FrictionLevel<'a>,
+    pub(in crate::game) Option<(EntityRef, Option<EntityTypeKey>)>,
+);
 
 impl FrictionView<'_> {
-    fn state_fluid(&self, state: BlockStateId) -> Option<FluidState> {
-        let state = self.0.registry.state(state)?;
-        super::native_world_read::api_fluid_state(EngineFluidState::from_block(state).ok()?)
+    fn adjust(&self, pos: BlockPos, state: BlockStateId, friction: &mut f32) -> bool {
+        let entity = self.1.map(|(entity, _)| entity);
+        let query = (std::ptr::from_ref(self.0.world), pos, state, entity);
+        let Some(_guard) = ACTIVE_FRICTION.with_borrow_mut(|active| {
+            if active.contains(&Some(query)) {
+                return None;
+            }
+            let slot = active.iter().position(Option::is_none)?;
+            active[slot] = Some(query);
+            Some(QueryGuard(slot))
+        }) else {
+            return false;
+        };
+        self.native_friction(pos, state, entity, friction);
+        true
+    }
+
+    fn query(&self, [x, y, z]: [i32; 3], state: BlockStateId) -> Option<f32> {
+        let own = (self.0.coefficient)(state)?;
+        let mut friction = own;
+        if block_state::block_listens(mod_api::HookId::Friction, state)
+            && !self.adjust(BlockPos::new(x, y, z), state, &mut friction)
+        {
+            return None;
+        }
+        Some(if friction.is_finite() { friction } else { own })
     }
 }
 
@@ -219,13 +249,30 @@ impl super::mod_api_host::SidedLevel for FrictionView<'_> {
 super::native_tags::impl_tags!(FrictionView<'_>, view, view.0.side.tag_items());
 
 impl LevelHost for FrictionView<'_> {
-    fn friction(
-        &self,
-        [x, y, z]: [i32; 3],
-        state: BlockState,
-        entity: Option<(u32, &str)>,
-    ) -> Option<f32> {
-        query_friction(self.0, [x, y, z], state.try_into_engine(&()).ok()?, entity)
+    fn block_states(&self) -> mod_api::BlockStates<'_> {
+        struct NoTables;
+        impl LevelHost for NoTables {
+            fn block_entity_data(&self, _: BlockEntityRef) -> Option<Compound> {
+                None
+            }
+        }
+        static NONE: NoTables = NoTables;
+        self.0
+            .side
+            .block_states()
+            .unwrap_or_else(|| NONE.block_states())
+    }
+
+    fn friction(&self, pos: [i32; 3], state: BlockState, entity: Option<EntityRef>) -> Option<f32> {
+        let entity = match entity {
+            Some(entity) => Some(self.1.filter(|&(known, _)| known == entity)?),
+            None => None,
+        };
+        FrictionView(self.0, entity).query(pos, state.try_into_engine(&()).ok()?)
+    }
+
+    fn entity_kind(&self, entity: EntityRef) -> Option<EntityTypeKey> {
+        self.1.filter(|&(known, _)| known == entity)?.1
     }
 
     fn block_state(&self, [x, y, z]: [i32; 3]) -> Option<BlockState> {
@@ -268,11 +315,6 @@ impl LevelHost for FrictionView<'_> {
         self.0.world.shape.height
     }
 
-    fn block_in_tag(&self, block: BlockKey, tag: &str) -> Option<bool> {
-        self.0.side.tag_items()?;
-        super::native_world_read::block_in_tag(block, tag)
-    }
-
     fn block_entity(&self, [x, y, z]: [i32; 3]) -> Option<BlockEntityRef> {
         self.0
             .side
@@ -293,19 +335,9 @@ impl LevelHost for FrictionView<'_> {
         if !self.0.world.is_loaded_at(x, y, z) {
             return None;
         }
-        self.state_fluid(self.0.world.block(x, y, z))
-    }
-
-    fn state_fluid_state(&self, state: BlockState) -> Option<FluidState> {
-        self.state_fluid(state.try_into_engine(&()).ok()?)
-    }
-
-    fn fluid_in_tag(&self, fluid: &str, tag: &str) -> Option<bool> {
-        Some(super::native_world_read::fluid_in_tag(
-            self.0.side.tag_items()?,
-            fluid,
-            tag,
-        ))
+        let states = self.0.side.block_states()?;
+        let state = self.0.world.block(x, y, z).try_into_api().ok()?;
+        state.fluid_state(&states)
     }
 
     fn state_with_property(&self, state: BlockState, key: &str, value: &str) -> Option<BlockState> {
@@ -348,28 +380,13 @@ impl LevelHost for FrictionView<'_> {
     }
 }
 
-fn query_friction(
-    level: FrictionLevel<'_>,
-    [x, y, z]: [i32; 3],
-    state: BlockStateId,
-    entity: Option<(u32, &str)>,
-) -> Option<f32> {
-    read_friction(
-        level,
-        entity,
-        BlockPos::new(x, y, z),
-        state,
-        (level.coefficient)(state)?,
-    )
-}
-
 impl Game<'_> {
     pub(super) fn level_friction(
         &self,
         level: LevelRef,
         pos: [i32; 3],
         state: BlockStateId,
-        entity: Option<(u32, &str)>,
+        entity: Option<EntityRef>,
     ) -> Result<Option<f32>, LevelReadError> {
         let world = self.native_level_read_world(level).ok_or_else(|| {
             if self.level_handle_current(level) {
@@ -393,7 +410,14 @@ impl Game<'_> {
             },
             coefficient: &|id| facts.states.get(id.0 as usize).map(|facts| facts.friction),
         };
-        Ok(query_friction(level, pos, state, entity))
+        let entity = entity
+            .map(|entity| {
+                self.entity_kind(entity)
+                    .map(|kind| (entity, Some(kind)))
+                    .ok_or(LevelReadError::Stale)
+            })
+            .transpose()?;
+        Ok(FrictionView(level, entity).query(pos, state))
     }
 
     /// The friction of `state` at `pos` under the boat `b` (`AbstractBoat.getGroundFriction`,
@@ -456,6 +480,8 @@ mod tests {
             ground: sunrise_world::ground_support::GroundState::from_ground_flag(true),
             fall_distance: 0.0,
             age: 0,
+            stack_revision: 0,
+            lifespan: ItemEntity::LIFETIME,
             pickup_delay: 0,
             bob_offset: 0.0,
             ticks: 0,
@@ -511,6 +537,13 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn a_block_part_answers_the_friction_an_entity_reads() {
+        if super::super::native_entity_refs::tests::run_fresh_cases(
+            "game::native_surface::tests::a_block_part_answers_the_friction_an_entity_reads",
+            "SUNRISE_FRICTION_TRAVEL_CHILD",
+            &["travel"],
+        ) {
+            return;
+        }
         // Glass asks for its material's friction for players. White wool answers 0.98;
         // red wool answers NaN, blue 3.0, green infinity, black -0.5 and orange 1.5.
         let calls = mod_platform::__private::part_tests::friction_game_thread();
@@ -548,7 +581,7 @@ mod tests {
                 travel_in_air(
                     &mut world,
                     &mut sunrise_world::move_gate::MoveGate::new(),
-                    Vec3::new(1.0, 0.0, 0.0),
+                    Vec3::new(1.0, 0.0, 0.0).into(),
                 )
                 .unwrap();
                 let reads = calls.load(Ordering::SeqCst);
@@ -774,16 +807,14 @@ mod tests {
             let registry = game.pack.assets.registry;
             let lime = registry.default_state("minecraft:lime_wool").unwrap();
             let level = game.level_ref(game.native_lifecycle.epoch().unwrap(), game.dim.key());
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+            super::super::native_entity_refs::tests::bind_local_player(game, 100, 100);
+            let player = game.entity(100).unwrap();
             calls.store(0, Ordering::SeqCst);
-            // Each nested ask names another entity id, so no query repeats: only the bound stops
+            // Each nested ask names another position, so no query repeats: only the bound stops
             // the chain. The innermost part is refused and answers 0.5, which every part above passes on.
             assert_eq!(
-                level.friction(
-                    game,
-                    [5, 64, 5],
-                    lime.try_into_api().unwrap(),
-                    Some((100, "minecraft:player")),
-                ),
+                level.friction(game, [5, 64, 5], lime.try_into_api().unwrap(), Some(player),),
                 Ok(Some(0.5)),
             );
             assert_eq!(calls.load(Ordering::SeqCst), 16);
@@ -792,15 +823,23 @@ mod tests {
             let pink = registry.default_state("minecraft:pink_wool").unwrap();
             calls.store(0, Ordering::SeqCst);
             assert_eq!(
-                level.friction(
-                    game,
-                    [5, 64, 5],
-                    pink.try_into_api().unwrap(),
-                    Some((100, "minecraft:player")),
-                ),
+                level.friction(game, [5, 64, 5], pink.try_into_api().unwrap(), Some(player),),
                 Ok(Some(0.9)),
             );
             assert_eq!(calls.load(Ordering::SeqCst), 2);
+            let stale = mod_api::EntityRef::new(
+                mod_api::WorldEpoch::new(player.epoch().get() + 1),
+                player.id(),
+            );
+            assert_eq!(
+                level.friction(game, [5, 64, 5], lime.try_into_api().unwrap(), Some(stale)),
+                Err(mod_api::LevelReadError::Stale),
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                2,
+                "a stale entity does not dispatch"
+            );
             let unknown = sunrise_world::registry::BlockStateId(u32::MAX);
             assert_eq!(
                 game.level_friction(level, [5, 64, 5], unknown, None),
@@ -868,7 +907,7 @@ mod tests {
         }
         #[mod_api::sunrise_part]
         impl BlockPart for Panel {
-            fn friction(&self, side: LevelSide<'_>, event: &mut FrictionEvent<'_>) {
+            fn friction(&self, side: LevelSide<'_>, event: &mut FrictionEvent) {
                 let LevelSide::Server(level) = side else {
                     return;
                 };
@@ -951,24 +990,47 @@ mod tests {
             );
             let side = game_side!(game);
             let coefficient = |_: sunrise_world::registry::BlockStateId| None;
-            let view = FrictionView(FrictionLevel {
-                world: &game.world,
-                registry: game.pack.assets.registry,
-                context: &game.loop_context,
-                side: &side,
-                coefficient: &coefficient,
-            });
+            let view = FrictionView(
+                FrictionLevel {
+                    world: &game.world,
+                    registry: game.pack.assets.registry,
+                    context: &game.loop_context,
+                    side: &side,
+                    coefficient: &coefficient,
+                },
+                None,
+            );
             // A tagged block, an untagged one and a fluid tag answer as the game's own host does.
             let stone = mod_platform::__private::part_tests::block_key("stone");
-            assert_eq!(view.block_in_tag(stone, "base_stone_overworld"), Some(true));
+            let water = mod_api::__private::fluid_key("minecraft:water").unwrap();
+            let base_stone = view
+                .tags()
+                .key(&mod_api::Identifier::parse("base_stone_overworld").unwrap())
+                .unwrap();
+            let climbable = view
+                .tags()
+                .key(&mod_api::Identifier::parse("minecraft:climbable").unwrap())
+                .unwrap();
+            let water_tag = view
+                .tags()
+                .key(&mod_api::Identifier::parse("minecraft:water").unwrap())
+                .unwrap();
+            assert_eq!(stone.is_in_tag(view.tags(), base_stone), Some(true));
             assert_eq!(
-                view.block_in_tag(stone, "base_stone_overworld"),
-                game.block_in_tag(stone, "base_stone_overworld")
+                stone.is_in_tag(view.tags(), base_stone),
+                stone.is_in_tag(&*game, base_stone)
             );
-            assert_eq!(view.block_in_tag(stone, "minecraft:climbable"), Some(false));
+            assert_eq!(stone.is_in_tag(view.tags(), climbable), Some(false));
+            assert_eq!(water.is_in_tag(view.tags(), water_tag), Some(true));
+            let stone_state = view.block_state_default(stone).unwrap();
+            let view_states = view.block_states();
             assert_eq!(
-                view.fluid_in_tag("minecraft:water", "minecraft:water"),
-                Some(true)
+                stone_state.outline(&view_states),
+                Some(&[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]][..])
+            );
+            assert_eq!(
+                water.pickup_sound(&view_states),
+                Some("minecraft:item.bucket.fill")
             );
             // A resident block entity has the handle of this side's level; an empty position none.
             let level = game.level_ref(game.native_lifecycle.epoch().unwrap(), game.dim.key());

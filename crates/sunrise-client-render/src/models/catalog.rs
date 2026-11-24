@@ -982,9 +982,21 @@ mod tests {
             |_| false,
         );
         assert!(!connected.is_empty());
-        crate::native_emissive::load(root.source(), &mut sprites);
+        let mod_emissive = crate::native_emissive::test_registrations([(
+            "demo",
+            vec![mod_api::EmissiveSpriteRegistration::new(
+                mod_api::Identifier::parse("demo:block/stone").unwrap(),
+                mod_api::Identifier::parse("demo:emissive/glow").unwrap(),
+            )],
+        )]);
+        let mod_pairs = crate::native_emissive::resolve_registered(&mod_emissive, &mut sprites);
         assert!(sprites.files.contains_key("demo:emissive/glow"));
-        let pairs = crate::native_emissive::load_optifine(root.source(), &mut sprites);
+        assert!(mod_pairs.contains_key(&base));
+        let pairs = crate::native_emissive::load_optifine(
+            root.source(),
+            &mut sprites,
+            &std::collections::BTreeSet::new(),
+        );
         assert!(pairs.contains(&("demo:block/stone".into(), "demo:block/stone_e".into())));
         assert!(pairs.contains(&(
             "assets/demo/optifine/ctm/tile.png".into(),

@@ -206,7 +206,7 @@ fn real_save_gate_and_save_all_refuse_action_savepoint() {
     });
 }
 
-/// Row 7 of the special item renderer matrix (`docs/design/mod-api/resource-renderers.md`):
+/// Special item renderers under an action savepoint:
 /// saves are refused during an open action savepoint, even though rendering adds no persistent
 /// state, so a special item a mod's renderer draws inside one changes nothing: `save-all` is
 /// refused and nothing partial is persisted after the rollback.

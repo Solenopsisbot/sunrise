@@ -120,7 +120,11 @@ fn a_point_in_another_level_is_refused_while_a_player_is_swapped_in() {
         let mut resources = None;
         let (_scratch, mut game, _rx) = server_with_a_nether_anchor(&mut resources);
         let answer = game
-            .with_cloning_player(2, |game| respawn_target(game))
+            .with_cloning_player(
+                2,
+                crate::game::original_player::CloneScope::LendBody,
+                |game| respawn_target(game),
+            )
             .unwrap();
         assert_eq!(answer, Err(RespawnTargetUnavailable::InPlayerHook));
     });

@@ -61,7 +61,7 @@ ClientPacketListener.handleChangeDifficulty	port	crates/sunrise-client/src/game/
 ClientPacketListener.handleSetCamera	port	crates/sunrise-client/src/game/network/remote_camera.rs::Game::remote_set_camera	the view follows the entity; the player's own id gives it back
 ClientPacketListener.handleInitializeBorder	port	crates/sunrise-client/src/game/network/remote/packets_world.rs::Game::apply_initialize_border_packet	InitializeBorder arm: centre, size or lerp, absolute max, warnings
 ClientPacketListener.handleSetBorderCenter	port	crates/sunrise-client/src/game/network/remote/mod.rs::Game::apply_packet	SetBorderCenter arm
-ClientPacketListener.handleSetBorderLerpSize	port	crates/sunrise-client/src/game/network/remote/packets_world.rs::Game::apply_set_border_lerp_size_packet	SetBorderLerpSize arm
+ClientPacketListener.handleSetBorderLerpSize	port	crates/sunrise-client/src/game/network/remote/mod.rs::Game::apply_packet	SetBorderLerpSize arm
 ClientPacketListener.handleSetBorderSize	port	crates/sunrise-client/src/game/network/remote/mod.rs::Game::apply_packet	SetBorderSize arm
 ClientPacketListener.handleSetBorderWarningDistance	port	crates/sunrise-client/src/game/network/remote/mod.rs::Game::apply_packet	SetBorderWarningDistance arm
 ClientPacketListener.handleSetBorderWarningDelay	port	crates/sunrise-client/src/game/network/remote/mod.rs::Game::apply_packet	SetBorderWarningDelay arm

@@ -1,5 +1,4 @@
 //! The `screen_key_released_pre` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0120
 
 pub trait Hooks {
     /// Before the currently open screen handles a named key's release.

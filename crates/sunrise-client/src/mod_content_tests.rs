@@ -563,7 +563,7 @@ fn an_admitted_archive_keys_resource_caches_by_bytes_not_entry_metadata() {
             .unwrap();
         [ContentMod {
             id: "testmod".into(),
-            content: Content::read_opened(&source, &manifest, &[]).unwrap(),
+            content: Content::read_opened(&source, &manifest).unwrap(),
             jars: Vec::new(),
         }]
     };
@@ -1048,6 +1048,7 @@ fn block_items_patch_their_template_item() {
     let items = r##"{"minecraft:iron_block": {"minecraft:max_stack_size": 64,
         "minecraft:item_name": {"translate": "block.minecraft.iron_block"}},
         "minecraft:netherite_block": {"minecraft:damage_resistant": {"types": "#minecraft:is_fire"}}}"##;
+    fs::write(base.join("items.json"), items).unwrap();
     let block = |dir: &str, components: &str| {
         folder_mod(
             &scratch.join(dir),
@@ -1633,8 +1634,8 @@ fn content_root_loads_with_every_table() {
             independent_behaviours.facts(state).flags
         );
         assert_eq!(
-            deferred_behaviours.data(state).sounds.place,
-            independent_behaviours.data(state).sounds.place
+            deferred_behaviours.facts(state).placement_sound,
+            independent_behaviours.facts(state).placement_sound
         );
         assert_eq!(shared_facts.get(state).emission, facts.get(state).emission);
         assert_eq!(shared_facts.get(state).classes, facts.get(state).classes);
@@ -1643,8 +1644,8 @@ fn content_root_loads_with_every_table() {
             independent_behaviours.facts(state).flags,
         );
         assert_eq!(
-            shared_behaviours.data(state).sounds.place,
-            independent_behaviours.data(state).sounds.place,
+            shared_behaviours.facts(state).placement_sound,
+            independent_behaviours.facts(state).placement_sound,
         );
     }
 
@@ -2047,8 +2048,7 @@ fn shared_behaviour_document_matches_independent_loaders() {
         assert_eq!(a.emission, b.emission);
         assert_eq!(a.dampening, b.dampening);
         assert_eq!(a.hardness, b.hardness);
-        assert_eq!(a.sounds.volume, b.sounds.volume);
-        assert_eq!(a.sounds.pitch, b.sounds.pitch);
+        assert_eq!(a.sounds, b.sounds);
     }
     let a = sunrise_world::level::Behaviours::load(assets.registry, &root).unwrap();
     for id in 0..assets.registry.len() {
@@ -2071,12 +2071,8 @@ fn shared_behaviour_document_matches_independent_loaders() {
         assert_eq!(a_state.push, b_state.push);
         assert_eq!(a_state.instrument, b_state.instrument);
         assert_eq!(a_state.shape, b_state.shape);
-        let (a_sound, b_sound) = (&a.data(state).sounds, &b.data(state).sounds);
-        assert_eq!(a_sound.volume, b_sound.volume);
-        assert_eq!(a_sound.pitch, b_sound.pitch);
-        assert_eq!(a_sound.place, b_sound.place);
-        assert_eq!(a_sound.break_, b_sound.break_);
-        assert_eq!(a_sound.fall, b_sound.fall);
+        assert_eq!(a_state.placement_sound, b_state.placement_sound);
+        assert_eq!(b_state.placement_sound, deferred_state.placement_sound);
     }
 }
 
@@ -2548,7 +2544,7 @@ fn a_superflat_world_runs_its_structure_sets_on_flat_ground() {
     );
     // The layers: bedrock, two dirt and grass from the level's minimum Y, air above.
     let mut worker = terrain.worker();
-    let chunk = terrain.finish(terrain.proto(&mut worker, 3, 3));
+    let chunk = terrain.finish(terrain.proto(&mut worker, 3, 3).unwrap());
     let name = |y| {
         let id = chunk.block(3 * 16 + 5, y, 3 * 16 + 7);
         assets.registry.state(id).unwrap().name.clone()
@@ -2617,8 +2613,11 @@ fn a_decorated_superflat_world_without_structures_grows_its_features() {
         )
         .unwrap();
         let mut worker = terrain.worker();
-        let mut region: [_; 9] =
-            std::array::from_fn(|i| terrain.proto(&mut worker, 3 + i as i32 % 3, 3 + i as i32 / 3));
+        let mut region: [_; 9] = std::array::from_fn(|i| {
+            terrain
+                .proto(&mut worker, 3 + i as i32 % 3, 3 + i as i32 / 3)
+                .unwrap()
+        });
         terrain.decorate(&mut worker, &mut region);
         let [_, _, _, _, center, ..] = region;
         let chunk = terrain.finish(center);
@@ -2711,7 +2710,7 @@ fn a_superflat_world_keeps_its_strongholds_on_every_seed_and_leaves_null_layers_
     );
     let terrain = make(1234);
     let mut worker = terrain.worker();
-    let chunk = terrain.finish(terrain.proto(&mut worker, 3, 3));
+    let chunk = terrain.finish(terrain.proto(&mut worker, 3, 3).unwrap());
     let name = |y| {
         let id = chunk.block(3 * 16 + 5, y, 3 * 16 + 7);
         assets.registry.state(id).unwrap().name.clone()
@@ -4441,7 +4440,7 @@ fn block_base_of(tag: &str, declarations: &[&str], facts: &str) -> (PathBuf, Vec
         Some(J::Arr(rows)) => rows.len(),
         _ => panic!("{tag}: facts.json has no states"),
     };
-    let rows = vec![r#"{"item":"minecraft:test"}"#; count].join(",");
+    let rows = vec![r#"{"item":"minecraft:test","sound":{"identity":"other"}}"#; count].join(",");
     fs::write(
         base.join("gameplay-facts.json"),
         format!(r#"{{"states":[{rows}]}}"#),
@@ -6392,8 +6391,11 @@ fn content_root_generates_a_biome_modifier_ore() {
         };
         let terrain = crate::vanillagen::VanillaTerrain::new(terrain_resources, 1234).unwrap();
         let mut worker = terrain.worker();
-        let mut region: [Proto; 9] =
-            std::array::from_fn(|i| terrain.proto(&mut worker, i as i32 % 3 - 1, i as i32 / 3 - 1));
+        let mut region: [Proto; 9] = std::array::from_fn(|i| {
+            terrain
+                .proto(&mut worker, i as i32 % 3 - 1, i as i32 / 3 - 1)
+                .unwrap()
+        });
         terrain.decorate(&mut worker, &mut region);
         let [_, _, _, _, center, ..] = region;
         let chunk = terrain.finish(center);
@@ -6592,53 +6594,114 @@ fn blocks_and_items_declared_in_code_get_ids() {
 }
 
 #[test]
-fn a_file_item_whose_remainder_was_refused_takes_only_its_mod_out() {
-    use sunrise_mod_package::content::Item;
-    let item = |id: &str, remainder: Option<&str>| Item {
-        id: id.into(),
-        template: "minecraft:diamond".into(),
-        crafting_remainder: remainder.map(str::to_owned),
-        ..Item::default()
-    };
-    let make = |id: &str, items: Vec<Item>| {
-        let mut content = Content::declared(id);
-        content.items = items;
+#[ignore = "daily"]
+fn item_references_resolve_against_other_packages_registered_content() {
+    use sunrise_mod_package::{Manifest, content::Item};
+
+    let base = prepared().expect("daily test requires prepared resources");
+    let scratch = std::env::temp_dir().join(format!(
+        "sunrise-cross-item-references-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&scratch);
+    let addon = scratch.join("addon");
+    let declarations = addon.join("data/addon/sunrise/item");
+    fs::create_dir_all(&declarations).unwrap();
+    fs::write(
+        declarations.join("planter.json"),
+        r#"{"template":"minecraft:stick","block":"provider:crop","crafting_remainder":"provider:handle"}"#,
+    ).unwrap();
+    let manifest = Manifest::parse(
+        r#"
+        id = "addon"
+        name = "Planter"
+        version = "1.0.0"
+        api = "0.2"
+        side = "both"
+        capabilities = ["registries"]
+    "#,
+    )
+    .unwrap();
+    let mut addon = Content::read(&addon, &manifest).unwrap();
+    addon
+        .declare(
+            &[],
+            &[Item {
+                id: "addon:tool".into(),
+                template: "minecraft:stick".into(),
+                block: Some("provider:crop".into()),
+                crafting_remainder: Some("provider:handle".into()),
+                ..Item::default()
+            }],
+        )
+        .unwrap();
+    let mut provider = Content::declared("provider");
+    provider
+        .declare(
+            &[Block {
+                id: "provider:crop".into(),
+                template: "minecraft:glass".into(),
+                item: false,
+                ..Block::default()
+            }],
+            &[Item {
+                id: "provider:handle".into(),
+                template: "minecraft:bowl".into(),
+                ..Item::default()
+            }],
+        )
+        .unwrap();
+    let mut mods = [
         ContentMod {
-            id: id.into(),
-            content,
-            jars: Vec::new(),
-        }
-    };
-    let mut jar = make("jar", vec![item("jar:tool", Some("jar:jar"))]);
-    jar.content
-        .blocks
-        .push(sunrise_mod_package::content::Block {
-            id: "jar:jar".into(),
-            template: "minecraft:glass".into(),
-            item: true,
-            ..Default::default()
-        });
-    let mut mods = vec![
-        jar,
-        make(
-            "good",
-            vec![
-                item("good:tool", Some("good:wrench")),
-                item("good:wrench", None),
-            ],
-        ),
-        make("bad", vec![item("bad:tool", Some("bad:wrench"))]),
-        make(
-            "vanilla",
-            vec![item("vanilla:soup", Some("minecraft:bowl"))],
-        ),
+            id: "addon".into(),
+            content: addon,
+            jars: vec![],
+        },
+        ContentMod {
+            id: "provider".into(),
+            content: provider,
+            jars: vec![],
+        },
     ];
-    let dropped = drop_dangling_remainders(&mut mods);
-    assert_eq!(dropped.len(), 1, "{dropped:?}");
-    assert!(dropped[0].contains("bad"), "{dropped:?}");
-    let left: Vec<&str> = mods.iter().map(|m| m.id.as_str()).collect();
-    // A remainder that is the mod's own block item is kept too (`jar`).
-    assert_eq!(left, ["jar", "good", "vanilla"]);
+    let root = scratch.join("out");
+    build_fixture(&base, Path::new(""), &mods, &root).unwrap();
+    let assets = Assets::load(&root).unwrap();
+    let facts = BlockFacts::load(&root, assets.registry).unwrap();
+    let defaults = sunrise_world::item_defaults::read(&root).unwrap();
+    let items = Items::load(
+        &root,
+        assets.registry,
+        &facts,
+        &PackOverlay::NONE,
+        &defaults,
+    )
+    .unwrap();
+    let crop = assets.registry.default_state("provider:crop").unwrap();
+    for id in ["addon:planter", "addon:tool"] {
+        let item = &items.items[id];
+        assert_eq!(item.block, Some(crop));
+        assert_eq!(item.crafting_remainder.as_deref(), Some("provider:handle"));
+    }
+
+    mods[1].content.items.clear();
+    let error = build_fixture(&base, Path::new(""), &mods, &scratch.join("no-item")).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "items.json: addon:planter: crafting_remainder \"provider:handle\" is not an item"
+    );
+    mods[0].content.items[0].crafting_remainder = Some("provider:crop".into());
+    let error = build_fixture(&base, Path::new(""), &mods, &scratch.join("itemless")).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        r#"items.json: addon:planter: crafting_remainder "provider:crop" is not an item"#,
+    );
+    mods[1].content.blocks.clear();
+    let error = build_fixture(&base, Path::new(""), &mods, &scratch.join("no-block")).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "addon:planter: block \"provider:crop\" is not a block"
+    );
+    fs::remove_dir_all(&scratch).unwrap();
 }
 
 /// A sign's four forms come from its template, whatever the blocks are named,
@@ -7053,8 +7116,11 @@ fn a_feature_gives_a_mods_sign_its_block_entity() {
             terrain.add_mod_signs(&facts);
         }
         let mut worker = terrain.worker();
-        let mut region: [Proto; 9] =
-            std::array::from_fn(|i| terrain.proto(&mut worker, i as i32 % 3 - 1, i as i32 / 3 - 1));
+        let mut region: [Proto; 9] = std::array::from_fn(|i| {
+            terrain
+                .proto(&mut worker, i as i32 % 3 - 1, i as i32 / 3 - 1)
+                .unwrap()
+        });
         terrain.decorate(&mut worker, &mut region);
         let [_, _, _, _, center, ..] = region;
         let chunk = terrain.finish(center);
@@ -7256,7 +7322,7 @@ fn sign_text_colors_are_the_signs_dye_ids() {
 }
 
 /// A content mod of recipes, a tag and a name, for vanilla's items: what
-/// switches live (docs/design/mod-hotload.md).
+/// switches live.
 fn glint_mod(dir: &Path) -> ContentMod {
     folder_mod(
         dir,
@@ -8470,10 +8536,32 @@ fn accept_declared_refuses_host_duplicates_of_served_content_and_keeps_served_re
     assert_eq!(mods.len(), 3);
     assert_eq!(mods[2].id, "horizon_java");
     // Served and host items with valid cross-layer remainders (both items and block items) survive.
-    assert!(drop_dangling_remainders(&mut mods).is_empty());
+    let base = tempfile::tempdir().unwrap();
+    std::fs::write(base.path().join("items.json"), "{}").unwrap();
+    assert!(
+        drop_dangling_remainders(base.path(), &mut mods)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(mods.len(), 3);
+    // Both directions retain the exact item keys for the combined registry lookup.
+    for (layer, id, remainder) in [
+        (0, "runes:soup", "runes:extra_item"),
+        (0, "runes:ritual", "runes:extra_block"),
+        (2, "runes:filled_stone", "runes:stone"),
+        (2, "horizon_java:altar_kit", "runes:altar"),
+    ] {
+        let item = mods[layer]
+            .content
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .unwrap();
+        assert_eq!(item.crafting_remainder.as_deref(), Some(remainder));
+    }
 
-    // Host items cannot use an unserved package's item or a nonexistent item as remainder.
+    // Host remainders in unserved namespaces and unresolved keys are both deferred to the
+    // registry. The syntactically valid references do not make the declaration batch invalid.
     for (label, bad_item) in [
         (
             "unserved package remainder",
@@ -8485,6 +8573,8 @@ fn accept_declared_refuses_host_duplicates_of_served_content_and_keeps_served_re
         ),
     ] {
         let mut errors = Vec::new();
+        let id = bad_item.id.clone();
+        let remainder = bad_item.crafting_remainder.clone();
         let batches = BTreeMap::from([(
             "horizon_java",
             DeclaredContent {
@@ -8493,56 +8583,15 @@ fn accept_declared_refuses_host_duplicates_of_served_content_and_keeps_served_re
             },
         )]);
         accept_declared(&mut mods, &batches, &manifests, &known, &mut errors).unwrap();
-        assert_eq!(errors.len(), 1, "{label}: {errors:?}");
-        assert!(
-            matches!(
-                &errors[0].error,
-                mod_api::DeclarationError::Rejected { reason, .. }
-                    if reason.contains("crafting_remainder")
-            ),
-            "{label}: {:?}",
-            errors[0]
-        );
+        assert!(errors.is_empty(), "{label}: {errors:?}");
+        let item = mods[2]
+            .content
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .unwrap();
+        assert_eq!(item.crafting_remainder, remainder, "{label}");
     }
-
-    // A served block with `item: false` does not supply a remainder item when no item shares its ID.
-    let mut itemless_runes = Content::declared("runes");
-    itemless_runes.blocks.push(block("runes:no_item", false));
-    let mut itemless_mods = vec![ContentMod {
-        id: "runes".into(),
-        content: itemless_runes,
-        jars: Vec::new(),
-    }];
-    let mut itemless_errors = Vec::new();
-    let itemless_batches = BTreeMap::from([(
-        "horizon_java",
-        DeclaredContent {
-            items: vec![
-                item("runes:uses_no_item", Some("runes:no_item"))
-                    .validate_local()
-                    .unwrap(),
-            ],
-            ..Default::default()
-        },
-    )]);
-    accept_declared(
-        &mut itemless_mods,
-        &itemless_batches,
-        &manifests,
-        &known,
-        &mut itemless_errors,
-    )
-    .unwrap();
-    assert_eq!(itemless_errors.len(), 1, "{itemless_errors:?}");
-    assert!(
-        matches!(
-            &itemless_errors[0].error,
-            mod_api::DeclarationError::Rejected { id, reason }
-                if id == "runes:uses_no_item" && reason.contains("crafting_remainder")
-        ),
-        "{:?}",
-        itemless_errors[0]
-    );
 
     // An itemless block never reserves an item ID in either direction across layers:
     // (1) code itemless block + file item with the same ID, and

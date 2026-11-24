@@ -61,20 +61,11 @@ pub(in crate::game) struct Observed {
 
 struct Probe {
     action: Action,
-    hears: bool,
     observed: Arc<Observed>,
 }
 
 #[mod_api::__subscriptions]
 impl Hooks for Probe {
-    fn hears_projectile_impacts(
-        &self,
-        _: &dyn mod_api::Host,
-        event: &mut mod_api::HearsProjectileImpactsEvent,
-    ) {
-        event.hears = self.hears;
-    }
-
     fn projectile_impact(
         &self,
         host: &mut dyn ServerHost,
@@ -213,28 +204,70 @@ impl Hooks for Probe {
         self.observed.leaves.lock().unwrap().push(event.entity);
     }
 
-    fn item_fished(&self, _: &mut dyn ServerHost, _: &mut mod_api::ItemFishedEvent<'_>) -> Flow {
+    fn item_fished(
+        &self,
+        _: &mut dyn ServerHost,
+        _: &mut mod_api::ItemFishedEvent<'_, '_>,
+    ) -> Flow {
         self.observed.catches.fetch_add(1, Ordering::Relaxed);
         Flow::Continue
+    }
+}
+
+struct UnsubscribedProbe(Probe);
+
+#[mod_api::__subscriptions]
+impl Hooks for UnsubscribedProbe {
+    fn vanilla_game_event(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut mod_api::VanillaGameEventEvent<'_>,
+    ) -> Flow {
+        self.0.vanilla_game_event(host, event)
+    }
+
+    fn entity_entering_section(
+        &self,
+        host: mod_api::HostSide<'_>,
+        event: &mut mod_api::EntityEnteringSectionEvent,
+    ) {
+        self.0.entity_entering_section(host, event);
+    }
+
+    fn entity_leave_level(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut mod_api::EntityLeaveLevelEvent<'_>,
+    ) {
+        self.0.entity_leave_level(host, event);
+    }
+
+    fn item_fished(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut mod_api::ItemFishedEvent<'_, '_>,
+    ) -> Flow {
+        self.0.item_fished(host, event)
     }
 }
 
 /// Run a real server tick fixture with a live player and listener installed.
 pub(in crate::game) fn with_probe(
     action: Action,
-    hears: bool,
+    subscribed: bool,
     test: impl FnOnce(&mut Game<'_>, &Observed),
 ) {
     let observed = Arc::new(Observed::default());
-    let mods = vec![mod_api::ModEntry::new(
-        "impact-probe",
-        Box::new(Probe {
-            action,
-            hears,
-            observed: observed.clone(),
-        }),
-    )]
-    .into();
+    let probe = Probe {
+        action,
+        observed: observed.clone(),
+    };
+    let entry = if subscribed {
+        mod_api::ModEntry::new("impact-probe", Box::new(probe))
+    } else {
+        mod_api::ModEntry::new("impact-probe", Box::new(UnsubscribedProbe(probe)))
+    };
+    let mods = vec![entry].into();
     mod_platform::testing::with_mods(mods, || {
         let check = |game: &mut Game<'_>| {
             game.options.dedicated = Some(Vec::new());

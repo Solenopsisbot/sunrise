@@ -368,4 +368,123 @@ mod tests {
             });
         });
     }
+
+    /// A torch that mines as the block below it, through the query, as a block overriding
+    /// `getDestroyProgress` does; and dirt that answers a progress of its own.
+    struct MinesAsBelow;
+
+    #[mod_api::sunrise_part]
+    impl mod_api::BlockPart for MinesAsBelow {
+        fn destroy_progress(
+            &self,
+            host: HostSide<'_>,
+            event: &mut mod_api::DestroyProgressEvent,
+        ) -> Option<f32> {
+            let HostSide::Server(host) = host else {
+                return None;
+            };
+            let level = event.player.level(host)?;
+            let below = [event.pos[0], event.pos[1] - 1, event.pos[2]];
+            let pedestal = level.block_state(host, below)?;
+            event.player.destroy_progress(host, level, below, pedestal)
+        }
+    }
+
+    struct Soft;
+
+    #[mod_api::sunrise_part]
+    impl mod_api::BlockPart for Soft {
+        fn destroy_progress(
+            &self,
+            _: HostSide<'_>,
+            _: &mut mod_api::DestroyProgressEvent,
+        ) -> Option<f32> {
+            Some(0.25)
+        }
+    }
+
+    struct PartsMod;
+
+    #[mod_api::__subscriptions]
+    impl Hooks for PartsMod {
+        fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+            let torch = r.block_key("minecraft:torch");
+            r.block_part(torch, MinesAsBelow);
+            let dirt = r.block_key("minecraft:dirt");
+            r.block_part(dirt, Soft);
+        }
+    }
+
+    /// A block Part's answer is the dig's progress and the query's: dirt answers its own 0.25,
+    /// and a torch mines as the block below it, through the query, which inside the answer is
+    /// the game's math and asks no Part: on stone as stone, on dirt as dirt with no Part (not
+    /// 0.25), on air as air and on another torch as that torch (hardness 0, at once).
+    #[test]
+    #[ignore = "daily"]
+    fn a_block_part_answers_the_destroy_progress() {
+        let mods = vec![mod_api::ModEntry::new("parts", Box::new(PartsMod))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_guests(|game| {
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
+                let state = |game: &super::super::Game<'_>, name: &str| {
+                    game.pack.assets.registry.default_state(name).unwrap()
+                };
+                for (x, below) in [
+                    (0, "minecraft:stone"),
+                    (1, "minecraft:dirt"),
+                    (2, "minecraft:air"),
+                    (3, "minecraft:torch"),
+                ] {
+                    let below = state(game, below);
+                    game.world.set(x, 64, 0, below).unwrap();
+                    let torch = state(game, "minecraft:torch");
+                    game.world.set(x, 65, 0, torch).unwrap();
+                }
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .update_guest(12, |guest| {
+                        guest.on_ground = true;
+                        guest.inventory[guest.selected] =
+                            Some(ItemStack::new("minecraft:iron_pickaxe", 1));
+                    })
+                    .unwrap();
+                let player = game.player(12).unwrap();
+                let level = player.level(&*game).unwrap();
+                let torch = (game as &dyn mod_api::Host)
+                    .block_state_id("minecraft:torch")
+                    .unwrap();
+                let dirt = (game as &dyn mod_api::Host)
+                    .block_state_id("minecraft:dirt")
+                    .unwrap();
+                let at = [1, 64, 0];
+                assert_eq!(player.destroy_progress(game, level, at, dirt), Some(0.25));
+                assert_eq!(
+                    game.as_guest(12, |game| game.destroy_progress(at)),
+                    Some(0.25)
+                );
+                // An iron pickaxe on stone (hardness 1.5, the correct tool) and on dirt
+                // (hardness 0.5, speed 1, still harvestable); air and a torch have hardness 0.
+                let rock = 6.0 / 1.5 / 30.0;
+                let soil = 1.0 / 0.5 / 30.0;
+                let expected = [rock, soil, f32::INFINITY, f32::INFINITY];
+                for (x, expected) in expected.into_iter().enumerate() {
+                    let pos = [x as i32, 65, 0];
+                    assert_eq!(
+                        player.destroy_progress(game, level, pos, torch),
+                        Some(expected),
+                        "query at {pos:?}"
+                    );
+                    assert_eq!(
+                        game.as_guest(12, |game| game.destroy_progress(pos)),
+                        Some(expected),
+                        "dig at {pos:?}"
+                    );
+                }
+            });
+        });
+    }
 }

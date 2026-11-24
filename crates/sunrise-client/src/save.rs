@@ -27,7 +27,7 @@ mod horizon_names_tests;
 pub mod level_mods;
 mod respawn;
 mod writes;
-use writes::{Outstanding, Writer};
+use writes::{EvictionWrites, Outstanding, Writer};
 
 use crate::{
     Result,
@@ -674,9 +674,8 @@ pub(crate) fn uuid_from_tag(tag: Option<&Tag>) -> Option<[i32; 4]> {
         _ => None,
     }
 }
-// `DoubleTag.valueOf` / `FloatTag.valueOf` store -0.0 as the shared +0.0
-// `ZERO`, so a resting entity's `Motion` reads `0.0d`, never `-0.0d`.
-pub(crate) fn doubles(values: &[f64]) -> Tag {
+// `DoubleTag.valueOf` / `FloatTag.valueOf` store -0.0 as +0.0 (`ZERO`).
+pub fn doubles(values: &[f64]) -> Tag {
     Tag::List(
         values
             .iter()
@@ -684,7 +683,7 @@ pub(crate) fn doubles(values: &[f64]) -> Tag {
             .collect(),
     )
 }
-pub(crate) fn floats(values: &[f32]) -> Tag {
+pub fn floats(values: &[f32]) -> Tag {
     Tag::List(
         values
             .iter()

@@ -463,7 +463,7 @@ impl Game<'_> {
                     active,
                     ..
                 } if *active && ui::hovered(cursor, *x, *y, *w, 20.0) => {
-                    self.audio.play_button_click();
+                    self.play_audio_button_click();
                     let id = *id;
                     if let Some(outcome) = self.with_block_editor(|s, e| {
                         let pos = s.pos;

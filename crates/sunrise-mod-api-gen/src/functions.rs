@@ -5,7 +5,8 @@
 //! source and a parse of every crate below it), so a mixin build reads only the files of the
 //! modules its targets are in. Before a function is copied, its text is checked against the
 //! index's hash: a source that is not the build's is refused by name, never walked.
-use crate::patch::{Found, Source, TargetPath, plain, replaceable, target_path};
+use crate::patch::{Found, Source, TargetPath, replaceable, target_path};
+use crate::source::plain_path;
 use mod_surface::build_data::FunctionDigests;
 use quote::{ToTokens, quote};
 use serde::{Deserialize, Serialize};
@@ -45,10 +46,15 @@ pub struct CrateModules {
 pub struct ModuleFile {
     /// Relative to the source root, `/`-separated.
     pub path: String,
+    /// Conditions on this contribution to the module. A pinned lower build selects its files
+    /// before their declarations are re-exported into the patch crate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cfg: Vec<String>,
     /// The SHA-256 of the file's bytes, hex.
     pub sha256: String,
-    /// The enclosing gates on a literal include, outermost first. An empty list means an
-    /// unconditional include; a missing field is a regular module file (or an older index).
+    /// The enclosing gates on a literal include, outermost first: the same conditions as `cfg`.
+    /// An empty list means an unconditional include; a missing field is a regular module file
+    /// (or an older index).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_cfg: Option<Vec<String>>,
 }
@@ -101,13 +107,13 @@ impl Code {
 /// its last segment (`m::<GameLevel as LevelAccess>::block_state`), as the copy finds it.
 pub fn key(target: &str) -> String {
     match target_path(target) {
-        None => plain(target),
+        None => plain_path(target),
         Some(TargetPath {
             qualified: Some((module, ty, tr)),
             name,
             ..
-        }) => format!("{}::<{ty} as {tr}>::{name}", plain(module)),
-        Some(TargetPath { front, name, .. }) => format!("{}::{name}", plain(front)),
+        }) => format!("{}::<{ty} as {tr}>::{name}", plain_path(module)),
+        Some(TargetPath { front, name, .. }) => format!("{}::{name}", plain_path(front)),
     }
 }
 
@@ -315,7 +321,7 @@ pub(crate) fn index_of(
         }
     }
     let mut index = FunctionIndex::default();
-    for (module, paths) in &source.files {
+    for (module, files) in &source.files {
         let krate = module.split("::").next().unwrap_or_default();
         let facts = index
             .crates
@@ -329,7 +335,7 @@ pub(crate) fn index_of(
                 modules: BTreeMap::new(),
             });
         let mut listed = Vec::new();
-        for file in paths {
+        for file in files {
             let path = &file.path;
             // A `#[path]` or include can lead through `..`: use the archive's file spelling.
             let inside = path.strip_prefix(root).ok().and_then(|inside| {
@@ -353,8 +359,9 @@ pub(crate) fn index_of(
             let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
             listed.push(ModuleFile {
                 path: relative,
+                cfg: file.cfg.clone(),
                 sha256: sha256(&bytes),
-                include_cfg: file.include_cfg.clone(),
+                include_cfg: file.included.then(|| file.cfg.clone()),
             });
         }
         facts.modules.insert(module.clone(), listed);
@@ -546,7 +553,7 @@ fn collect(
                         .cloned()
                         .collect(),
                 };
-                let owner = plain(&block.self_ty.to_token_stream().to_string());
+                let owner = plain_path(&block.self_ty.to_token_stream().to_string());
                 let scope = match &block.trait_ {
                     Some((_, path, _)) => {
                         let last = path

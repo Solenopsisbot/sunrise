@@ -114,6 +114,9 @@ impl ProjectileWorld for LiveProjWorld<'_, '_> {
     fn in_water(&self, bounds: Aabb) -> bool {
         self.base().in_water(bounds)
     }
+    fn in_lava_box(&self, bounds: Aabb) -> bool {
+        self.base().in_lava_box(bounds)
+    }
     fn pushed_by_currents(&self, bounds: Aabb, velocity: Vec3) -> Vec3 {
         self.base().pushed_by_currents(bounds, velocity)
     }
@@ -141,12 +144,6 @@ impl ProjectileWorld for LiveProjWorld<'_, '_> {
     }
     fn can_stand_on(&self, p: [i32; 3], entity_y: f64) -> bool {
         self.base().can_stand_on(p, entity_y)
-    }
-    fn ignites(&self, p: [i32; 3]) -> bool {
-        self.base().ignites(p)
-    }
-    fn lava_height(&self, p: BlockPos) -> Option<f64> {
-        self.base().lava_height(p)
     }
     fn bubble_column(&self, p: [i32; 3]) -> Option<(bool, bool)> {
         self.base().bubble_column(p)
@@ -372,38 +369,35 @@ impl<'r> Game<'r> {
         owner_guest: Option<u32>,
         target: Who,
     ) -> bool {
-        let attacker_team = match owner {
+        // A player by entity id with their team; none when `who` is no player.
+        let guest = |conn: u32| {
+            self.lan
+                .as_ref()
+                .and_then(|h| h.hub.guest(conn))
+                .map(|g| (g.entity_id, self.score.board.players_team(&g.name)))
+        };
+        let guest_by_id = |id: u32| {
+            self.lan_guest_conn_by_id(id)
+                .map(|conn| (id as i32, guest(conn).and_then(|(_, team)| team)))
+        };
+        let attacker = match owner {
             Who::Player => match owner_guest {
-                Some(conn) if self.lan_acting != Some(conn) => self
-                    .lan
-                    .as_ref()
-                    .and_then(|h| h.hub.guest(conn))
-                    .map(|g| self.score.board.players_team(&g.name)),
-                _ => Some(self.player_team()),
+                Some(conn) if self.lan_acting != Some(conn) => guest(conn),
+                _ => Some((self.own_entity_id(), self.player_team())),
             },
-            Who::Mob(oid) => self.lan_guest_conn_by_id(oid).map(|conn| {
-                self.lan
-                    .as_ref()
-                    .and_then(|h| h.hub.guest(conn))
-                    .and_then(|g| self.score.board.players_team(&g.name))
-            }),
+            Who::Mob(oid) => guest_by_id(oid),
         };
-        let Some(attacker_team) = attacker_team else {
+        let Some((attacker, attacker_team)) = attacker else {
             return true;
         };
-        let victim_team = match target {
-            Who::Player => Some(self.player_team()),
-            Who::Mob(tid) => self.lan_guest_conn_by_id(tid).map(|conn| {
-                self.lan
-                    .as_ref()
-                    .and_then(|h| h.hub.guest(conn))
-                    .and_then(|g| self.score.board.players_team(&g.name))
-            }),
+        let victim = match target {
+            Who::Player => Some((self.own_entity_id(), self.player_team())),
+            Who::Mob(tid) => guest_by_id(tid),
         };
-        let Some(victim_team) = victim_team else {
+        let Some((victim, victim_team)) = victim else {
             return true;
         };
-        self.player_may_harm(victim_team, attacker_team)
+        self.player_may_harm(attacker, victim, attacker_team, victim_team)
     }
 
     /// Current bounding box of a live target (for `ShulkerBullet` homing).
@@ -1089,14 +1083,7 @@ impl<'r> Game<'r> {
                 let Some(i) = self.creatures.projectiles.iter().position(|p| p.id == id) else {
                     return NonMobHit::Refused;
                 };
-                let bullet = self.remove_projectile_at(i);
-                let at = [bullet.position.x, bullet.position.y, bullet.position.z];
-                self.shulker_bullet_hurt(at);
-                self.entity_event_by(
-                    "minecraft:entity_damage",
-                    at,
-                    Some(Target::Projectile(bullet.id)),
-                );
+                let _ = self.destroy_shulker_bullet(i);
                 return NonMobHit::Hurt;
             }
             if super::super::deflect::redirectable(&self.creatures.projectiles[i]) {

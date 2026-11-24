@@ -18,11 +18,11 @@ pub mod part_tables;
 mod part_tables_tests;
 mod sides;
 mod visibility_plan;
-pub(crate) use visibility_plan::MAX_RESIDENT_VISIBILITY_BYTES;
 pub use visibility_plan::{
     ANSWER_BYTES, Lease, PLAN_BYTES, SectionAnswer, SectionPlanBuilder, SectionVisibilityPlan,
-    capture_input, plan_section,
+    plan_section,
 };
+pub(crate) use visibility_plan::{MAX_RESIDENT_VISIBILITY_BYTES, capture_input};
 #[cfg(test)]
 #[path = "mesher/source_tests.rs"]
 pub(crate) mod source_tests;

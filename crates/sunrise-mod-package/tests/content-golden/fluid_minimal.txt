@@ -125,12 +125,15 @@ Content {
                     slope_find_distance: 4,
                     source_conversion: false,
                     bucket: true,
+                    flowing: None,
                 },
             ),
+            bucket_item: None,
             measures: FluidMeasures {
                 temperature: 300,
                 density: 1000,
                 viscosity: 1000,
+                light_level: 0,
             },
         },
         FluidLook {
@@ -138,10 +141,12 @@ Content {
             sprite: None,
             tint: None,
             world: None,
+            bucket_item: None,
             measures: FluidMeasures {
                 temperature: 300,
                 density: 1000,
                 viscosity: 1000,
+                light_level: 0,
             },
         },
     ],

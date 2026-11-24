@@ -1,6 +1,6 @@
 pub use world::structure_type::TerrainAdjustment;
 pub use world::structure_type::{
-    BiomeId, ChunkPos, FoundStructure, GenerationContext, HeightmapType, NoiseBlock, NoiseColumn,
+    ChunkPos, FoundStructure, GenerationContext, HeightmapType, NoiseBlock, NoiseColumn,
     PieceBeardifier, PieceContext, StructureError, StructurePiece, StructureType,
 };
 pub use world::structure_type::{

@@ -36,7 +36,7 @@ impl Game<'_> {
             self.commit_screen_transition();
             return;
         };
-        match self.screen_decision(answer) {
+        match self.screen_decision(answer, false) {
             ScreenDecision::ModScreen(mod_id) => self.apply_screen(Screen::Mod, Some(mod_id)),
             ScreenDecision::Vanilla(target) => self.open_screen_target(target),
             // With no world nothing else can show: a `Cancel` doesn't keep it shut.

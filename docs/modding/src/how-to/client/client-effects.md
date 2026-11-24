@@ -249,16 +249,26 @@ Views draw only the player's own level. A request targeting another level is ref
 - Both effects start at full strength and fade linearly over `ticks` client ticks. The fade waits while the game is paused.
 - The sound events in `exempt` keep their direct sound clear, including ones already playing, but their shared reverb tail is still muffled. Use this for the mod's ringing sound. Other sounds already playing, music and interface clicks are muffled too.
 
-A new call replaces the current muffle; `ticks` of 0 ends it immediately. The effect belongs to the client’s sound output. The call refuses an amount or strength outside 0 to 1, more than 64 exempt events, or an exempt event that is not a namespaced sound ID, without changing the output. Server code cannot call this client-only service.
+A new call replaces the current muffle; `ticks` of 0 ends it immediately. The effect belongs to the client’s sound
+output. The call refuses an amount or strength outside 0 to 1, or an exempt event that is not a namespaced sound ID,
+without changing the output. There is no limit on the number of events in `exempt`.
 
-Play the accompanying sound through `ClientHost::play_local_sound` with a `SoundPlay`.
+Play the accompanying sound with `ClientHost::play_local_sound(&sound, after)`. The `after` delay is counted from the
+next audio update in unpaused sound-engine ticks. The sound engine calculates final volume and pitch after applying the
+sound file's own settings. A finite negative base volume can start a silent sound, and a finite negative base pitch
+reaches the engine's minimum pitch. `play_sound` uses the same base volume and pitch domain on start and on live refresh;
+assign `*event.sound = None` to cancel or stop, not a negative number. A positive repeat gap waits between plays; zero or a
+negative gap loops automatically.
 
-The `SoundRef` it returns controls that play: `state`, `stop`, `fade(host, volume, ticks)`, and the live changes
-`move_to(host, position)` and `set_pitch(host, pitch)`. Both changes land at the next audio update on the same
-instance, so a looping sound is not restarted: use them to follow a moving machine or a rising whine. `move_to`
-takes a position in the client's level (finite, within 30 million blocks) and has no effect on a sound played at the
-listener (`SoundPlay::ui`); `set_pitch` takes a pitch at or above 0, as `SoundPlay::pitch`. Each returns `false`,
-changing nothing, for a bad value or a sound that is over.
+The `SoundRef` it returns follows and controls the same instance without restarting it:
+
+- `state(host)` tells you whether it is waiting, playing or stopped; `stop(host)` stops it for good.
+- `fade(host, volume, ticks)` changes the volume to a finite target. A target of zero or less stops it when the fade ends.
+- `move_to(host, position)` changes its position, in world blocks or as an offset from the listener for relative sounds.
+  The position must be finite in the mixer's float coordinates; it is not checked against the world border.
+- `set_pitch(host, pitch)` changes its finite base pitch. The engine applies the final pitch clamp.
+
+The writes take effect from the next audio update and return `false` for an unreadable parameter or a sound that is over.
 
 ### A sound's own effects
 
@@ -284,7 +294,7 @@ Every field's valid range, inclusive at both ends:
 The cutoffs are in hertz whatever the output device's sample rate, so a value valid on one device is valid on every
 device. `SoundEffects::valid` refuses NaN, infinities and any value outside its range; nothing is clamped. The same
 check runs on all three paths: a `play_sound` edit when a sound starts, the live refresh of a ticking sound, and
-`play_local_sound`. A refused value plays nothing (or stops the live sound), as a bad volume does. Inside the mixer, a
+`play_local_sound`. A refused value plays nothing (or stops the live sound). Inside the mixer, a
 `lowpass` or `highpass` above the output's Nyquist frequency (half its sample rate; the mixer stops at 0.49 of the
 rate) works as that limit: on a 32 kHz output, a `lowpass` of 18000 filters as 15680 would. That limit depends on the
 device, not on your value, and is not a refusal.
@@ -316,3 +326,22 @@ the loop, flat at 0 Hz and about 3 dB down at the damping frequency on each pass
 die sooner, as in a real room. The line lengths set how dense the echoes are. The reverbs' delay lines are allocated
 once, when the sound system starts, and about 1.1 MiB is used whatever the device's rate. A reverb nothing is sent to
 costs nothing once its tail has died away. Mod-set reverb parameters are not available yet.
+
+## Narrating a line
+
+A client mod has the player's narrator say a line with `ClientNarratorClientHost::narrate`,
+as Jade's "Narrate Target" reads the block or entity under the crosshair (`GameNarrator.saySystemNow`
+in Java). It goes through the game's own narrator, so the Narrator option, the voice volume and
+the narrator's log of recent lines apply as to the game's own narration. Nothing reaches the server.
+
+```rust
+{{#include ../../../examples/src/client_misc.rs:target_changed}}
+```
+
+`Narration::Now` (`saySystemNow`) cuts off what is being said; `Narration::Queued`
+(`saySystemQueued`) waits for it. The line is the component's plain string (`Component.getString`)
+in the current language. There is no length cap beyond the component's own form limits.
+
+Each refusal says and logs nothing, and has its own name: `Text` (the component was refused at the
+boundary), `Empty` (its text is empty), `Off` (the option is Off or Chat only) and `Unavailable`
+(no speech on this platform, or no client narrator). Match `NarrateError` non-exhaustively.

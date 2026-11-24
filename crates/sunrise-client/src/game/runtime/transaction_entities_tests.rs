@@ -7,8 +7,9 @@ use std::sync::{
 };
 
 use mod_api::{
-    AttachmentType, EntityConstructingEvent, EntityJoinLevelEvent, EntityLeaveLevelEvent,
-    EntityRef, Flow, Hooks, HostSide, HostTransaction, RemovalReason, ServerHost,
+    AttachmentDescriptor, AttachmentKey, EntityConstructingEvent, EntityJoinLevelEvent,
+    EntityLeaveLevelEvent, EntityRef, Flow, Hooks, HostSide, HostTransaction, RemovalReason,
+    ServerHost,
 };
 use sunrise_client::{chunk::Chunk, items::ItemStack, mobs::StoredEffect};
 use sunrise_core::nbt::{Tag, parse_snbt};
@@ -16,15 +17,9 @@ use sunrise_mod_runtime::attachments::Holder;
 
 use super::{Dim, Game, commands::Target, lan_entities::ENTITY_ID_HEADROOM};
 
-/// Kept for the session only.
-static MARK: AttachmentType<i32> = AttachmentType {
-    namespace: "journal",
-    name: "mark",
-    default: || 0,
-    codec: None,
-    copy_on_death: false,
-    sync: false,
-};
+fn mark_key() -> AttachmentKey<i32> {
+    mod_api::testing::attachment_key("journal", "mark")
+}
 
 /// What the observer heard, in order.
 #[derive(Debug, Default, PartialEq)]
@@ -66,12 +61,13 @@ struct Observer;
 #[mod_api::__subscriptions]
 impl Hooks for Observer {
     fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
-        r.register_attachment_type("journal:mark", false).unwrap();
+        r.register_attachment_type(AttachmentDescriptor::new("journal:mark", || 0i32))
+            .unwrap();
     }
     fn entity_constructing(&self, host: HostSide<'_>, event: &mut EntityConstructingEvent) {
         if let (HostSide::Server(host), Holder::Entity(id)) = (host, event.holder) {
             HEARD.lock().unwrap().constructed.push(id);
-            MARK.set(host, event.holder, 1).unwrap();
+            mark_key().set(host, event.holder, 1).unwrap();
         }
     }
     fn entity_join_level(
@@ -80,10 +76,10 @@ impl Hooks for Observer {
         event: &mut EntityJoinLevelEvent<'_>,
     ) -> Flow {
         let mut heard = HEARD.lock().unwrap();
-        heard.joined.push(event.entity);
-        heard.order.push((true, event.entity));
+        heard.joined.push(event.subject.id());
+        heard.order.push((true, event.subject.id()));
         if event.loaded_from_disk {
-            heard.from_disk.push(event.entity);
+            heard.from_disk.push(event.subject.id());
         }
         drop(heard);
         let pending = PENDING.lock().unwrap().take();
@@ -97,18 +93,17 @@ impl Hooks for Observer {
         }
         let answers = {
             let mut on_join = ON_JOIN.lock().unwrap();
-            (on_join.0 == Some(event.entity)).then(|| on_join.0.take())
+            (on_join.0 == Some(event.subject.id())).then(|| on_join.0.take())
         };
         if answers.is_some() {
             let removes = ON_JOIN.lock().unwrap().2.take();
+            let level = host.level("minecraft:overworld").unwrap();
             if let Some(entity) = removes {
                 host.transaction(|host, _| {
-                    let spawned = host.summon(
-                        "minecraft:overworld",
-                        "minecraft:pig",
-                        [1.5, 70.0, 1.5],
-                        Default::default(),
-                    );
+                    let spawned = level
+                        .summon(host, "minecraft:pig", [1.5, 70.0, 1.5], Default::default())
+                        .unwrap()
+                        .map(EntityRef::id);
                     ON_JOIN.lock().unwrap().1.extend(spawned);
                     entity.remove(host, RemovalReason::Discarded);
                     *PENDING.lock().unwrap() = Some(entity);
@@ -116,12 +111,10 @@ impl Hooks for Observer {
                 })
                 .unwrap();
             } else {
-                let spawned = host.summon(
-                    "minecraft:overworld",
-                    "minecraft:pig",
-                    [1.5, 70.0, 1.5],
-                    Default::default(),
-                );
+                let spawned = level
+                    .summon(host, "minecraft:pig", [1.5, 70.0, 1.5], Default::default())
+                    .unwrap()
+                    .map(EntityRef::id);
                 ON_JOIN.lock().unwrap().1.extend(spawned);
             }
         }
@@ -193,8 +186,10 @@ fn summon(game: &mut Game<'_>, kind: &str, nbt: &str) -> Option<u32> {
     let (Tag::Compound(nbt), _) = parse_snbt(nbt).unwrap() else {
         panic!("not a compound");
     };
-    let dimension = game.dim.id();
-    game.summon(dimension, kind, [1.5, 70.0, 1.5], nbt)
+    let level = game.level(game.dim.id()).unwrap();
+    game.level_summon(level, kind, [1.5, 70.0, 1.5], nbt)
+        .unwrap()
+        .map(EntityRef::id)
 }
 
 /// Takes what the observer heard so far.
@@ -222,7 +217,10 @@ fn a_spawn_then_abort_leaves_no_entity_map_or_hook() {
         let pig = game.storage_scope(|game, _| {
             let pig = summon(game, "minecraft:pig", "{}").unwrap();
             assert!(game.entity(pig).is_some(), "in the level inside the action");
-            assert_eq!(MARK.get(game, Holder::Entity(pig)), Ok(1));
+            assert_eq!(
+                mark_key().get(game, Holder::Entity(pig), Clone::clone),
+                Ok(1)
+            );
             assert_eq!(heard().constructed, [pig], "constructed at the spawn call");
             (pig, false)
         });
@@ -292,7 +290,10 @@ fn a_spawn_joins_at_the_root_commit() {
         });
         assert_eq!(heard().joined, [pig]);
         assert!(game.entity(pig).is_some());
-        assert_eq!(MARK.get(game, Holder::Entity(pig)), Ok(1));
+        assert_eq!(
+            mark_key().get(game, Holder::Entity(pig), Clone::clone),
+            Ok(1)
+        );
     });
 }
 
@@ -394,7 +395,7 @@ fn a_removal_then_abort_keeps_the_row_map_and_rider() {
         let (boat, cow) = boat_with_rider(game);
         let pig = summon(game, "minecraft:pig", "{}").unwrap();
         let pig = game.entity(pig).unwrap();
-        MARK.set(game, Holder::Entity(boat.id()), 7).unwrap();
+        mark_key().set(game, Holder::Entity(boat.id()), 7).unwrap();
         heard();
         game.storage_scope(|game, _| {
             assert!(game.entity_discard(boat));
@@ -420,7 +421,10 @@ fn a_removal_then_abort_keeps_the_row_map_and_rider() {
 
         assert_eq!(game.entity(boat.id()), Some(boat));
         assert_eq!(game.entity(pig.id()), Some(pig));
-        assert_eq!(MARK.get(game, Holder::Entity(boat.id())), Ok(7));
+        assert_eq!(
+            mark_key().get(game, Holder::Entity(boat.id()), Clone::clone),
+            Ok(7)
+        );
         assert_eq!(game.entity_vehicle(cow), Some(boat));
         assert!(game.persist.removals.is_empty());
         game.native_leaves_flush();
@@ -569,14 +573,17 @@ fn another_writer_sees_the_spawn_and_its_writes_roll_back() {
             // A second mod, lent the host inside the same action.
             let host: &mut dyn ServerHost = game;
             assert!(host.entity(pig).is_some(), "it sees the spawn");
-            MARK.set(host, Holder::Entity(pig), 5).unwrap();
-            MARK.set(host, Holder::Entity(witness), 5).unwrap();
+            mark_key().set(host, Holder::Entity(pig), 5).unwrap();
+            mark_key().set(host, Holder::Entity(witness), 5).unwrap();
             (pig, false)
         });
 
         assert_eq!(game.entity(pig), None);
         assert!(!game.entity_attachments.contains_key(&pig));
-        assert_eq!(MARK.get(game, Holder::Entity(witness)), Ok(1));
+        assert_eq!(
+            mark_key().get(game, Holder::Entity(witness), Clone::clone),
+            Ok(1)
+        );
     });
 }
 
@@ -717,18 +724,19 @@ fn exhausted_ids_refuse_every_mod_spawn() {
         ("summon", |game, _| {
             summon(game, "minecraft:pig", "{}").is_some()
         }),
-        ("spawn_falling_block", |game, _| {
+        ("level_spawn_falling_block", |game, f| {
             let sand = (game.pack.assets.registry)
                 .default_state("minecraft:sand")
                 .unwrap();
-            let dimension = game.dim.id();
-            game.spawn_falling_block(
-                dimension,
+            game.level_spawn_falling_block(
+                f.level,
                 sand,
                 [1.5, 72.0, 1.5],
                 [0.0; 3],
                 Default::default(),
             )
+            .unwrap()
+            .is_some()
         }),
         ("entity_spawn_at_location", |game, f| {
             let stack = ItemStack::new("minecraft:stone", 1);
@@ -783,10 +791,11 @@ fn exhausted_ids_refuse_every_mod_spawn() {
             game.player_drop_stack(player, stack, false).is_none()
         }),
         ("spawn_projectile_from_rotation", |game, f| {
+            // An egg: the observer keeps snowballs out, and a refused join gives no handle.
             let owner = game.living(f.mob).unwrap();
-            let snowball = mod_api::Identifier::parse("minecraft:snowball").unwrap();
-            let stack = ItemStack::new("minecraft:snowball", 1);
-            (game.spawn_projectile_from_rotation(owner, &snowball, &stack, 0.0, 1.5, 1.0)).is_some()
+            let egg = mod_api::Identifier::parse("minecraft:egg").unwrap();
+            let stack = ItemStack::new("minecraft:egg", 1);
+            (game.spawn_projectile_from_rotation(owner, &egg, &stack, 0.0, 1.5, 1.0)).is_some()
         }),
     ];
     with_observer(NAME, |game| {
@@ -1201,7 +1210,7 @@ fn a_parked_levels_pending_removal_is_hidden_from_another_level_until_it_aborts(
         game.enter_level(Dim::Overworld).unwrap();
         let boat = summon(game, "minecraft:oak_boat", "{}").unwrap();
         let target = super::commands::Target::Boat(boat);
-        MARK.set(game, Holder::Entity(boat), 7).unwrap();
+        mark_key().set(game, Holder::Entity(boat), 7).unwrap();
         // Parked, nothing pending: the boat is found and visible (else the checks below prove
         // nothing).
         game.enter_level(Dim::Nether).unwrap();
@@ -1216,7 +1225,11 @@ fn a_parked_levels_pending_removal_is_hidden_from_another_level_until_it_aborts(
         // An attachment is reached through the level in place only (`attachment_slot` asks the
         // resident table for `self.dim`), so from the nether the overworld boat's is out of reach,
         // pending removal or not.
-        assert!(MARK.get(game, Holder::Entity(boat)).is_err());
+        assert!(
+            mark_key()
+                .get(game, Holder::Entity(boat), Clone::clone)
+                .is_err()
+        );
         game.enter_level(Dim::Overworld).unwrap();
         game.storage_scope(|game, _| {
             assert!(game.entity_discard(game.entity(boat).unwrap()));
@@ -1226,7 +1239,11 @@ fn a_parked_levels_pending_removal_is_hidden_from_another_level_until_it_aborts(
                 "the parked level's boat reads as gone while its removal is pending"
             );
             assert!(!game.resident_source_target_visible(mod_api::DimensionKey::OVERWORLD, target));
-            assert!(MARK.get(game, Holder::Entity(boat)).is_err());
+            assert!(
+                mark_key()
+                    .get(game, Holder::Entity(boat), Clone::clone)
+                    .is_err()
+            );
             game.enter_level(Dim::Overworld).unwrap();
             ((), false)
         });
@@ -1239,10 +1256,14 @@ fn a_parked_levels_pending_removal_is_hidden_from_another_level_until_it_aborts(
             "the abort put it back"
         );
         assert!(game.resident_source_target_visible(mod_api::DimensionKey::OVERWORLD, target));
-        assert!(MARK.get(game, Holder::Entity(boat)).is_err());
+        assert!(
+            mark_key()
+                .get(game, Holder::Entity(boat), Clone::clone)
+                .is_err()
+        );
         game.enter_level(Dim::Overworld).unwrap();
         assert_eq!(
-            MARK.get(game, Holder::Entity(boat)),
+            mark_key().get(game, Holder::Entity(boat), Clone::clone),
             Ok(7),
             "kept by the abort"
         );

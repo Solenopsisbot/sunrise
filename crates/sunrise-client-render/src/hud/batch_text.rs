@@ -23,12 +23,23 @@ impl HudBatch {
         color: u32,
         shadow: bool,
     ) -> f32 {
-        let t = if text.contains('§') {
-            crate::text::Text::legacy(text)
-        } else {
-            crate::text::Text::literal(text)
-        };
-        self.text_styled(atlas, &t, x, y, color, shadow)
+        if text.contains('§') {
+            let text = crate::text::Text::legacy(text);
+            return self.text_styled(atlas, &text, x, y, color, shadow);
+        }
+        let visual = crate::bidi::visual_str(text);
+        let style = crate::text::Style::default();
+        self.paint_visual_text(
+            atlas,
+            visual.chars().map(|c| (c, &style)),
+            x,
+            y,
+            color,
+            shadow,
+            false,
+            None,
+            crate::font::DEFAULT,
+        )
     }
     /// Font.drawInternal: styled glyphs, shadows first, with bold, italic,
     /// underline and strikethrough. `color` is the default colour and alpha.
@@ -75,6 +86,28 @@ impl HudBatch {
                 outline: None,
                 default_font,
             },
+        )
+    }
+    /// Draw a GUI line already resolved and put in visual order.
+    pub fn text_visual(
+        &mut self,
+        atlas: &HudAtlas,
+        text: &crate::text::Text,
+        x: f32,
+        y: f32,
+        color: u32,
+        shadow: bool,
+    ) -> f32 {
+        self.paint_visual_text(
+            atlas,
+            text.chars(),
+            x,
+            y,
+            color,
+            shadow,
+            false,
+            None,
+            crate::font::DEFAULT,
         )
     }
     /// `text_styled` for text drawn in the world (`TextRenderable.render`
@@ -170,12 +203,38 @@ impl HudBatch {
         let text = text.resolved();
         // Language.getVisualOrder: shaped and reordered for right-to-left text.
         let text = crate::bidi::visual(&text);
+        self.paint_visual_text(
+            atlas,
+            text.chars(),
+            x,
+            y,
+            color,
+            shadow,
+            world,
+            outline,
+            default_font,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_visual_text<'a>(
+        &mut self,
+        atlas: &HudAtlas,
+        characters: impl Iterator<Item = (char, &'a crate::text::Style)>,
+        x: f32,
+        y: f32,
+        color: u32,
+        shadow: bool,
+        world: bool,
+        outline: Option<(u32, [f32; 2])>,
+        default_font: &str,
+    ) -> f32 {
         let font = &atlas.font;
         let alpha = (color >> 24) as u8;
-        let mut glyphs = Vec::new();
+        let mut glyphs = SmallVec::<[_; 10]>::new();
         let mut cursor = x;
         let mut previous = None;
-        for (i, (ch, style)) in text.chars().enumerate() {
+        for (i, (ch, style)) in characters.enumerate() {
             let object = (ch == '\u{fffc}')
                 .then_some(style.inline_object.as_ref())
                 .flatten();
@@ -242,7 +301,7 @@ impl HudBatch {
                 b[3],
             )
         };
-        let mut effects: Vec<(f32, f32, f32, u32, u32, bool, f32)> = Vec::new();
+        let mut effects = SmallVec::<[_; 4]>::new();
         // Font.PreparedTextBuilder.visit: emit every glyph completely (shadow, bold shadow,
         // foreground, bold foreground) before moving to the next glyph, then emit all
         // strikethrough and underline effects after all glyphs.

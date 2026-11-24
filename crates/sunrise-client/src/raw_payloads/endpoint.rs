@@ -277,6 +277,7 @@ impl Endpoint {
                     reason: reason.plain(),
                     key: None,
                     from_server: false,
+                    after_login: true,
                 });
                 if let Some(writer) = writer.as_ref() {
                     if configuring.load(Ordering::Acquire) {

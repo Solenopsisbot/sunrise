@@ -150,7 +150,7 @@ EnchantingTableBlockEntity.bookAnimationTick	port	crates/sunrise-client-render/s
 ListBackedContainer	skip:java		slot helpers over a plain list
 PotDecorations.addSideDetailsToTooltip	port	crates/sunrise-client/src/item_tooltip.rs::TooltipDisplay::detail_lines	sherd lines of the decorated pot tooltip
 PotDecorations.allBrick	skip:data		constant brick decoration set
-PotentSulfurBlockEntity.applyNauseaEffect	port	crates/sunrise-client/src/game/blocks/potent_sulfur.rs::apply_nausea_effect_to_mob	ticked in #3516; `PotentSulfurBlockEntity.applyNauseaEffect` is cited at crates/sunrise-client/src/game/blocks/potent_sulfur.rs:86
+PotentSulfurBlockEntity.applyNauseaEffect	port	crates/sunrise-client/src/game/blocks/potent_sulfur.rs::Game::server_nausea_effect_ticker	ticked in #3516; `PotentSulfurBlockEntity.applyNauseaEffect` is cited at crates/sunrise-client/src/game/blocks/potent_sulfur.rs:86
 PotentSulfurBlockEntity.canBeReachedByNoxiousGas	port	crates/sunrise-client-render/src/potent_sulfur.rs::can_be_reached_by_noxious_gas	ticked in #3516; `PotentSulfurBlockEntity.canBeReachedByNoxiousGas` is cited at crates/sunrise-client-render/src/potent_sulfur.rs:73
 PotentSulfurBlockEntity.findNoxiousGasSourceBlock	port	crates/sunrise-client-render/src/potent_sulfur.rs::find_noxious_gas_source_block	the first block above the sulfur that the gas can leave through, capped at the geyser's reach
 PotentSulfurBlockEntity.getNearbyLivingEntities	inline	crates/sunrise-gameplay/src/potent_sulfur.rs::nearby_living_area	the source block's box grown 2.5 blocks sideways, which the nausea and launch tickers ask for entities in

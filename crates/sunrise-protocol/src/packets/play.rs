@@ -1320,14 +1320,33 @@ impl Codec<bool> for SignSide {
 }
 /// `stringUtf8(384)` in `fixedSizeList(4)`: four lines, no count.
 pub struct SignLines;
+impl SignLines {
+    /// `ServerboundSignUpdatePacket.MAX_STRING_LENGTH`: maximum UTF-16 code units per line
+    /// across the four fixed sign lines.
+    pub const MAX_UTF16: usize = 384;
+
+    /// First line index exceeding [`Self::MAX_UTF16`] UTF-16 code units, matching
+    /// vanilla `Utf8String.write(buf, line, 384)` and `Utf8String.read(buf, 384)`.
+    pub fn first_oversize_line(lines: &[String; 4]) -> Option<usize> {
+        lines.iter().position(|line| {
+            line.encode_utf16().take(Self::MAX_UTF16 + 1).count() > Self::MAX_UTF16
+        })
+    }
+}
 impl Codec<[String; 4]> for SignLines {
     fn read(r: &mut Reader) -> Result<[String; 4]> {
         Ok([
-            r.string(384)?,
-            r.string(384)?,
-            r.string(384)?,
-            r.string(384)?,
+            r.string(Self::MAX_UTF16)?,
+            r.string(Self::MAX_UTF16)?,
+            r.string(Self::MAX_UTF16)?,
+            r.string(Self::MAX_UTF16)?,
         ])
+    }
+    fn validate(v: &[String; 4]) -> Result<()> {
+        if let Some(i) = Self::first_oversize_line(v) {
+            return Err(Error::sign_line_too_long(i, Self::MAX_UTF16));
+        }
+        Ok(())
     }
     fn write(v: &[String; 4], w: &mut Writer) {
         for line in v {
@@ -1341,6 +1360,17 @@ packet!(
     SetBeacon { primary: Option<i32> => Opt<VarInt>, secondary: Option<i32> => Opt<VarInt> }
 );
 packet!(Interact { id: i32 => VarInt, hand: i32 => VarInt, location: [f64; 3] => LpVec3, secondary: bool => Bool });
+/// `ServerboundMovePlayerPacket.packFlags`: 1 on ground, 2 horizontal collision.
+pub const fn pack_move_player_flags(on_ground: bool, horizontal_collision: bool) -> u8 {
+    let mut flags = 0;
+    if on_ground {
+        flags |= 1;
+    }
+    if horizontal_collision {
+        flags |= 2;
+    }
+    flags
+}
 packet!(
     /// ServerboundMovePlayerPacket flags: 1 on ground, 2 horizontal collision.
     MovePlayerPos { x: f64 => Double, y: f64 => Double, z: f64 => Double, flags: u8 => UByte }
@@ -1472,6 +1502,16 @@ packet_enum!(Serverbound, crate::ids::play::serverbound {
     UseItem(UseItem) = USE_ITEM,
     UseItemOn(UseItemOn) = USE_ITEM_ON,
 });
+
+impl Serverbound {
+    /// The post-ID payload bytes, validated with the packet's protocol codec.
+    pub fn try_encode_payload(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let mut w = Writer::new();
+        self.write_payload(&mut w);
+        Ok(w.data)
+    }
+}
 
 // Generated retained-allocation traversals; regenerate with protocol-retained-gen.
 impl crate::retained::OwnedHeap for NetCost {

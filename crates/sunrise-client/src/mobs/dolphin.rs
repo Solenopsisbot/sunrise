@@ -264,11 +264,16 @@ impl Goal for Jump {
             // Mth.rotLerp(0.2, xRot, 0).
             m.head_pitch += 0.2 * super::living::wrap(0.0 - m.head_pitch);
         } else if v.length() > f64::from(1.0e-5f32) {
-            let horizontal = sunrise_core::geometry::length(v.x, v.z);
-            m.head_pitch = ((-v.y).atan2(horizontal) * f64::from(180.0f32)
-                / f64::from(std::f32::consts::PI)) as f32;
+            m.head_pitch = breach_pitch(v);
         }
     }
+}
+
+/// `DolphinJumpGoal.tick`'s pitch: `Math.atan2(-y, horizontalDistance)` times `Mth.RAD_TO_DEG`.
+fn breach_pitch(v: sunrise_core::geometry::Vec3) -> f32 {
+    let horizontal = sunrise_core::geometry::length(v.x, v.z);
+    (sunrise_core::jmath::atan2(-v.y, horizontal)
+        * f64::from(sunrise_core::geometry::trig::RAD_TO_DEG)) as f32
 }
 
 /// `FollowPlayerRiddenEntityGoal(mob, AbstractBoat / AbstractNautilus)`: a
@@ -740,4 +745,83 @@ mod treasure_play_tests {
         });
         assert!(ran, "vanilla data is missing");
     }
+}
+
+#[cfg(test)]
+mod jump_turn_tests {
+    use super::*;
+    use crate::mobs::Mob;
+    use std::sync::Arc;
+    use sunrise_core::geometry::Vec3;
+
+    /// The pinned vanilla 26.3 side is `VanillaTurnOracle`'s `dolphin.txt`
+    /// (`tools/test_mob_turn_parity.py`, recorded into `.local/witness/26.3/mob_turn/dolphin.txt`):
+    /// `DolphinJumpGoal.tick` on a dolphin out of water, from each motion and pitch, as the pitch
+    /// bits it leaves (rising, falling, straight up and down, nearly still).
+    #[test]
+    #[ignore = "run by tools/test_mob_turn_parity.py"]
+    fn the_jump_turn_matches_the_pinned_oracle() {
+        let witness_dir = std::env::var_os("SUNRISE_MOB_TURN_WITNESS_DIR").expect(
+            "SUNRISE_MOB_TURN_WITNESS_DIR must be set; run through tools/test_mob_turn_parity.py, which records the witness",
+        );
+        let witness_path = std::path::Path::new(&witness_dir).join("dolphin.txt");
+        let witness = std::fs::read_to_string(&witness_path).unwrap_or_else(|err| {
+            panic!(
+                "failed to read {} ({err}); run through tools/test_mob_turn_parity.py, which records the witness",
+                witness_path.display()
+            )
+        });
+        let bits = |v: f64| format!("{:016x}", v.to_bits());
+        let ran = crate::mobs::world::with_test_world(&[], |w, types| {
+            let mut rows = Vec::new();
+            for v in MOTIONS {
+                for pitch in [0.0f32, 30.0, -12.5] {
+                    let kind = Arc::new(types.types["minecraft:dolphin"].clone());
+                    let mut m = Mob::new(1, kind, Vec3::new(2.5, 64.0, 2.5), 0.0);
+                    m.velocity = Vec3::new(v[0], v[1], v[2]);
+                    m.head_pitch = pitch;
+                    let mut test_level = crate::health::TestLevel::new(0);
+                    let level = &mut test_level.level();
+                    let mut events = Vec::new();
+                    let mut cx = Cx {
+                        w,
+                        level,
+                        events: &mut events,
+                    };
+                    Jump::new(10).tick(&mut m, &mut cx);
+                    rows.push(format!(
+                        "{} {} {} {:08x} {:08x}",
+                        bits(v[0]),
+                        bits(v[1]),
+                        bits(v[2]),
+                        pitch.to_bits(),
+                        m.head_pitch.to_bits()
+                    ));
+                }
+            }
+            let actual = rows.join("\n") + "\n";
+            if let Some(dir) = std::env::var_os("SUNRISE_TURN_OUTPUT_DIR") {
+                std::fs::write(std::path::Path::new(&dir).join("dolphin.txt"), &actual).unwrap();
+            }
+            assert_eq!(rows.len(), MOTIONS.len() * 3);
+            assert_eq!(actual, witness);
+        });
+        assert!(ran, "prepared mob data must run the jump fixture");
+    }
+
+    const MOTIONS: [[f64; 3]; 13] = [
+        [1.0, 0.0, 0.0],
+        [1.0, -0.0, 0.0],
+        [0.3, 0.5, 0.0],
+        [0.3, -0.5, 0.0],
+        [0.5, 1.0, 0.0],
+        [0.01, -1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.1, 0.1, 0.0],
+        [0.1, -0.1, 0.0],
+        [0.2, 0.05, 0.3],
+        [1e-6, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ];
 }

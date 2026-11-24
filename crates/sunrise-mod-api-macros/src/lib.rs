@@ -169,40 +169,6 @@ fn expand(mut implementation: ItemImpl, export: bool) -> TokenStream {
     let id = format_ident!("HookId");
     let ids = format_ident!("hook_ids");
     let subscribed_name = format_ident!("{}", part.unwrap_or("subscribed"));
-    // Entity parts (#1077) carry plain methods beside their scoped hooks
-    // (#792): the goal, behavior and spawn-size registrars are not hooks, so
-    // their names subscribe nothing.
-    if name == "EntityPart" {
-        const ENTITY_PART_PLAIN: [&str; 5] = [
-            "register_goals",
-            "register_behaviors",
-            "spawn_cluster_size",
-            "is_shearable",
-            "on_sheared",
-        ];
-        let plain: Vec<bool> = methods
-            .iter()
-            .map(|method| ENTITY_PART_PLAIN.contains(&method.to_string().as_str()))
-            .collect();
-        let hooked: Vec<_> = methods
-            .iter()
-            .zip(&plain)
-            .filter(|(_, plain)| !*plain)
-            .map(|(method, _)| method)
-            .collect();
-        let hooked_cfgs: Vec<_> = cfgs
-            .iter()
-            .zip(&plain)
-            .filter(|(_, plain)| !*plain)
-            .map(|(cfgs, _)| cfgs)
-            .collect();
-        implementation.items.push(syn::parse_quote! {
-            fn #subscribed_name(&self) -> &'static [Option<mod_api::#id>] {
-                &[#(#(#hooked_cfgs)* mod_api::#ids::#hooked),*]
-            }
-        });
-        return quote!(#implementation).into();
-    }
     let subscribed = {
         syn::parse_quote! {
             fn #subscribed_name(&self) -> &'static [Option<mod_api::#id>] {
@@ -402,30 +368,6 @@ pub fn sunrise_loop(attribute: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
     input
-}
-
-/// Marks a provided trait method computed from the trait's other methods.
-/// A method without a default body is refused.
-#[proc_macro_attribute]
-pub fn computed_in_mod(attribute: TokenStream, input: TokenStream) -> TokenStream {
-    let method = parse_macro_input!(input as syn::TraitItemFn);
-    if !attribute.is_empty() {
-        return syn::Error::new_spanned(
-            proc_macro2::TokenStream::from(attribute),
-            "write #[computed_in_mod] with no arguments",
-        )
-        .to_compile_error()
-        .into();
-    }
-    if method.default.is_none() {
-        return syn::Error::new_spanned(
-            &method.sig,
-            "#[computed_in_mod] needs a default body: the mod computes this method itself",
-        )
-        .to_compile_error()
-        .into();
-    }
-    quote!(#method).into()
 }
 
 /// Derive subscriptions for internal test fixtures that construct their own mods.

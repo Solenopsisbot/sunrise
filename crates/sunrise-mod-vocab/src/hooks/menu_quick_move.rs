@@ -1,5 +1,4 @@
 //! The `menu_quick_move` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0235
 
 pub trait Hooks {
     /// A player shift-clicked slot `slot` of the menu of the mod block

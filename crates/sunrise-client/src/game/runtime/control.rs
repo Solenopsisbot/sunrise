@@ -923,16 +923,12 @@ impl Game<'_> {
                 let input = sunrise_client::keybinds::mouse_name(button);
                 match action {
                     "down" => {
-                        self.extras_mouse(button, true);
                         self.mapped_mouse_event_from(button, &input, true, Source::Agent)?;
                     }
                     "up" => {
-                        self.extras_mouse(button, false);
                         self.mapped_mouse_event_from(button, &input, false, Source::Agent)?;
                     }
                     "click" => {
-                        self.extras_mouse(button, true);
-                        self.extras_mouse(button, false);
                         self.mapped_mouse_event_from(button, &input, true, Source::Agent)?;
                         self.mapped_mouse_event_from(button, &input, false, Source::Agent)?;
                     }

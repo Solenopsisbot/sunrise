@@ -232,7 +232,7 @@ impl Game<'_> {
         });
         if let Err(error) = check_group_updates(&self.world, updates, self.connection_group_limit())
         {
-            return self.refuse_play_payload(error);
+            return self.refuse_remote_input(error);
         }
         for (pos, prediction) in settled {
             let [x, y, z] = pos;

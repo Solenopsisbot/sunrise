@@ -214,6 +214,7 @@ mod tests {
                 r.register_dimension("pocket", DimensionSettings::default());
                 r.register_dimension("pocket", DimensionSettings::default());
                 r.register_dimension("other:pocket", DimensionSettings::default());
+                r.register_dimension("minecraft:overworld", DimensionSettings::default());
                 r.register_dimension("", DimensionSettings::default());
                 r.register_dimension(
                     "uneven",
@@ -251,7 +252,7 @@ mod tests {
         let errors = install_parts(&[ModEntry::new("test", Box::new(Invalid))]).unwrap_err();
         assert_eq!(errors.len(), 7, "{errors:?}");
         assert!(errors[0].contains("test registered dimension test:pocket twice"));
-        assert!(errors[1].contains("namespace"));
+        assert!(errors[1].contains("minecraft:overworld, which is a vanilla level"));
         assert!(errors[2].contains("test declares invalid identifier \"test:\""));
         assert!(errors[3].contains("test:uneven"));
         assert!(errors[4].contains("test:low_ceiling"));
@@ -298,13 +299,18 @@ mod tests {
                 r.register_chunk_generator("void", Void);
                 r.register_chunk_generator("void", Void);
                 r.register_chunk_generator("other:void", Void);
+                r.register_chunk_generator("minecraft:flat", Void);
                 r.register_chunk_generator("", Void);
             }
         }
         let errors = install_parts(&[ModEntry::new("test", Box::new(Invalid))]).unwrap_err();
         assert_eq!(errors.len(), 3, "{errors:?}");
         assert!(errors[0].contains("test registered chunk generator test:void twice"));
-        assert!(errors[1].contains("test declares \"other:void\" in unowned namespace \"other\""));
+        assert!(
+            errors[1].contains(
+                "test registered chunk generator minecraft:flat, which is the game's own"
+            )
+        );
         assert!(errors[2].contains("test declares invalid identifier \"test:\""));
     }
 
@@ -872,12 +878,27 @@ mod biome_source_tests {
             })
             .contains("biome_preset")
         );
-        assert!(
+        assert_eq!(
             refused(|s| {
                 s.biome_source = BiomeSourceKind::End;
                 s.generator = "mymod:void".into();
-            })
-            .contains("fixed biome source")
+            }),
+            ""
+        );
+        assert_eq!(
+            refused(|s| {
+                s.biome_source = BiomeSourceKind::Checkerboard;
+                s.biomes = vec!["minecraft:plains".into(), "minecraft:desert".into()];
+                s.generator = "mymod:void".into();
+            }),
+            ""
+        );
+        assert_eq!(
+            refused(|s| {
+                s.biome_source = BiomeSourceKind::MultiNoise;
+                s.generator = "mymod:void".into();
+            }),
+            ""
         );
         assert_eq!(
             refused(|s| {
@@ -916,17 +937,16 @@ mod biome_source_tests {
         assert!(points(|p| p.offset = 1.5).contains("biome point"));
         assert!(points(|p| p.offset = -0.1).contains("biome point"));
         assert!(points(|p| p.biome.clear()).contains("biome point"));
-        // A valid points source still refuses a chunk generator of the mod's own.
-        assert!(
+        // A valid points source composes with a mod's own chunk generator as well as noise.
+        assert_eq!(
             DimensionSettings {
                 biome_source: BiomeSourceKind::Points,
                 biome_points: vec![point()],
                 generator: "mymod:void".into(),
                 ..Default::default()
             }
-            .invalid_biome_source()
-            .unwrap_or_default()
-            .contains("fixed biome source")
+            .invalid_biome_source(),
+            None
         );
     }
 }

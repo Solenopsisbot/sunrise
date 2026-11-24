@@ -1,5 +1,4 @@
 //! The `step_on` hook: declaration read by the mod API generator (see `hooks/mod.rs`).
-// catalog-order: 0085
 
 pub trait Hooks {
     /// `Block.stepOn` in `Entity.applyEffectsFromBlocks`, before inside-block effects.

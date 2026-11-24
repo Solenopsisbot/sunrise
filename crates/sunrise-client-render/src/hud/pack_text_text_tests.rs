@@ -72,7 +72,7 @@ fn text_programs(
     root: &ResourceSource,
     defaults: &ResourceSource,
 ) -> [Option<(
-    Arc<CoreProgram>,
+    Arc<Translated>,
     Vec<crate::polytone_post::ExpressionUniform>,
 )>; 3] {
     let mut atlas = super::super::HudAtlas::boot();

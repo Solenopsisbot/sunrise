@@ -8,7 +8,8 @@
 //! use the client's own cached state.
 //! Ticks lived (`Entity.tickCount`) are read for players, mobs, items, orbs and minecarts.
 use super::{Game, commands::Target};
-use mod_api::EntityRef;
+use mod_api::{EntityReadError, EntityRef};
+use std::ops::ControlFlow;
 use sunrise_client::join_seq::residency::table::EntityLookup;
 use sunrise_client::mobs::{Mob, Species, sync};
 use sunrise_client::motion::PlayerMotion;
@@ -132,17 +133,23 @@ impl Game<'_> {
     /// Whether the entity crouches (`Entity.isCrouching`: the crouching
     /// pose).
     pub(super) fn entity_is_crouching(&self, entity: EntityRef) -> Option<bool> {
+        // LocalPlayer.isCrouching: the client player's own flag, set in aiStep before its input.
+        if !self.is_logical_server() && self.native_entity_read_target(entity)? == Target::Player {
+            return Some(self.player.as_ref()?.local_crouching);
+        }
         Some(self.entity_pose(entity)? == "crouching")
     }
     /// Whether the entity sprints (`Entity.isSprinting`): a player, or a
     /// cat or ocelot dashing after its target (their shared sprinting flag);
     /// false for the other kinds.
     pub(super) fn entity_is_sprinting(&self, entity: EntityRef) -> Option<bool> {
-        Some(match self.native_entity_body(entity)? {
-            Body::Player(p) => p.sprinting,
-            Body::Mob(m) => m.extra.sprinting,
-            _ => false,
-        })
+        Some(
+            match self.native_target_body(self.native_entity_read_target(entity)?)? {
+                Body::Player(p) => p.sprinting,
+                Body::Mob(m) => m.extra.sprinting,
+                _ => false,
+            },
+        )
     }
     /// `Entity.setSprinting` for a player (the flag and the speed modifier) or a mob (the
     /// flag, sent to the clients). False for other kinds, a stale handle and a client.
@@ -206,36 +213,37 @@ impl Game<'_> {
     }
     /// Whether the entity is in lava (`Entity.isInLava`): players and mobs.
     pub(super) fn entity_is_in_lava(&self, entity: EntityRef) -> Option<bool> {
-        match self.native_entity_body(entity)? {
+        match self.native_target_body(self.native_entity_read_target(entity)?)? {
             Body::Player(p) => Some(p.is_in_lava()),
             Body::Mob(m) => Some(m.fluids.in_lava),
             Body::Other(_) => None,
         }
     }
-    /// The fluids the entity touched at its last fluid update, each with how deep its box is in
-    /// it (`IEntityExtension.getFluidTypeHeight`), highest first; empty in no fluid. Players and
-    /// mobs: water and lava, the fluids Sunrise's entity update tracks. On a client these
-    /// are the predicted local player's state or the displayed entity's last fluid update.
-    pub(super) fn entity_fluid_heights(&self, entity: EntityRef) -> Option<Vec<(String, f64)>> {
+    /// Visit the cached fluid contacts of the player or mob, highest first.
+    pub(super) fn entity_visit_fluid_heights(
+        &self,
+        entity: EntityRef,
+        visit: &mut dyn FnMut(&str, f64) -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, EntityReadError> {
         use sunrise_client::motion::{LAVA, WATER};
-        Some(
-            match self.native_target_body(self.native_entity_read_target(entity)?)? {
-                Body::Player(p) => touched_fluids(
-                    (p.fluid_height(WATER), p.fluids.was_touching_water),
-                    (p.fluid_height(LAVA), p.is_in_lava()),
-                ),
-                Body::Mob(m) => touched_fluids(
-                    (m.fluids.water, m.fluids.in_water),
-                    (m.fluids.lava, m.fluids.in_lava),
-                ),
-                Body::Other(_) => return None,
-            },
-        )
+        let body = self.native_target_body(self.native_entity_visit_target(entity)?);
+        let (water, lava) = match body {
+            Some(Body::Player(p)) => (
+                (p.fluid_height(WATER), p.fluids.was_touching_water),
+                (p.fluid_height(LAVA), p.is_in_lava()),
+            ),
+            Some(Body::Mob(m)) => (
+                (m.fluids.water, m.fluids.in_water),
+                (m.fluids.lava, m.fluids.in_lava),
+            ),
+            _ => return Err(EntityReadError::Unavailable),
+        };
+        Ok(visit_touched_fluids(water, lava, visit))
     }
     /// The fluid at the entity's eyes from its last fluid update
     /// (`IEntityExtension.getFirstEyeInFluidType`): water or lava, none in air. Players and mobs.
     /// On a client this reads its own cached fluid update, without sampling the world again.
-    pub(super) fn entity_eye_fluid(&self, entity: EntityRef) -> Option<Option<String>> {
+    pub(super) fn entity_eye_fluid(&self, entity: EntityRef) -> Option<Option<&'static str>> {
         use sunrise_client::motion::{LAVA, WATER};
         Some(
             match self.native_target_body(self.native_entity_read_target(entity)?)? {
@@ -273,6 +281,20 @@ impl Game<'_> {
                     item.fire_ticks,
                     self.stack_can_be_hurt_by(&item.stack, "minecraft:in_fire") == Some(false),
                 )
+            }
+            Some(Body::Other(Target::Projectile(id))) => {
+                let p = self.creatures.projectiles.iter().find(|p| p.id == id)?;
+                match p.arrow.as_ref() {
+                    Some(a) => (a.fire_ticks, false),
+                    None => (
+                        p.fire_ticks,
+                        matches!(
+                            p.kind,
+                            sunrise_client::projectiles::ProjectileKind::WitherSkull { .. }
+                                | sunrise_client::projectiles::ProjectileKind::ShulkerBullet { .. }
+                        ),
+                    ),
+                }
             }
             _ => (0, self.client_tracked_player_fire_immunity(entity)?),
         };
@@ -365,7 +387,7 @@ impl Game<'_> {
     }
 
     /// The ticks the entity burns for (`Entity.getRemainingFireTicks`):
-    /// players, mobs, armor stands and items.
+    /// players, mobs, armor stands, items and projectiles.
     pub(super) fn entity_fire_ticks(&self, entity: EntityRef) -> Option<i32> {
         match self.native_entity_body(entity)? {
             Body::Player(p) => Some(p.fire_ticks),
@@ -375,6 +397,10 @@ impl Game<'_> {
             }
             Body::Other(Target::Item(id)) => {
                 Some(self.dropped.iter().find(|i| i.id == id)?.fire_ticks)
+            }
+            Body::Other(Target::Projectile(id)) => {
+                let p = self.creatures.projectiles.iter().find(|p| p.id == id)?;
+                Some(p.arrow.as_ref().map_or(p.fire_ticks, |a| a.fire_ticks))
             }
             Body::Other(_) => None,
         }
@@ -509,6 +535,19 @@ impl Game<'_> {
                         true
                     })
             }
+            Some(Target::Projectile(id)) => {
+                let Some(i) = self.creatures.projectiles.iter().position(|p| p.id == id) else {
+                    return false;
+                };
+                self.creatures.projectiles.update(i, |p| {
+                    if let Some(a) = p.arrow.as_mut() {
+                        a.fire_ticks = ticks;
+                    } else {
+                        p.fire_ticks = ticks;
+                    }
+                });
+                true
+            }
             _ => false,
         }
     }
@@ -591,8 +630,8 @@ impl Game<'_> {
         }
     }
     /// Whether the entity's model is hidden (`Entity.isInvisible`): the
-    /// invisibility effect on a player or a mob, a mob's or an armor stand's
-    /// flag.
+    /// invisibility effect on a player or a mob, the flag of a mob, an armor
+    /// stand or an item frame.
     pub(super) fn entity_is_invisible(&self, entity: EntityRef) -> Option<bool> {
         match self.native_entity_target(entity)? {
             Target::Player => Some(self.potions.effects.get("invisibility").is_some()),
@@ -607,6 +646,7 @@ impl Game<'_> {
                 Some(m.is_invisible())
             }
             Target::Stand(id) => Some(self.armor_stands.iter().find(|s| s.id == id)?.invisible),
+            Target::Frame(id) => Some(self.item_frames.iter().find(|f| f.id == id)?.invisible),
             _ => None,
         }
     }
@@ -691,7 +731,7 @@ impl Game<'_> {
     /// server added to the level the client shows, whatever its kind, counted by the client's
     /// entity pass (`Entity.commonTick`) since the client added it.
     fn client_entity_tick_count(&self, entity: EntityRef) -> Option<i32> {
-        let (remote, id) = self.native_client_entity_context(entity)?;
+        let (remote, id) = self.native_client_entity_context(entity).ok()?;
         // The local player from its admission (Login, Respawn), before the server's first
         // teleport gives it a body.
         if id == remote.entity_id {
@@ -736,7 +776,8 @@ impl Game<'_> {
             _ => false,
         }
     }
-    /// Sets the entity's shared invisibility flag (`Entity.setInvisible`). Returns false for players and guests.
+    /// Sets the entity's shared invisibility flag (`Entity.setInvisible`) on a mob, an armor
+    /// stand or an item frame. Returns false for players, guests and other kinds.
     pub(super) fn entity_set_invisible(&mut self, entity: EntityRef, invisible: bool) -> bool {
         match self.native_entity_target(entity) {
             Some(Target::Mob(id)) => self.mobs.iter_mut().find(|m| m.id == id).is_some_and(|m| {
@@ -752,6 +793,16 @@ impl Game<'_> {
                     s.invisible = invisible;
                     true
                 }),
+            // `ItemFrame` saves the flag with its chunk.
+            Some(Target::Frame(id)) => {
+                let Some(frame) = self.item_frames.iter_mut().find(|f| f.id == id) else {
+                    return false;
+                };
+                frame.invisible = invisible;
+                let pos = frame.pos;
+                self.world.modified.insert((pos[0] >> 4, pos[2] >> 4));
+                true
+            }
             _ => false,
         }
     }
@@ -759,35 +810,49 @@ impl Game<'_> {
     /// `crouching`, `swimming`, `sleeping`, a warden's `roaring`... Kinds
     /// with no pose stand.
     pub(super) fn entity_pose(&self, entity: EntityRef) -> Option<&'static str> {
-        Some(match self.native_entity_body(entity)? {
-            Body::Player(p) => player_pose(p.pose),
-            Body::Mob(m) => POSES.get(usize::from(sync::pose_id(m))).copied()?,
-            Body::Other(_) => POSES[0],
-        })
+        Some(
+            match self.native_target_body(self.native_entity_read_target(entity)?)? {
+                Body::Player(p) => player_pose(p.pose),
+                // A client keeps a server's mob as its synched DATA_POSE.
+                Body::Mob(m) if !self.is_logical_server() => {
+                    POSES[super::entity_sizes::synced_pose(m) as usize]
+                }
+                Body::Mob(m) if &*m.kind.id == "minecraft:mannequin" => {
+                    player_pose(m.extra.avatar_pose)
+                }
+                Body::Mob(m) => POSES.get(usize::from(sync::pose_id(m))).copied()?,
+                Body::Other(_) => POSES[0],
+            },
+        )
     }
 }
 
-/// `(fluid, height)` for each fluid `(height, touched)` the entity touched, highest first;
-/// water before lava at the same height (`getMaxHeightFluidType`'s order).
-fn touched_fluids(water: (f64, bool), lava: (f64, bool)) -> Vec<(String, f64)> {
-    let mut heights: Vec<(String, f64)> = [("minecraft:water", water), ("minecraft:lava", lava)]
+const WATER_ID: &str = "minecraft:water";
+const LAVA_ID: &str = "minecraft:lava";
+
+/// Visit cached contacts in descending total order, keeping water before lava on a tie.
+fn visit_touched_fluids(
+    water: (f64, bool),
+    lava: (f64, bool),
+    visit: &mut dyn FnMut(&str, f64) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    let mut fluids = [(WATER_ID, water), (LAVA_ID, lava)];
+    if lava.0.total_cmp(&water.0).is_gt() {
+        fluids.swap(0, 1);
+    }
+    fluids
         .into_iter()
         .filter(|(_, (_, touched))| *touched)
-        .map(|(fluid, (height, _))| (fluid.to_owned(), height))
-        .collect();
-    // A stable sort keeps water first in a tie.
-    heights.sort_by(|a, b| b.1.total_cmp(&a.1));
-    heights
+        .try_for_each(|(name, (height, _))| visit(name, height))
 }
 
 /// The first fluid at the eyes: water, then lava, as the trackers are kept.
-fn eye_fluid(water: bool, lava: bool) -> Option<String> {
-    let fluid = if water {
-        Some("minecraft:water")
+fn eye_fluid(water: bool, lava: bool) -> Option<&'static str> {
+    if water {
+        Some(WATER_ID)
     } else {
-        lava.then_some("minecraft:lava")
-    };
-    fluid.map(str::to_owned)
+        lava.then_some(LAVA_ID)
+    }
 }
 
 #[cfg(test)]
@@ -798,20 +863,40 @@ mod tests {
     /// out even with a height, and nothing for an entity in neither.
     #[test]
     fn fluid_reads_list_the_touched_fluids_highest_first() {
-        let (water, lava) = ("minecraft:water".to_owned(), "minecraft:lava".to_owned());
+        let (water, lava) = ("minecraft:water", "minecraft:lava");
+        let touched_fluids = |water, lava| {
+            let mut fluids = Vec::new();
+            let result = visit_touched_fluids(water, lava, &mut |id, depth| {
+                fluids.push((id.to_owned(), depth));
+                ControlFlow::Continue(())
+            });
+            assert_eq!(result, ControlFlow::Continue(()));
+            fluids
+        };
         assert_eq!(
             touched_fluids((0.5, true), (1.25, true)),
-            [(lava.clone(), 1.25), (water.clone(), 0.5)]
+            [(lava.to_owned(), 1.25), (water.to_owned(), 0.5)]
         );
         assert_eq!(
             touched_fluids((0.75, true), (0.75, true)),
-            [(water.clone(), 0.75), (lava.clone(), 0.75)]
+            [(water.to_owned(), 0.75), (lava.to_owned(), 0.75)]
         );
         assert_eq!(
             touched_fluids((0.4, true), (0.2, false)),
-            [(water.clone(), 0.4)]
+            [(water.to_owned(), 0.4)]
         );
         assert!(touched_fluids((0.0, false), (0.0, false)).is_empty());
+
+        // A break visits only the first contact. Total order treats +0.0 as higher than -0.0.
+        let mut first = Vec::new();
+        assert_eq!(
+            visit_touched_fluids((-0.0, true), (0.0, true), &mut |id, depth| {
+                first.push((id.to_owned(), depth.to_bits()));
+                ControlFlow::Break(())
+            }),
+            ControlFlow::Break(())
+        );
+        assert_eq!(first, [(lava.to_owned(), 0.0_f64.to_bits())]);
         assert_eq!(eye_fluid(true, true), Some(water));
         assert_eq!(eye_fluid(false, true), Some(lava));
         assert_eq!(eye_fluid(false, false), None);
@@ -1035,6 +1120,38 @@ mod tests {
             game.dropped[0].fire_ticks = 19;
             let item = game.entity(game.dropped[0].id).unwrap();
             assert_eq!(item.fire_ticks(game), Some(19));
+
+            let mut snowball = sunrise_client::projectiles::Projectile::new(
+                sunrise_client::projectiles::ProjectileKind::Snowball,
+                Vec3::ZERO,
+                None,
+            );
+            snowball.id = 45;
+            snowball.fire_ticks = 159;
+            game.creatures.projectiles.push(snowball);
+            let proj = game.entity(45).unwrap();
+            assert_eq!(proj.fire_ticks(game), Some(159));
+            assert_eq!(proj.is_on_fire(game), Some(true));
+            assert!(proj.set_remaining_fire_ticks(game, 40));
+            assert_eq!(proj.fire_ticks(game), Some(40));
+
+            let mut arrow = sunrise_client::projectiles::Projectile::new(
+                sunrise_client::projectiles::ProjectileKind::Arrow {
+                    base_damage: 2.0,
+                    critical: false,
+                    effect: None,
+                },
+                Vec3::ZERO,
+                None,
+            );
+            arrow.id = 46;
+            arrow.arrow.as_mut().unwrap().fire_ticks = 80;
+            game.creatures.projectiles.push(arrow);
+            let arrow_ref = game.entity(46).unwrap();
+            assert_eq!(arrow_ref.fire_ticks(game), Some(80));
+            assert_eq!(arrow_ref.is_on_fire(game), Some(true));
+            assert!(arrow_ref.clear_fire(game));
+            assert_eq!(arrow_ref.fire_ticks(game), Some(0));
 
             game.boats.push(super::super::boats::Boat::new(
                 44,
@@ -1867,7 +1984,10 @@ mod tests {
             game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
             let local = game.entity(7).unwrap();
             let host = &*game as &dyn mod_api::ClientHost;
-            assert_eq!(local.fluid_heights(host), Some(Vec::new()));
+            assert_eq!(
+                local.visit_fluid_heights(host, &mut |_, _| panic!("dry player visited")),
+                Ok(ControlFlow::Continue(()))
+            );
             assert_eq!(local.eye_fluid(host), Some(None));
 
             game.spawn_entity(15, "minecraft:zombie", [2.0, 0.0, 0.0], [0.0; 3]);
@@ -1912,30 +2032,48 @@ mod tests {
                 fluids.eye_in_water = eye_water;
                 fluids.eye_in_lava = eye_lava;
                 let host = &*game as &dyn mod_api::ClientHost;
-                assert_eq!(zombie.fluid_heights(host), Some(expected));
-                assert_eq!(zombie.eye_fluid(host), Some(eye.map(str::to_owned)));
+                let mut fluids = Vec::new();
+                assert_eq!(
+                    zombie.visit_fluid_heights(host, &mut |id, depth| {
+                        fluids.push((id.to_owned(), depth));
+                        ControlFlow::Continue(())
+                    }),
+                    Ok(ControlFlow::Continue(()))
+                );
+                assert_eq!(fluids, expected);
+                assert_eq!(zombie.eye_fluid(host), Some(eye));
             }
             game.spawn_entity(16, "minecraft:armor_stand", [2.0, 0.0, 0.0], [0.0; 3]);
             let stand = game.entity(16).unwrap();
             let host = &*game as &dyn mod_api::ClientHost;
-            assert_eq!(stand.fluid_heights(host), None);
+            assert_eq!(
+                stand.visit_fluid_heights(host, &mut |_, _| panic!("absent fluid visit")),
+                Err(EntityReadError::Unavailable)
+            );
             assert_eq!(stand.eye_fluid(host), None);
             let stale = EntityRef::new(mod_api::WorldEpoch::new(0), 15);
-            assert_eq!(stale.fluid_heights(host), None);
+            assert_eq!(
+                stale.visit_fluid_heights(host, &mut |_, _| panic!("absent fluid visit")),
+                Err(EntityReadError::Stale)
+            );
             assert_eq!(stale.eye_fluid(host), None);
             game.handle_packet(play::Clientbound::RemoveEntities(play::RemoveEntities {
                 ids: vec![15],
             }))
             .unwrap();
             assert_eq!(
-                zombie.fluid_heights(&*game as &dyn mod_api::ClientHost),
-                None
+                zombie.visit_fluid_heights(&*game as &dyn mod_api::ClientHost, &mut |_, _| panic!(
+                    "absent fluid visit"
+                )),
+                Err(EntityReadError::Stale)
             );
             assert_eq!(zombie.eye_fluid(&*game as &dyn mod_api::ClientHost), None);
             game.remote.as_mut().unwrap().logged_in = false;
             assert_eq!(
-                local.fluid_heights(&*game as &dyn mod_api::ClientHost),
-                None
+                local.visit_fluid_heights(&*game as &dyn mod_api::ClientHost, &mut |_, _| panic!(
+                    "absent fluid visit"
+                )),
+                Err(EntityReadError::Unavailable)
             );
             assert_eq!(local.eye_fluid(&*game as &dyn mod_api::ClientHost), None);
         });

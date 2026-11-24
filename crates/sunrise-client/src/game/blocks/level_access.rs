@@ -21,13 +21,31 @@ impl LevelAccess for GameLevel<'_> {
     fn redstone_experiments(&self) -> bool {
         self.redstone_experiments
     }
-    fn place_sound_type(
+    fn override_place_sound(
         &self,
         pos: BlockPos,
         state: BlockStateId,
-        sounds: Arc<sunrise_world::level::data::Sounds>,
-    ) -> Arc<sunrise_world::level::data::Sounds> {
-        self.part_place_sound_type(pos, state, sounds)
+        placer: Option<u32>,
+    ) -> Option<sunrise_world::level::data::BlockSound> {
+        let cause = mod_api::BlockSoundCause::Place;
+        let level = sunrise_client::motion::FrictionLevel {
+            world: &*self.world,
+            registry: self.registry,
+            context: self.loop_context,
+            side: &self.side,
+            coefficient: &|_| None,
+        };
+        let sound = sunrise_client::block_sounds::native_sound_type(
+            level,
+            pos,
+            state,
+            placer.map(|id| (id, "minecraft:player")),
+            cause,
+            &self.facts.get(state).sounds,
+        )?;
+        Some(sunrise_world::level::data::BlockSound::from_type(
+            &sound, cause,
+        ))
     }
     fn allow_hopper_pickup_item(&self, pos: BlockPos, item: &str, count: u32) -> bool {
         let mut cancel = false;
@@ -178,6 +196,69 @@ impl LevelAccess for GameLevel<'_> {
         let mut answer = None;
         self.native_place_liquid(ticks, pos, state, fluid, &mut answer);
         answer
+    }
+    fn fluid_interaction_test(
+        &self,
+        handler: u32,
+        pos: BlockPos,
+        relative: BlockPos,
+        fluid: sunrise_world::fluid::FluidState,
+    ) -> bool {
+        let Some((owner, handler)) = super::fluid_interactions::native_fluid_interaction(handler)
+        else {
+            return false;
+        };
+        let Some(state) = super::native_world_read::api_fluid_state(fluid) else {
+            return false;
+        };
+        if !self.native_authoritative {
+            return false;
+        }
+        let at = mod_api::FluidInteractionAt {
+            pos,
+            relative,
+            state,
+        };
+        let level: &dyn mod_api::LevelHost = self;
+        owner
+            .call("fluid interaction", "test", || handler.test(level, at))
+            .unwrap_or_else(|error| {
+                log::warn!("Sunrise: {error}; its fluid interaction does not apply");
+                false
+            })
+    }
+    fn fluid_interaction_interact(
+        &mut self,
+        ticks: &mut Ticks,
+        handler: u32,
+        pos: BlockPos,
+        relative: BlockPos,
+        fluid: sunrise_world::fluid::FluidState,
+    ) {
+        let Some((owner, handler)) = super::fluid_interactions::native_fluid_interaction(handler)
+        else {
+            return;
+        };
+        let Some(state) = super::native_world_read::api_fluid_state(fluid) else {
+            return;
+        };
+        if self.liquid_transaction_open {
+            log::warn!(
+                "Sunrise: refused a direct fluid interaction during an open transaction at {pos:?}"
+            );
+            return;
+        }
+        let at = mod_api::FluidInteractionAt {
+            pos,
+            relative,
+            state,
+        };
+        let mut host = super::mod_api_host::LevelTicks::new(&mut *self, ticks);
+        if let Err(error) = owner.call("fluid interaction", "interact", || {
+            handler.interact(&mut host, at)
+        }) {
+            log::warn!("Sunrise: {error}; its fluid interaction stopped");
+        }
     }
     fn fluid_place_block(
         &self,

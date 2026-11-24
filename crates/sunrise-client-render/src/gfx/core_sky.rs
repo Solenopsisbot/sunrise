@@ -3,9 +3,9 @@
 //! to the horizon or tints the night sky expects. Without one the sky draws natively (`fs_sky` in
 //! terrain.wgsl, stars.rs).
 
-use crate::core_shader::{CoreProgram, Glue};
 use crate::polytone_post::ExpressionUniform;
 use glam::Mat4;
+use sunrise_glsl::{Glue, Translated};
 use wgpu::util::DeviceExt;
 
 /// `DefaultVertexFormat.POSITION`: the disc's and the stars' vertices.
@@ -49,7 +49,7 @@ impl Part {
     fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        (program, expressions): (&CoreProgram, &[ExpressionUniform]),
+        (program, expressions): (&Translated, &[ExpressionUniform]),
         name: &str,
         blend: Option<wgpu::BlendState>,
         triangles: &[[f32; 3]],
@@ -168,8 +168,8 @@ impl super::Renderer {
     /// and stars.
     pub fn set_sky_shaders(
         &mut self,
-        disc: Option<(&CoreProgram, &[ExpressionUniform])>,
-        stars: Option<(&CoreProgram, &[ExpressionUniform])>,
+        disc: Option<(&Translated, &[ExpressionUniform])>,
+        stars: Option<(&Translated, &[ExpressionUniform])>,
     ) {
         // As `set_lines_shader`: not on a frame of linear light.
         let keep = !self.output.frame.linear_light;
@@ -183,8 +183,8 @@ impl CoreSky {
     pub(super) fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        disc: Option<(&CoreProgram, &[ExpressionUniform])>,
-        stars: Option<(&CoreProgram, &[ExpressionUniform])>,
+        disc: Option<(&Translated, &[ExpressionUniform])>,
+        stars: Option<(&Translated, &[ExpressionUniform])>,
     ) -> Option<Self> {
         let disc = disc.and_then(|program| {
             // RenderPipelines.SKY: ColorTargetState.DEFAULT, no blending.

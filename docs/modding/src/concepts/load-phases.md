@@ -18,8 +18,8 @@ between individual reload listeners.
 | --- | --- |
 | Registration (`register`, `blocks`, `items`, and others) | `&RegistrationContext` for captured startup facts; declare changes through the registrar or event. |
 | `client_setup` | `&mut dyn ClientSetupContext` for client setup and published assets/data, not world handles or transactions. |
-| Config registration and initial loading | `&dyn ConfigContext` for settings and mod-scoped `ConfigFiles`. |
-| `config_reloading`, `config_unloading` | `HostSide<'_>` for the polling game or `&mut dyn ServerHost` for the stopping server, respectively. |
+| Registered config's `ConfigEvent::Loading` | Owner-bound `&dyn ConfigContext` for settings reads and the native config directory. |
+| Registered config's `ConfigEvent::Reloading`, `ConfigEvent::Unloading` | `HostSide<'_>` for the polling game and `&mut dyn ServerHost` for the stopping server, respectively. |
 | Data and asset reload callbacks | A reload or data-load context for the relevant resource generation, not a live `Host`. |
 | Ordinary game callbacks | `ServerHost`, `ClientHost` or `HostSide`; world or session queries may still be unavailable. |
 
@@ -43,7 +43,7 @@ on a resource load; see [Model drawing](../how-to/client/model-drawing.md).
 The client runs `client_setup` once after applying initial assets, then loads Client and Common
 configs before title, connection, input, render or tick callbacks. A dedicated server loads
 Common configs before its first world. Server configs load before `server_about_to_start` and
-unload after `server_stopping` for each world; opening another world does not repeat startup
+unload after `server_stopped` for each world; opening another world does not repeat startup
 registration or client setup. Use registration and the first server reload for common setup,
 `server_about_to_start` for server setup, and declared dependencies for intermod ordering.
 A panic in a live config callback does not undo settings writes that already took effect or
@@ -86,12 +86,12 @@ instance directory. Preserve native path bytes or code units when constructing a
 `mods()` gives the admitted packages in dispatch order; `registry(name)` and `setting(mod_id, key)`
 borrow captured values without reading files. `None` means unavailable or unset, not a present
 empty value. Reloads and live code switching do not change the startup package inventory. Keep
-an owned copy only when it must outlive the callback. [Chunk-disk callbacks](../how-to/chunk-data-load.md)
+an owned copy only when it must outlive the callback. [Chunk-disk callbacks](../how-to/world/chunk-data.md)
 borrow registry names from the generation retained by the worker.
 
 `DataLoadContext::fluid_tags()` borrows the recipe pass's fluid-tag table. `None` means no
 recipe overlay; `Some(&[])` means an overlay with no fluid tags. See
-[Fluid ingredients](../how-to/items/fluid-ingredients.md) for how to use it.
+[Fluid ingredients](../how-to/items/ingredient-kinds.md#fluid-ingredients) for how to use it.
 `DataLoadOrigin` and `LoopSide` describe local execution, not an encoded payload.
 
 ### Ordinary Host reads
@@ -111,3 +111,40 @@ Startup readers share one immutable settings capture. It includes only readable,
 UTF-8 files with UTF-8 names and follows no file or package-directory symlinks. Unreadable or
 invalid entries are omitted individually and reported for that capture, not again on every read.
 A captured value is not updated by a live settings write; use the ordinary host for live reads.
+
+## Phase refusals and panics
+
+| Phase | Open |
+|---|---|
+| Setup | settings reads; registry and metadata reads; the client setup calls; the published resource queries |
+| Config | settings reads; the mod's own config files |
+| Reloading | settings reads; registry and metadata reads; the published resource queries |
+
+The client setup calls of Setup can have presentation effects (a sound, a narrator line, a HUD mode) that stand
+even if the hook is refused afterwards. A native mod that calls a method in a phase that does not admit it is
+**refused, not crashed**:
+
+- The call ends the mod's hook call (it unwinds out of the listener; the game makes no panic report). The game logs
+  `native refusal: <mod> hook <hook>: mod API <method> is unavailable during <phase>` on each refused callback.
+- The latch: after one refusal, every later Host call that hook call makes is refused too, whatever it asks, and the
+  refusal counts even if the mod caught the unwind itself and returned normally.
+- The listener is dropped, and the hook goes on with the next one. The event outputs the listener touched are put
+  back to what they were before its call, and the answers of earlier listeners stand. What its earlier allowed calls
+  did (a sound, a narrator line, a HUD mode) stands too.
+- The hook uses its default return value: `Flow::Continue` for a cancel hook, `None` for a replace
+  hook that answers an `Option`, and the type's default (`false`, an empty list, `()`) for any other. A
+  refused listener is not disabled for the session; a panicking listener is.
+- A method with a typed phase refusal (for example, one returning `Result<_, LevelReadError>`,
+  `Result<_, LevelWriteError>`, or `Result<_, TeamMembersReadError>`) returns its `Err(Unavailable)`
+  instead of unwinding, and the mod goes on.
+  `LevelRef::with_random` returns `None` without calling your closure when world access is unavailable.
+
+A panic is logged and shown in a client error toast naming the mod and hook. Only that callback is
+disabled for the session. Its staged outputs are discarded, and writes covered by an existing
+transaction are undone. Effects outside a transaction, such as a dynamic texture already created
+by `client_tick_pre`, are not undone.
+
+**The limit:** if the thread is already unwinding when the call is refused (a mod's `Drop` that calls the Host while
+another panic unwinds), the game logs the same line and panics, and a panic during an unwind aborts the process.
+Do not call the Host from a `Drop`. A native mod built with `panic = "abort"`, a library that brings its own
+`#[global_allocator]`, and a library that does not use the game's `libstd` are refused at load, by name.

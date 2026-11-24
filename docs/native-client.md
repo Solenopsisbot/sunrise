@@ -9,8 +9,7 @@ craft in the 2x2 inventory grid or on a crafting table, and save and reload worl
 in vanilla's Anvil format.
 
 **Status:** playable; players get it through [the launcher](https://github.com/sunrise-org/sunrise-launcher/blob/main/README.md). The [harness table](status.md#what-the-harnesses-compare)
-in the README scores each subsystem against vanilla and lists what is still
-missing; [Rust rewrite status](rust-parity.md) has the details.
+scores each subsystem against vanilla and lists what is still missing.
 
 On Windows, the launcher uses a stable executable path for each game home across
 release and native-mod updates. Its private runtime copy lives under the launcher's

@@ -193,9 +193,18 @@ impl UiResources {
     /// The resolved resource generation, including the base layer and pack filters, over the
     /// game's own resources at `vanilla` (which tell the packs' core shaders from the game's).
     /// Its splash pool is empty until `with_splashes`.
+    #[cfg(test)]
     pub fn load(
         root: &sunrise_assets::resource_source::ResourceSource,
         vanilla: &Path,
+    ) -> Result<Self> {
+        Self::load_with_limit(root, vanilla, sunrise_client::hud::MAX_ATLAS_SIZE)
+    }
+    /// Build the title resources within the supplied device texture dimension.
+    pub fn load_with_limit(
+        root: &sunrise_assets::resource_source::ResourceSource,
+        vanilla: &Path,
+        max_atlas_size: u32,
     ) -> Result<Self> {
         // The title screen waits for both: the panorama's six faces decode
         // beside the atlas.
@@ -208,7 +217,13 @@ impl UiResources {
             let pool = dynamic_texture_pool();
             let game = sunrise_assets::resource_source::ResourceSource::directory(vanilla.into());
             let atlas = startup::time("ui.atlas", || {
-                HudAtlas::build_over_with_dynamic_textures(root, root, &game, pool)
+                HudAtlas::build_over_with_dynamic_textures_and_limit(
+                    root,
+                    root,
+                    &game,
+                    pool,
+                    max_atlas_size,
+                )
             });
             let panorama = panorama
                 .join()
@@ -221,6 +236,32 @@ impl UiResources {
             })
         })
     }
+    /// The provisional dimensions may have refused sprites even when the base HUD itself fits.
+    /// Rebuild the final stitch from the accepted staged source on either limit change.
+    pub(super) fn stitch_for_device(
+        &mut self,
+        source: &sunrise_assets::resource_source::ResourceSource,
+        vanilla: &Path,
+        limit: u32,
+    ) -> Result<bool> {
+        if self.atlas.stitch_limit == Some(limit) {
+            return Ok(false);
+        }
+        let game =
+            sunrise_assets::resource_source::ResourceSource::directory(vanilla.to_path_buf());
+        let mut atlas = HudAtlas::build_over_with_dynamic_textures_and_limit(
+            source,
+            source,
+            &game,
+            self.atlas.dynamic_texture_pool.is_some(),
+            limit,
+        )?;
+        atlas.font.uniform = self.atlas.font.uniform;
+        atlas.font.japanese = self.atlas.font.japanese;
+        self.atlas = atlas;
+        Ok(true)
+    }
+
     /// The title's splash pool from `stack` (`sunrise_client::splashes::pool`).
     pub fn with_splashes(
         mut self,

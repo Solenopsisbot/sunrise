@@ -16,6 +16,9 @@ public, so a re-export added later never changes its id; otherwise its shortest 
 lists every public path a mod can name it by. Types inside signatures are normalised Rust, with paths relative to
 `mod_api` and lifetimes kept.
 
+Hooks are named `hook:<name>` in SDK records. Hidden `HookId` discriminants are process-local dispatch indexes,
+never serialized or stable across builds, and native binaries must rebuild for the selected build.
+
 `cargo sunrise-mod hooks <text>` searches the API records offline ([Commands](05-commands.md)).
 
 ## What a hash covers
@@ -104,14 +107,24 @@ Add `--with-internals` to include advisory internal changes without changing the
 
 ## Command completion layouts
 
-`CommandSuggestion` now carries an optional `replace_start` byte offset into the prefix. `None` replaces the whole
-prefix; `Some(offset)` preserves the text before that offset, which must be on a UTF-8 character boundary and not
-past the prefix. The optional tooltip is retained. See [Server commands](../../how-to/entities/server-commands.md) for replacement
+Command argument completion and `tab_complete` share one `Suggestion` type carrying a byte `range`,
+replacement `text`, optional `tooltip`, and optional `int_value`. `CommandArgumentType::suggest`
+takes `&SuggestionRequest` (`prefix`, prior `arguments`, and optional `sender`) and returns
+`Vec<Suggestion>` on both server and client commands. Range offsets into `request.prefix` must be
+ordered, within `request.prefix`, and on UTF-8 character boundaries; invalid entries are logged and
+skipped individually. See [Server commands](../../how-to/entities/server-commands.md) for replacement
 examples and the `id` argument's `tab_complete` completion route.
 
-`CommandArgumentType::suggest` also requires the optional sender before the prefix. Providers own their sender
-policy; their returned suggestions remain unfiltered. Implement the required method explicitly, returning an
-empty list when the argument has no completions.
+## Tooling migrations for 1.0
+
+- Delete `#[sunrise_mod_api_macros::computed_in_mod]` (or `#[computed_in_mod]` if imported) from defaulted
+  trait methods, and remove any import of the attribute. Keep the default method body unchanged.
+- Replace any `HookId` ordinal cast, comparison, or stored number used outside its own build with the named
+  hook identity, for example `hook:player_logged_in`. If you stored ordinals, recover their names from the
+  build that wrote them, not from the new build's ordinals. Named `Hooks` methods with `#[sunrise_mod]`
+  subscribe the same way; no listener change is needed.
+
+These Sunrise tooling changes have no stable surface IDs.
 
 ## Change notes
 

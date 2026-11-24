@@ -79,7 +79,8 @@ pub trait PlayerWorldBackendMut {
     /// Side: server.
     /// `Player.setLastDeathLocation`: stores where the player died, or
     /// forgets it for None. The client hears of it with the player's next
-    /// respawn, as in vanilla. False in the cases a read gives None.
+    /// respawn, as in vanilla. A resident dead player can still be edited.
+    /// False if the server player's state is unavailable.
     fn player_set_last_death_location(
         &mut self,
         player: PlayerRef,
@@ -142,4 +143,18 @@ pub trait PlayerWorldBackendMut {
         &mut self,
         player: PlayerRef,
     ) -> Result<RespawnTarget, RespawnTargetUnavailable>;
+}
+
+/// The handles' client writes of the `player_world` area, reached through [`ClientBackendMut`].
+// hidden: a handle's backend, reached through `ClientBackendMut`; mods call the handle
+#[doc(hidden)]
+#[sunrise_mod_api_macros::host_area]
+pub trait PlayerWorldClientBackendMut {
+    /// Side: client.
+    /// Sets the local player's current body yaw in degrees (`LivingEntity.setYBodyRot`).
+    /// The view, head, previous body angle and packets are unchanged. `Ok(false)` for a stale,
+    /// nonlocal, or unavailable player. Returns `Err(LevelWriteError::Unavailable)` when the
+    /// host cannot write living state. Does not change frame extraction order.
+    fn player_set_body_yaw(&mut self, player: PlayerRef, yaw: f32)
+    -> Result<bool, LevelWriteError>;
 }

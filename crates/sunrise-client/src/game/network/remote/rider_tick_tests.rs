@@ -73,7 +73,7 @@ fn a_riders_move_takes_the_look_of_the_tick_and_leaves_it_off_the_ground() {
                 game.yaw = yaw;
                 game.clear_device_keys();
                 game.insert_device_key(KeyCode::KeyW);
-                game.tick_local_player(Vec::new(), 7).unwrap();
+                game.tick_local_player(Vec::new(), 7, None).unwrap();
                 let player = game.player.as_ref().unwrap();
                 collided.push(player.collision.horizontal);
                 // `Entity.rideTick` zeroes the rider's motion and `LivingEntity.travelInAir` adds
@@ -149,7 +149,7 @@ fn mounted_local_spectator_forces_flight_and_sends_abilities() {
             assert!(!game.own_player_is_spectator());
             assert!(!game.player.as_ref().unwrap().flying);
 
-            game.tick_local_player(Vec::new(), 7).unwrap();
+            game.tick_local_player(Vec::new(), 7, None).unwrap();
 
             assert!(game.player.as_ref().unwrap().flying);
             assert!(game.remote_abilities().unwrap().flying);

@@ -1,19 +1,5 @@
 use super::*;
 
-pub(super) fn intern_saved_fluids(root: &NamedTag) {
-    if let Some(Tag::List(entities)) = root.tag.get("block_entities") {
-        for entity in entities {
-            if let Some(Tag::List(tanks)) = entity.get("fluids") {
-                for tank in tanks {
-                    if let Some(Tag::String(id)) = tank.get("Fluid") {
-                        mod_api::__private::intern_unresolved_fluid(&id.to_string_lossy());
-                    }
-                }
-            }
-        }
-    }
-}
-
 pub(super) fn mod_ticket_to_nbt(ticket: &ModTicket, controller: &str) -> Tag {
     let owner = match ticket.owner {
         TicketOwner::Block(pos) => ("block", Tag::IntArray(pos.to_vec())),

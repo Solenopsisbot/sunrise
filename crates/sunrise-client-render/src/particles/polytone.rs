@@ -1476,7 +1476,7 @@ fn gpu_shader(
     // Pack GLSL is untrusted: a panic in the translator or naga refuses the shader too, with
     // no crash report.
     // Quoted includes start from the stages' own folder.
-    let stages = crate::core_shader::Stages {
+    let stages = sunrise_glsl::Stages {
         dir: &dir,
         vertex: &vertex,
         fragment: &fragment,
@@ -1660,7 +1660,7 @@ impl ParticleEngine {
         drop(ctx);
         drop(frame);
         for (options, position, velocity) in out {
-            self.add(&options, position, velocity);
+            self.add_with(Some(level), &options, position, velocity, false, false);
         }
     }
 
@@ -1711,7 +1711,7 @@ impl ParticleEngine {
         drop(ctx);
         drop(frame);
         for (options, position, velocity) in out {
-            self.add(&options, position, velocity);
+            self.add_with(Some(level), &options, position, velocity, false, false);
         }
         self.sounds.extend(sounds);
     }

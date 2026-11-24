@@ -210,6 +210,8 @@ pub enum PayloadSendError {
     StaleToken(PayloadId),
     /// `IPayloadContext::send_to` is for `Droppable` channels only.
     NotDroppable(PayloadId),
+    /// The current side, phase or world view cannot supply tracking recipients.
+    Unavailable,
 }
 
 impl crate::NoBackend for PayloadSendError {
@@ -273,8 +275,11 @@ pub trait IPayloadHandler: Send + Sync + 'static {
 
 /// Work scheduled on the logical receiving main thread. It retains the handler's owner and
 /// disablement guard: a panic aborts the work's transaction and disables that receiving callback
-/// for the session, without disconnecting the peer. Later deliveries to that callback
-/// follow the same rules as a panic in [`IPayloadHandler::handle`].
+/// for the session, without disconnecting the peer. The engine disposes of its work reference
+/// under that same policy, including when work is refused or cancelled. A panicking destructor
+/// is reported even for an already disabled callback; a destructor panic in the current
+/// delivery aborts its staged effects. Later deliveries to that callback follow the same
+/// rules as a panic in [`IPayloadHandler::handle`].
 pub trait PayloadWork: Send + Sync + 'static {
     /// Execute with the same connection-derived context and transaction rules.
     /// A panic disables the receiving callback for the session and reports the owning mod

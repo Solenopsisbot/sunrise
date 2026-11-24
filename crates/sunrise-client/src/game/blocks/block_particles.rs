@@ -67,13 +67,19 @@ impl Game<'_> {
     }
 
     fn particle_shape(&self, pos: [i32; 3], state: BlockStateId) -> Vec<[f64; 6]> {
-        self.state_shape_boxes(
+        let mut boxes = Vec::new();
+        let _ = self.visit_state_shape(
             &self.world,
             &self.be_anims,
             state,
             pos,
             mod_api::BlockShapeKind::Outline,
-        )
+            &mut |bounds| {
+                boxes.push(bounds);
+                std::ops::ControlFlow::Continue(())
+            },
+        );
+        boxes
     }
 
     /// `ClientLevel.addDestroyBlockEffect`: decide using the destroyed state, not the block

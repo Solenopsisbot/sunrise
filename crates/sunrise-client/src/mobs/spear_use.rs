@@ -7,9 +7,8 @@
 //! living entity flags tell the clients (`mob_meta`), so the arm and the
 //! spear are drawn charging for them as well.
 use super::{
-    Damage, DamageKind, Mob, MobEvent, MobWorld, Species, Who,
+    Damage, DamageKind, Mob, MobEvent, MobWorld, Species, WeaponAttack, WeaponHit, Who,
     brain::Timed,
-    gear,
     goals::{Cx, Goal, LOOK, MOVE, goal_clone, reduced},
 };
 use crate::spear::{Kinetic, REACH, hits_in_reach};
@@ -258,48 +257,11 @@ fn stab_attack(
     w: &MobWorld,
     events: &mut Vec<MobEvent>,
 ) -> bool {
-    let species = match target {
-        Who::Mob(id) => w.seen(id).map(|s| s.species),
-        Who::Player => None,
+    let Some(weapon) = m.extra.main_hand_stack() else {
+        return false;
     };
-    // `EnchantmentHelper.modifyDamage`.
-    let damage = base_damage + gear::melee_bonus(m, species);
     let from = [m.position.x, m.position.y, m.position.z];
-    // `weaponItem.getDamageSource(this)`: the spear's, for the hurt and the pushes.
-    let source = Damage {
-        kind: DamageKind::Spear,
-        attacker: Some(Who::Mob(m.id)),
-        from: Some(from),
-        attacker_species: Some(m.species()),
-    };
-    let mut affected = deals_knockback;
-    if deals_damage {
-        match target {
-            Who::Player => events.push(w.route_player_event(MobEvent::DamagePlayer {
-                amount: damage,
-                from,
-                kind: "minecraft:spear",
-            })),
-            Who::Mob(id) => events.push(MobEvent::AttackMob {
-                target: id,
-                amount: damage,
-                source,
-                remember_target: false,
-            }),
-        }
-        affected = true;
-        // `EnchantmentHelper.doPostAttackEffects`: Fire Aspect.
-        let burn = gear::fire_aspect(m);
-        if burn > 0 {
-            events.push(w.route_player_event(MobEvent::Ignite(target, burn)));
-        }
-    }
-    if deals_knockback {
-        cause_extra_knockback(m, target, 0.4_f32, source, w, events);
-        // `LivingEntity.getKnockback`: the Knockback enchantment, halved.
-        let power = gear::knockback(m) as f32 / 2.0;
-        cause_extra_knockback(m, target, power, source, w, events);
-    }
+    let to_rad = std::f32::consts::PI / 180.0;
     // `LivingEntity.stabAttack`: a type in `cannot_be_dismounted_by_item_usage` stays seated.
     let flag = crate::items::EntityTypeTags::CANNOT_BE_DISMOUNTED_BY_ITEM_USAGE;
     let seated = match target {
@@ -308,46 +270,39 @@ fn stab_attack(
             .is_some_and(|items| items.entity_type_tags.has_flag("minecraft:player", flag)),
         Who::Mob(id) => w.seen(id).is_some_and(|s| w.entity_tag_bit(&s.kind, flag)),
     };
-    let dismounted = dismounts && !seated && w.target_info(target).is_some_and(|t| t.passenger);
-    if dismounted {
-        affected = true;
-        events.push(w.route_player_event(MobEvent::StabDismount { target }));
-    }
+    let dismounts = dismounts && !seated && w.target_info(target).is_some_and(|t| t.passenger);
+    events.push(w.route_player_event(MobEvent::WeaponAttack(WeaponHit {
+        target,
+        source: Damage {
+            kind: DamageKind::Spear,
+            attacker: Some(Who::Mob(m.id)),
+            from: Some(from),
+            attacker_species: Some(m.species()),
+        },
+        weapon: weapon.clone(),
+        amount: base_damage,
+        knockback: m.attrs.attack_knockback as f32,
+        direction: [
+            f64::from((m.yaw * to_rad).msin()),
+            f64::from(-(m.yaw * to_rad).mcos()),
+        ],
+        attack: WeaponAttack::Stab {
+            deals_damage,
+            deals_knockback,
+            dismounts,
+        },
+    })));
+    let affected = deals_damage || deals_knockback || dismounts;
     if affected {
         events.push(w.route_player_event(MobEvent::StabMemory {
             attacker: m.id,
             target,
             contact,
             attempted_damage: deals_damage,
-            otherwise_affected: deals_knockback || dismounted,
+            otherwise_affected: deals_knockback || dismounts,
         }));
     }
     affected
-}
-
-/// `LivingEntity.causeExtraKnockback`: a push along the attacker's facing,
-/// which slows the attacker.
-fn cause_extra_knockback(
-    m: &mut Mob,
-    target: Who,
-    power: f32,
-    source: Damage,
-    w: &MobWorld,
-    events: &mut Vec<MobEvent>,
-) {
-    if power <= 0.0 {
-        return;
-    }
-    let to_rad = std::f32::consts::PI / 180.0;
-    events.push(w.route_player_event(MobEvent::Knockback {
-        target,
-        power: f64::from(power),
-        x: f64::from((m.yaw * to_rad).msin()),
-        z: f64::from(-(m.yaw * to_rad).mcos()),
-        source,
-        apply_blocking: None,
-    }));
-    m.velocity = Vec3::new(m.velocity.x * 0.6, m.velocity.y, m.velocity.z * 0.6);
 }
 
 /// `Mob.chargeSpeedModifier` of the mount: a zombie horse runs 1.4 times as
@@ -944,7 +899,8 @@ impl<G: Goal + Clone + 'static> Goal for NoMeleeWithSpear<G> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Mob, MobEvent, MobWorld, Who, count_use_tick, is_using_item, stab_attack, start_using_item,
+        Mob, MobEvent, MobWorld, WeaponAttack, WeaponHit, Who, count_use_tick, is_using_item,
+        stab_attack, start_using_item,
     };
     use sunrise_core::geometry::Vec3;
 
@@ -1022,9 +978,19 @@ mod tests {
                     &w,
                     &mut events,
                 );
-                let dismounted = events
-                    .iter()
-                    .any(|event| matches!(event, MobEvent::StabDismount { .. }));
+                // The stab's handler unseats the target on the decision made here.
+                let dismounted = events.iter().any(|event| {
+                    matches!(
+                        event,
+                        MobEvent::WeaponAttack(WeaponHit {
+                            attack: WeaponAttack::Stab {
+                                dismounts: true,
+                                ..
+                            },
+                            ..
+                        })
+                    )
+                });
                 assert_eq!(dismounted, !seated, "seated {seated}");
             }
         }));

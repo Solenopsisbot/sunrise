@@ -856,7 +856,7 @@ impl Game<'_> {
                         continue;
                     };
                     // ItemDisplayWidget: the item at its corner, then its decorations.
-                    self.draw_item_model(batch, &stack, x, y);
+                    self.draw_item_model(batch, &stack, x, y, 0);
                     if *show_decorations {
                         self.draw_item_decorations(batch, &stack, x, y, None);
                     }
@@ -946,12 +946,12 @@ impl Game<'_> {
                 .answer_at(cursor);
             match answer {
                 Some(true) => {
-                    self.audio.play_button_click();
+                    self.play_audio_button_click();
                     let reason = Text::translate("menu.custom_screen_info.disconnect", &[]);
                     self.leave_server(Some(reason))?;
                 }
                 Some(false) => {
-                    self.audio.play_button_click();
+                    self.play_audio_button_click();
                     self.return_from_dialog_warning();
                 }
                 None => {}
@@ -966,7 +966,7 @@ impl Game<'_> {
                 ((h - 53.0) / 2.0).trunc() + 33.0,
             );
             if active && ui::hovered(cursor, bx, by, 200.0, 20.0) {
-                self.audio.play_button_click();
+                self.play_audio_button_click();
                 self.dialogs.waiting = None;
                 self.dialog_receiver_changed();
                 return Ok(true);
@@ -978,7 +978,7 @@ impl Game<'_> {
         };
         let [wx, wy, ww, wh] = layout.warning;
         if ui::hovered(cursor, wx, wy, ww, wh) {
-            self.audio.play_button_click();
+            self.play_audio_button_click();
             self.open_screen_overlay("dialog", |game| game.dialogs.warning = true);
             return Ok(true);
         }
@@ -1100,7 +1100,7 @@ impl Game<'_> {
             self.run_dialog_action(Some(click), after)?;
             return Ok(true);
         };
-        self.audio.play_button_click();
+        self.play_audio_button_click();
         let Some(index) = action else {
             return Ok(true);
         };
@@ -1232,7 +1232,7 @@ impl Game<'_> {
                 return true;
             }
             if open.dragging.take().is_some() {
-                self.audio.play_button_click();
+                self.play_audio_button_click();
                 return true;
             }
         }

@@ -558,10 +558,11 @@ impl Game<'_> {
                 }
                 merchant::Event::LevelUp(_) => {
                     if let Some(id) = mob {
-                        let _ =
-                            self.mutate_mob_effects(id, Some("minecraft:regeneration"), |mob| {
-                                mob.add_effect("minecraft:regeneration", 200, 0)
-                            });
+                        let _ = self.add_mob_effect(
+                            id,
+                            sunrise_client::effects::EffectInstance::new("regeneration", 200, 0),
+                            None,
+                        );
                     }
                 }
                 merchant::Event::TradeUpdated(yes, pitch) => {
@@ -699,8 +700,7 @@ impl Game<'_> {
                 if let Some(m) = self.station.as_mut().and_then(|s| s.merchant.as_mut()) {
                     m.focused = Some(i);
                 }
-                self.audio
-                    .play("minecraft:ui.button.click", None, 0.25, 1.0);
+                self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
                 self.try_move_items(index);
                 return true;
             }
@@ -727,8 +727,7 @@ impl Game<'_> {
         else {
             return false;
         };
-        self.audio
-            .play("minecraft:ui.button.click", None, 0.25, 1.0);
+        self.play_audio("minecraft:ui.button.click", None, 0.25, 1.0);
         self.try_move_items(index);
         true
     }

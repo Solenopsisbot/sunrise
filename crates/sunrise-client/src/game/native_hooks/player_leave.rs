@@ -4,19 +4,41 @@ use super::Game;
 use sunrise_client::{lan::guest::Guest, text::Text};
 
 impl Game<'_> {
-    /// A network guest the hub removed leaves the world: the leave lines, then
-    /// `player_logged_out` where `PlayerList.remove` starts (NeoForge's
-    /// `PlayerLoggedOutEvent`), after their menu closed and before the leave statistic, the
-    /// vehicle and any player save. They are listed again in join order while the mods hear it,
-    /// as when the server stops (`native_players_leaving`). A listener's edits persist only if
-    /// this server saves the player: a completed proxy hand-over or a crash writes no logout
-    /// save. A guest who quit from the End credits counts as online (`Hub::departing`) without
-    /// going back into a level. Their disconnect counts as begun, so a listener's own is refused.
-    pub(in crate::game) fn native_guest_left(&mut self, mut guest: Box<Guest>) -> Box<Guest> {
-        if !self.announce_guest_left(&guest) {
-            return guest;
-        }
-        let (conn, uuid, name) = (guest.conn, guest.uuid, guest.name.clone());
+    /// Fire `player_logged_out` for a departing guest outside an active level turn (for example
+    /// one quitting from the End credits or when their level failed to open), keeping them listed
+    /// in join order (`listed_behind`) and reachable as online (`Hub::departing`) so listener
+    /// edits persist if this server saves the player.
+    pub(in crate::game) fn native_departing_guest_logout(
+        &mut self,
+        guest: Box<Guest>,
+    ) -> Box<Guest> {
+        let (uuid, name) = (guest.uuid, guest.name.clone());
+        self.with_relisted_departing_guest(guest, |game| game.native_player_logged_out(uuid, &name))
+    }
+
+    /// `PlayerContainerEvent.Close` for the menu a departing guest held when their level could
+    /// not be entered: told once, with no live menu handle (the level and its storage are
+    /// unavailable), before the tracked menu is forgotten.
+    pub(in crate::game) fn native_departing_guest_menu_closed(
+        &mut self,
+        guest: Box<Guest>,
+        window: i32,
+        generation: u64,
+    ) -> Box<Guest> {
+        let conn = guest.conn;
+        self.with_relisted_departing_guest(guest, |game| {
+            game.player_menu_closing(conn, window, generation)
+        })
+    }
+
+    /// Run `tell` with the departing guest listed in join order and reachable as online
+    /// (`Hub::departing`), then take them out again.
+    fn with_relisted_departing_guest(
+        &mut self,
+        mut guest: Box<Guest>,
+        tell: impl FnOnce(&mut Self),
+    ) -> Box<Guest> {
+        let conn = guest.conn;
         let Some(host) = self.lan.as_mut() else {
             return guest;
         };
@@ -30,7 +52,7 @@ impl Game<'_> {
             .map_or(0, |i| i + 1);
         host.hub.guests.insert(at, *guest);
         host.hub.departing = Some(conn);
-        self.native_player_logged_out(uuid, &name);
+        tell(self);
         let Some(host) = self.lan.as_mut() else {
             unreachable!("LanHost dropped inside a tick; closes are deferred")
         };
@@ -129,7 +151,7 @@ mod player_leave_tests {
             },
         }),
         copy_on_death: false,
-        sync: false,
+        sync_codec: None,
     };
 
     /// What a listener heard, in order.
@@ -153,7 +175,10 @@ mod player_leave_tests {
     impl Hooks for Leave {
         fn register(&self, registrar: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
             registrar
-                .register_attachment_type("leave_test:value", false)
+                .register_attachment_type(mod_api::AttachmentDescriptor::new(
+                    "leave_test:value",
+                    || 0i32,
+                ))
                 .unwrap();
         }
         fn player_bed_leave(&self, _: &mut dyn ServerHost, event: &mut PlayerBedLeaveEvent<'_>) {

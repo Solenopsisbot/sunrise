@@ -48,7 +48,7 @@ impl Game<'_> {
             self.open_command_block(pos);
         }
     }
-    fn command_block(&self, pos: Pos) -> Option<&CommandBlock> {
+    pub(super) fn command_block(&self, pos: Pos) -> Option<&CommandBlock> {
         match self.world.block_entities.get(&pos)? {
             BlockEntity::CommandBlock(c) => Some(c),
             _ => None,
@@ -308,6 +308,7 @@ impl Game<'_> {
                 dimension: self.dim,
                 origin_dimension: self.dim,
                 origin_player: false,
+                native_output: None,
                 level: None,
                 block: Some(pos),
                 cart: None,
@@ -350,32 +351,17 @@ impl Game<'_> {
             c.last_output = Some(format(Text::literal(time)));
         }
     }
-    /// `CommandSourceStack.sendSuccess` from a command block: its output when
-    /// `send_command_feedback`, and `broadcastToAdmins` when `broadcast` and
-    /// `command_block_output`.
-    pub(super) fn command_block_success(&mut self, pos: Pos, message: Text, broadcast: bool) {
-        let Some(name) = self
-            .command_block(pos)
-            .filter(|c| c.track_output)
-            .map(CommandBlock::name)
-        else {
-            return;
-        };
-        let feedback = self
+    /// `CommandSourceStack.sendSuccess`'s line to a command block
+    /// (`BaseCommandBlock.acceptsSuccess`): its output while it tracks output
+    /// and `send_command_feedback` is on. The operators' share is
+    /// `broadcast_to_admins`.
+    pub(super) fn command_block_success(&mut self, pos: Pos, message: Text) {
+        if self
             .ui
             .rules
-            .bool_at(sunrise_client::gamerules::vanilla::SEND_COMMAND_FEEDBACK);
-        if feedback {
-            self.command_block_output(pos, |timestamp| timestamp.append(message.clone()));
-        }
-        if broadcast
-            && feedback
-            && self
-                .ui
-                .rules
-                .bool_at(sunrise_client::gamerules::vanilla::COMMAND_BLOCK_OUTPUT)
+            .bool_at(sunrise_client::gamerules::vanilla::SEND_COMMAND_FEEDBACK)
         {
-            self.broadcast_source_to_admins(name, message);
+            self.command_block_output(pos, |timestamp| timestamp.append(message));
         }
     }
 
@@ -591,7 +577,7 @@ impl Game<'_> {
             .find(|(_, x, y, bw)| ui::hovered(self.cursor, *x, *y, *bw, 20.0))
             .map(|b| b.0);
         if hit.is_some() {
-            self.audio.play_button_click();
+            self.play_audio_button_click();
         }
         match hit {
             Some(Button::Output) => {

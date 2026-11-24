@@ -67,7 +67,8 @@ pub(super) fn with_session_tools(extra: &Value) -> Value {
     root
 }
 
-/// A node of the filtered tree.
+/// A node of the permission-filtered tree, before wire numbering.
+#[derive(Default)]
 struct Node {
     name: String,
     kind: u8,
@@ -135,22 +136,27 @@ impl CommandTree {
         features: &[String],
         registry: &crate::gamerules::RuleRegistry,
     ) -> Commands {
+        self.graph_with_features(level, dedicated, extra, features, registry)
+            .packet(builtin, &[])
+    }
+
+    /// Build the usable graph without assigning wire IDs yet.
+    pub(super) fn graph_with_features(
+        &self,
+        level: u8,
+        dedicated: bool,
+        extra: &Value,
+        features: &[String],
+        registry: &crate::gamerules::RuleRegistry,
+    ) -> CommandGraph {
         let minecart_improvements = features
             .iter()
             .any(|f| f == crate::gamerules::MINECART_IMPROVEMENTS);
-        let mut nodes = vec![Node {
-            name: String::new(),
-            kind: 0,
-            executable: false,
-            restricted: false,
-            children: Vec::new(),
-            redirect: None,
-            parser: None,
-            suggestions: None,
-        }];
+        let CommandGraph {
+            mut nodes,
+            mut paths,
+        } = CommandGraph::default();
         let suggestions: HashMap<&str, &'static str> = SUGGESTIONS.iter().copied().collect();
-        let mut paths: HashMap<Vec<String>, usize> = HashMap::new();
-        paths.insert(Vec::new(), 0);
         let sunrise = if crate::command::vanilla::game_dispatcher()
             .find("pregen")
             .is_some()
@@ -203,50 +209,99 @@ impl CommandTree {
                 &mut paths,
             );
         }
-        // enumerateNodes: breadth first from the root, each node's children
-        // (in registration order) then its redirect target.
+        CommandGraph { nodes, paths }
+    }
+}
+
+/// One recipient's usable command nodes, in registration order and without wire indices.
+pub struct CommandGraph {
+    nodes: Vec<Node>,
+    paths: HashMap<Vec<String>, usize>,
+}
+
+impl Default for CommandGraph {
+    fn default() -> Self {
+        Self {
+            nodes: vec![Node::default()],
+            paths: HashMap::from([(Vec::new(), 0)]),
+        }
+    }
+}
+
+impl CommandGraph {
+    /// Names of the usable root children, indexed in registration order.
+    pub fn roots(&self) -> impl ExactSizeIterator<Item = &str> + Clone {
+        self.nodes[0]
+            .children
+            .iter()
+            .map(|&i| self.nodes[i].name.as_str())
+    }
+
+    /// Apply root indexes collected from this graph, then number and construct the packet once.
+    pub(super) fn packet(self, builtin: &Builtin, hidden: &[usize]) -> Commands {
+        let Self { mut nodes, paths } = self;
+        let redirects: Vec<_> = nodes
+            .iter_mut()
+            .map(|node| {
+                node.redirect
+                    .take()
+                    .and_then(|path| paths.get(&path).copied())
+            })
+            .collect();
+        let mut omit = Vec::new();
+        if !hidden.is_empty() {
+            // Follow incoming redirects as well as children so no surviving alias
+            // reaches a hidden branch (including aliases to descendants or aliases).
+            let mut aliases = vec![Vec::new(); nodes.len()];
+            for (index, &target) in redirects.iter().enumerate() {
+                if let Some(target) = target {
+                    aliases[target].push(index);
+                }
+            }
+            omit.resize(nodes.len(), false);
+            let mut pending: Vec<_> = hidden.iter().map(|&i| nodes[0].children[i]).collect();
+            while let Some(index) = pending.pop() {
+                if !std::mem::replace(&mut omit[index], true) {
+                    pending.extend(aliases[index].iter().copied());
+                    pending.extend(nodes[index].children.iter().copied());
+                }
+            }
+        }
+
+        // ClientboundCommandsPacket.enumerateNodes: children in registration order, then redirect.
         let mut ids = vec![None; nodes.len()];
         let mut order = Vec::new();
         let mut queue = VecDeque::from([0usize]);
         while let Some(n) = queue.pop_front() {
-            if ids[n].is_some() {
+            if (!omit.is_empty() && omit[n]) || ids[n].is_some() {
                 continue;
             }
             ids[n] = Some(order.len() as i32);
             order.push(n);
             queue.extend(nodes[n].children.iter().copied());
-            if let Some(target) = nodes[n].redirect.as_ref().and_then(|p| paths.get(p)) {
-                queue.push_back(*target);
-            }
+            queue.extend(redirects[n]);
         }
         let argument_types = builtin.get("minecraft:command_argument_type");
-        let out = order
-            .iter()
-            .map(|&n| {
-                let node = &nodes[n];
+        let nodes = order
+            .into_iter()
+            .map(|n| {
+                let node = std::mem::take(&mut nodes[n]);
                 CommandNode {
                     kind: node.kind,
                     executable: node.executable,
                     restricted: node.restricted,
-                    children: node.children.iter().filter_map(|c| ids[*c]).collect(),
-                    redirect: node
-                        .redirect
-                        .as_ref()
-                        .and_then(|p| paths.get(p))
-                        .and_then(|t| ids[*t]),
-                    name: node.name.clone(),
-                    parser: node.parser.as_ref().map(|(parser, props)| {
-                        let id = argument_types.and_then(|t| t.id(parser)).unwrap_or(0);
-                        (id, properties(parser, props))
+                    children: node.children.into_iter().filter_map(|c| ids[c]).collect(),
+                    redirect: redirects[n].and_then(|target| ids[target]),
+                    name: node.name,
+                    parser: node.parser.map(|(parser, props)| {
+                        let id = argument_types.and_then(|t| t.id(&parser)).unwrap_or(0);
+                        (id, properties(&parser, &props))
                     }),
-                    suggestions: node.suggestions.clone(),
+                    suggestions: node.suggestions,
                 }
             })
             .collect();
-        Commands {
-            nodes: out,
-            root: 0,
-        }
+        Commands { nodes, root: 0 }
     }
 }
 
@@ -480,6 +535,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn command_filter_removes_branches_and_remaps_the_ordered_wire_graph() {
+        let node = |name: &str, children: Vec<i32>, redirect: Option<i32>| CommandNode {
+            name: name.into(),
+            kind: u8::from(!name.is_empty()),
+            executable: children.is_empty() && redirect.is_none(),
+            restricted: false,
+            children,
+            redirect,
+            parser: None,
+            suggestions: None,
+        };
+        let tree = CommandTree {
+            root: serde_json::json!({"type": "root", "children": {
+                "a_hide": {"type": "literal", "children": {"hidden_child": {"type": "literal", "executable": true}}},
+                "b_keep": {"type": "literal", "children": {"kept_child": {"type": "literal", "executable": true}}},
+                "c_hidden_alias": {"type": "literal", "redirect": ["a_hide"]},
+                "d_indirect_alias": {"type": "literal", "redirect": ["c_hidden_alias"]},
+                "e_child_alias": {"type": "literal", "redirect": ["a_hide", "hidden_child"]},
+                "f_kept_alias": {"type": "literal", "redirect": ["b_keep"]}
+            }}),
+        };
+        let graph = tree.graph_with_features(
+            0,
+            true,
+            &Value::Null,
+            &[],
+            &crate::gamerules::rule_registry(),
+        );
+        assert_eq!(graph.roots().next(), Some("a_hide"));
+        let packet = graph.packet(&Builtin::default(), &[0]);
+
+        use sunrise_protocol::{buf::Reader, packets::play::Clientbound};
+        let encoded = Clientbound::Commands(packet).encode();
+        let mut reader = Reader::new(&encoded);
+        let id = reader.varint().unwrap();
+        let Clientbound::Commands(decoded) = Clientbound::decode(id, reader.rest()).unwrap() else {
+            panic!("expected outgoing command tree");
+        };
+        assert_eq!(
+            decoded,
+            Commands {
+                root: 0,
+                nodes: vec![
+                    node("", vec![1, 2], None),
+                    node("b_keep", vec![3], None),
+                    node("f_kept_alias", vec![], Some(1)),
+                    node("kept_child", vec![], None),
+                ],
+            },
+        );
+    }
+
+    #[test]
     fn pregen_completion_keeps_permissions_and_radius_bounds() {
         let tree = CommandTree {
             root: crate::pregen::command_tree(),
@@ -522,6 +630,16 @@ mod tests {
         assert_eq!(properties("minecraft:entity", &p), vec![3]);
         let p: Value = serde_json::from_str(r#"{"type": "greedy"}"#).unwrap();
         assert_eq!(properties("brigadier:string", &p), vec![2]);
+    }
+
+    /// `StringArgumentSerializer` writes the `StringType` ordinal as a varint: `SINGLE_WORD` 0,
+    /// `QUOTABLE_PHRASE` 1, `GREEDY_PHRASE` 2; the report names them `word`, `phrase`, `greedy`.
+    #[test]
+    fn string_modes_are_brigadiers_ordinals() {
+        for (mode, wire) in [("word", 0), ("phrase", 1), ("greedy", 2)] {
+            let p = serde_json::json!({ "type": mode });
+            assert_eq!(properties("brigadier:string", &p), vec![wire], "{mode}");
+        }
     }
 
     /// A mod's root of a vanilla name merges into vanilla's node, as NeoForge's

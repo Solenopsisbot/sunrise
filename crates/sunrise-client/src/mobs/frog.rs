@@ -184,7 +184,7 @@ pub(super) fn travel(
 ) -> ControlFlow<super::living::TravelPause> {
     m.move_relative(m.ai.speed, input);
     m.travel_move(w, level, events, pause, |m, _, _, _| {
-        m.velocity = m.velocity.scale(0.9);
+        m.set_velocity(m.velocity.scale(0.9));
     })
 }
 

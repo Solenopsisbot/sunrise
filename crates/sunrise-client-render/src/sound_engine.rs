@@ -11,12 +11,13 @@
 //! backend through `stopped`.
 use crate::sound_events::{INTENTIONALLY_EMPTY, Sentinel, Sound, SoundRegistry};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
 use sunrise_core::random::LegacyRandom;
 
 pub mod hooks;
+pub use hooks::PreparedPlay;
 
 /// `SoundSource` indices (vanilla order).
 pub const MASTER: usize = 0;
@@ -147,13 +148,13 @@ pub enum Ticking {
         y_angle: f32,
     },
 }
-/// A mod sound's fade in progress: `step` added to the volume each tick it plays, until
-/// `left` reaches 0 and the volume is `target`.
+/// A mod sound's fade in progress, from `start` to `target` over `ticks` ticks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fade {
-    pub step: f32,
-    pub target: f32,
-    pub left: u32,
+    start: f32,
+    target: f32,
+    ticks: u32,
+    left: u32,
 }
 // The volumes are finite (checked where a mod asks for the fade), so equality is total.
 impl Eq for Fade {}
@@ -244,7 +245,6 @@ pub struct TickContext {
 /// `AbstractSoundInstance` and its subclasses' fields.
 #[derive(Clone, Debug)]
 pub struct SoundInstance {
-    live_settings: std::cell::OnceCell<std::cell::RefCell<hooks::LiveSettings>>,
     pub identifier: String,
     pub source: usize,
     pub volume: f32,
@@ -288,7 +288,6 @@ impl SoundInstance {
         relative: bool,
     ) -> Self {
         Self {
-            live_settings: std::cell::OnceCell::new(),
             identifier: identifier.to_owned(),
             source,
             volume,
@@ -725,7 +724,7 @@ impl SoundInstance {
         self.looping = false;
     }
     /// A mod's `SoundRef::fade`: the volume moves to `volume` in equal steps over the next
-    /// `ticks` ticks the sound plays, or at once for 0. A fade to 0 stops the sound when it ends,
+    /// `ticks` ticks the sound plays, or at once for 0. A nonpositive target stops it at the end,
     /// as `LoopSoundInstance.fadeOut` does. Only a mod's sound fades.
     pub fn fade_to(&mut self, volume: f32, ticks: u32) {
         let Ticking::Mod { fade } = &mut self.ticking else {
@@ -739,8 +738,9 @@ impl SoundInstance {
             }
         } else {
             *fade = Some(Fade {
-                step: (volume - self.volume) / ticks as f32,
+                start: self.volume,
                 target: volume,
+                ticks,
                 left: ticks,
             });
         }
@@ -758,7 +758,10 @@ impl SoundInstance {
                     }
                 } else {
                     *fade = Some(f);
-                    self.volume += f.step;
+                    let fraction = f64::from(f.ticks - f.left) / f64::from(f.ticks);
+                    let start = f64::from(f.start);
+                    // The difference of two finite, opposite-signed volumes can overflow f32.
+                    self.volume = (start + (f64::from(f.target) - start) * fraction) as f32;
                 }
             }
             return;
@@ -1085,9 +1088,18 @@ pub type PlaybackHook = fn(&SoundPlayback<'_>, &mut f32, &mut f32, &mut bool);
 pub struct SoundEngine {
     pub registry: SoundRegistry,
     playback_hook: Option<PlaybackHook>,
+    /// Starts a caller made without the game (an audio helper, a delayed start due at the tick),
+    /// held for the game to fire `play_sound` for before it returns control (`next_deferred`).
+    deferred: Vec<InstanceId>,
+    /// The starts the game is firing `play_sound` for right now.
+    inflight: Vec<InstanceId>,
+    /// Starts the game answered: the next `play` of each goes ahead.
+    decided: HashSet<InstanceId>,
+    /// The game's answers for the live refresh of each playing sound (`None` cancels it).
+    live_answers: HashMap<InstanceId, Option<mod_api::SoundPlay>>,
     /// `loaded`: the library opened.
     pub loaded: bool,
-    tick_count: i32,
+    tick_count: i64,
     instances: HashMap<InstanceId, SoundInstance>,
     /// Instances their owner still refers to.
     retained: HashMap<InstanceId, ()>,
@@ -1105,8 +1117,8 @@ pub struct SoundEngine {
     removed_scratch: Vec<InstanceId>,
     ticking_scratch: Vec<InstanceId>,
     /// `queuedSounds` (insertion order).
-    queued: Vec<(InstanceId, i32)>,
-    delete_time: HashMap<InstanceId, i32>,
+    queued: Vec<(InstanceId, i64)>,
+    delete_time: HashMap<InstanceId, i64>,
     queued_tickable: Vec<InstanceId>,
     used: [usize; 2],
     pub limits: [usize; 2],
@@ -1121,7 +1133,7 @@ pub struct SoundEngine {
     /// The client's loop context, rebuilt with each resource generation, for the
     /// sound hooks (`hooks`). Absent on a server, which has no sound.
     loop_context: Option<sunrise_world::native_load_context::LoopContext>,
-    unmuffled: Vec<String>,
+    unmuffled: HashSet<String>,
 }
 fn handle_channel(h: &Handle) -> Option<ChannelId> {
     h.channel
@@ -1149,6 +1161,10 @@ impl SoundEngine {
             queued: Vec::new(),
             delete_time: HashMap::new(),
             queued_tickable: Vec::new(),
+            deferred: Vec::new(),
+            inflight: Vec::new(),
+            decided: HashSet::new(),
+            live_answers: HashMap::new(),
             used: [0, 0],
             limits: [STATIC_CHANNELS, STREAMING_CHANNELS],
             source_volumes: [1.0; 11],
@@ -1156,11 +1172,11 @@ impl SoundEngine {
             listener_reserve: 0,
             notifications: Vec::new(),
             loop_context: None,
-            unmuffled: Vec::new(),
+            unmuffled: HashSet::new(),
         }
     }
     /// Sound events exempt from muffling, including channels already playing.
-    pub fn set_unmuffled(&mut self, events: Vec<String>, backend: &mut impl Backend) {
+    pub fn set_unmuffled(&mut self, events: HashSet<String>, backend: &mut impl Backend) {
         self.unmuffled = events;
         for (id, handle) in &self.instance_to_channel {
             let (Some(instance), Some(channel)) = (
@@ -1201,12 +1217,7 @@ impl SoundEngine {
             };
             let mut cancel = false;
             hook(&sound, &mut volume, &mut pitch, &mut cancel);
-            let volume_edited = volume.to_bits() != instance.volume.to_bits();
-            let pitch_edited = pitch.to_bits() != instance.pitch.to_bits();
-            if cancel
-                || (volume_edited && (!volume.is_finite() || volume < 0.0))
-                || (pitch_edited && (!pitch.is_finite() || pitch <= 0.0))
-            {
+            if cancel {
                 return None;
             }
         }
@@ -1240,6 +1251,8 @@ impl SoundEngine {
             || self.queued.iter().any(|(i, _)| *i == id)
             || self.queued_tickable.contains(&id)
             || self.ticking.contains(&id)
+            || self.deferred.contains(&id)
+            || self.inflight.contains(&id)
     }
     fn collect(&mut self, id: InstanceId) {
         if !self.referenced(id) {
@@ -1274,7 +1287,7 @@ impl SoundEngine {
     pub fn instance_mut(&mut self, id: InstanceId) -> Option<&mut SoundInstance> {
         self.instances.get_mut(&id)
     }
-    pub fn tick_count(&self) -> i32 {
+    pub fn tick_count(&self) -> i64 {
         self.tick_count
     }
     /// `Options.getFinalSoundSourceVolume`.
@@ -1529,7 +1542,17 @@ impl SoundEngine {
         (id, self.play(id, backend))
     }
     fn play_inner(&mut self, id: InstanceId, backend: &mut impl Backend) -> PlayResult {
-        if !self.instances.contains_key(&id) || !self.play_sound_allowed(id) || !self.loaded {
+        if !self.instances.contains_key(&id) || !self.loaded {
+            return PlayResult::NotStarted;
+        }
+        // Decide, fire, apply: with a `play_sound` listener the engine cannot fire the hook (it
+        // needs the game's `ClientHost`). The game fires it before this start, through
+        // `begin_play` and `finish_prepared`; a start that reaches here without it is held for the
+        // game's `next_deferred`, which runs before the game's call returns.
+        if self.asks_play_sound() && !self.decided.remove(&id) {
+            if !self.deferred.contains(&id) && !self.inflight.contains(&id) {
+                self.deferred.push(id);
+            }
             return PlayResult::NotStarted;
         }
         if !self.instances[&id].can_play_sound() {
@@ -1635,8 +1658,8 @@ impl SoundEngine {
     pub fn queue_ticking(&mut self, id: InstanceId) {
         self.queued_tickable.push(id);
     }
-    /// `playDelayed`.
-    pub fn play_delayed(&mut self, id: InstanceId, delay: i32) {
+    /// `playDelayed`: use a wide tick deadline so a mod's full `u32` delay can be queued.
+    pub fn play_delayed(&mut self, id: InstanceId, delay: i64) {
         let at = self.tick_count + delay;
         if let Some(entry) = self.queued.iter_mut().find(|(i, _)| *i == id) {
             entry.1 = at;
@@ -1749,12 +1772,7 @@ impl SoundEngine {
                     && i.looping
                     && i.delay > 0
                 {
-                    let at = self.tick_count + i.delay;
-                    if let Some(entry) = self.queued.iter_mut().find(|(q, _)| *q == id) {
-                        entry.1 = at;
-                    } else {
-                        self.queued.push((id, at));
-                    }
+                    self.play_delayed(id, i64::from(i.delay));
                 }
                 self.instance_to_channel.remove(index);
                 self.handles.remove(&handle);

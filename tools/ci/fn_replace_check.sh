@@ -208,23 +208,31 @@ folder = pathlib.Path(sys.argv[1])
 record = folder / "native-mods.json"
 rows = json.loads(record.read_text())
 row = next(r for r in rows["libraries"] if r["kind"] == "mod")
-library = folder / row["file"]
-original = library.read_bytes()
+original = (folder / row["file"]).read_bytes()
+# A library's identity names its source and the identity of each library it links, so the
+# rebuilt mod, and every library built against it (its dependents, the patch library when it
+# patches through the mod), each come with a new identity: they are installed together, the
+# rest stay the original build's.
 for root in map(pathlib.Path, sys.argv[2:]):
     for candidate in root.rglob("native-mods.json"):
-        build = json.loads(candidate.read_text())
-        for replacement in build.get("libraries", []):
-            if replacement["mod"] != row["mod"] or replacement["identity"] != row["identity"]:
+        build = {r["mod"]: r for r in json.loads(candidate.read_text()).get("libraries", [])}
+        rebuilt = build.get(row["mod"])
+        if rebuilt is None or rebuilt["identity"] == row["identity"]:
+            continue
+        if (candidate.parent / rebuilt["file"]).read_bytes() == original:
+            continue
+        for installed in rows["libraries"]:
+            replacement = build.get(installed["mod"])
+            if replacement is None or replacement["identity"] == installed["identity"]:
                 continue
-            path = candidate.parent / replacement["file"]
-            if path.read_bytes() == original:
-                continue
-            shutil.copyfile(path, library)
-            row["sha256"] = hashlib.sha256(library.read_bytes()).hexdigest()
-            record.write_text(json.dumps(rows))
-            print(f"Swapped independently rebuilt library for {row['mod']}")
-            raise SystemExit(0)
-raise SystemExit("no changed library with the expected identity was built")
+            library = folder / installed["file"]
+            shutil.copyfile(candidate.parent / replacement["file"], library)
+            installed["identity"] = replacement["identity"]
+            installed["sha256"] = hashlib.sha256(library.read_bytes()).hexdigest()
+            print(f"Swapped independently rebuilt library for {installed['mod']}")
+        record.write_text(json.dumps(rows))
+        raise SystemExit(0)
+raise SystemExit(f"no rebuilt library of {row['mod']} with a new identity was built")
 PYLIB
   test "$(sha256sum "$scratch/engine/sunrise-engine" | cut -d' ' -f1)" = "$executable_hash"
   # The start below loads the swapped library: the loader hashes every library against the record

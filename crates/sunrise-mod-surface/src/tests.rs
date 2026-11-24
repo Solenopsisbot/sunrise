@@ -8,6 +8,7 @@ fn function(id: &str, refs: &[&str]) -> Function {
             signature: format!("fn {}()", leaf(id)),
             impl_generics: String::new(),
             refs: refs.iter().map(|r| r.to_string()).collect(),
+            behaviour_versions: BTreeMap::new(),
         },
     )
 }
@@ -226,6 +227,7 @@ fn the_contract_hash_leaves_out_doc_and_info_fields() {
         signature: "fn f(x: u8)".into(),
         impl_generics: String::new(),
         refs: vec![],
+        behaviour_versions: BTreeMap::new(),
     };
     let documented = Function::new("fn:f", "Does f.", contract.clone());
     let bare = Function::new("fn:g", "", contract);

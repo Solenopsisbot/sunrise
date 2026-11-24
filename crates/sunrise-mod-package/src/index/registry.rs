@@ -1,4 +1,4 @@
-//! The registry repository (`horizon-rust/horizon-mods`, docs/modding/src/reference/registry-index.md):
+//! The registry repository (`sunrise-org/sunrise-mods`, docs/modding/src/reference/registry-index.md):
 //! one `mods/<id>.toml` per project, written by the submission form or by
 //! hand and reviewed in a pull request, plus `revoked.toml`. Its CI turns
 //! them into `index.json` with [`build`], reading every listed file, and
@@ -420,8 +420,8 @@ pub struct Sources<'a> {
     pub registry: &'a Path,
     /// Every listed file, named by its SHA-256 (CI downloads them there).
     pub files: &'a Path,
-    /// Where the files are published: `<files>/<id>-<version>/<file>`
-    /// ([`super::FILE_HOST`]; `file:///` for a local test registry).
+    /// The base URL for mirrored release assets, including its trailing `/`:
+    /// [`super::FILE_HOST`] for Sunrise, or an explicit base such as `file:///` for tests.
     pub release: &'a str,
     /// Where the registry's site is (its icons): `https://.../sunrise-mods/`.
     pub site: &'a str,

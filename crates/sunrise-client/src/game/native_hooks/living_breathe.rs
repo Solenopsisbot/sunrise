@@ -96,4 +96,18 @@ impl Game<'_> {
             game.mobs.iter().any(|m| pause.still_valid(m))
         })
     }
+
+    /// A stand's breathing, as `ask_player_breath` does for a player.
+    pub(in crate::game) fn ask_stand_breath(
+        &mut self,
+        id: u32,
+        step: sunrise_client::breathing::AirStep,
+    ) -> Option<sunrise_client::breathing::Breath> {
+        let living = self.entity(id).and_then(|entity| self.living(entity))?;
+        self.ask_breath(living, step.vanilla, move |game| {
+            game.armor_stands
+                .iter()
+                .any(|a| a.id == id && a.health > 0.0 && a.air == step.air)
+        })
+    }
 }

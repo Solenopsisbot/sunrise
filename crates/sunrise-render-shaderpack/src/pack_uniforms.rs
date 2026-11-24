@@ -859,7 +859,7 @@ impl FrameUniforms {
         // match it bit for bit in our probes): fragments on a texel boundary of the shadow map
         // then read the same texel as in Iris (#8464).
         let (rotation, rotation_inverse) =
-            crate::joml::view_rotation_matrix(frame.yaw, frame.pitch);
+            crate::joml::view_rotation_matrix(frame.yaw, frame.pitch, frame.roll);
         let (view, view_inverse) = if frame.bob == Mat4::IDENTITY && frame.spin == Mat4::IDENTITY {
             (rotation, rotation_inverse)
         } else {
@@ -2899,6 +2899,7 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
             camera: glam::DVec3::new(0.5, 100.0, 0.5),
             yaw: 0.0,
             pitch: 10.0,
+            roll: 0.0,
             fov_degrees: 85.0,
             eye: glam::DVec3::ZERO,
             eye_rotation: [0.0; 2],

@@ -192,28 +192,6 @@ pub(super) fn body_no_ai(body: LivingBody<'_>) -> Option<bool> {
     }
 }
 
-/// A player's stacks in vanilla `EquipmentSlot` order, from its inventory, armour (head
-/// first) and off hand.
-fn player_equipment<'a>(
-    inventory: &'a [Option<sunrise_items::items::ItemStack>],
-    selected: usize,
-    armor: &'a [Option<sunrise_items::items::ItemStack>; 4],
-    offhand: &'a Option<sunrise_items::items::ItemStack>,
-    equipment: &'a sunrise_items::equipment::Equipment,
-) -> sunrise_client::health::PlayerEquipment<'a> {
-    use sunrise_items::equipment::{BODY, SADDLE};
-    [
-        inventory.get(selected).and_then(Option::as_ref),
-        offhand.as_ref(),
-        armor[3].as_ref(),
-        armor[2].as_ref(),
-        armor[1].as_ref(),
-        armor[0].as_ref(),
-        equipment.get(BODY),
-        equipment.get(SADDLE),
-    ]
-}
-
 /// An armor stand's body.
 pub(super) fn stand_body(a: &sunrise_client::entities::ArmorStand) -> LivingBody<'_> {
     LivingBody::Stand(FixedBody {
@@ -235,6 +213,30 @@ pub(super) fn dragon_body(d: &super::dragon::Dragon) -> LivingBody<'_> {
 }
 
 impl Game<'_> {
+    /// The guest whose entity id `id` is, when the `LivingRef` reads answer for it from its hub
+    /// record now (`Target::Guest`, not the player in place): the causing entity a hit may lend
+    /// read-only ([`HitLend::parked_guest`](sunrise_client::health::HitLend::parked_guest)).
+    /// None for anything else, so a hit's view never answers where `LivingRef` does not.
+    pub(in crate::game) fn native_parked_causer(&self, id: i32) -> Option<u32> {
+        let epoch = self.native_lifecycle.epoch()?;
+        let living =
+            mod_api::LivingRef::new(mod_api::EntityRef::new(epoch, u32::try_from(id).ok()?));
+        match self.native_living_target(living)? {
+            Target::Guest(conn) if self.lan_acting != Some(conn) => Some(conn),
+            _ => None,
+        }
+    }
+    /// The entity id `who` names as a hit's causing entity: a mob's own, the player in place's
+    /// for `Who::Player`; 0 for none.
+    pub(in crate::game) fn causer_id(&self, who: Option<sunrise_client::mobs::Who>) -> i32 {
+        match who {
+            Some(sunrise_client::mobs::Who::Mob(id)) => id as i32,
+            Some(sunrise_client::mobs::Who::Player) => {
+                self.player.as_ref().map_or(0, |p| p.entity_id)
+            }
+            None => 0,
+        }
+    }
     /// The body a living target names now, where its reads are: the player in place's own
     /// fields, a guest's hub record, a mob that is not removed, an armor stand or the dragon.
     pub(super) fn native_living_body(&self, target: Target) -> Option<LivingBody<'_>> {
@@ -247,35 +249,26 @@ impl Game<'_> {
                     health: PlayerHealthRead::Synced(&p.health.data, p.health.ids),
                     attributes: Some(&p.attributes),
                     effects: self.native_living_player_effects(target),
-                    equipment: player_equipment(
+                    equipment: sunrise_client::health::player_equipment(
                         &self.inventory,
                         self.selected,
                         &self.armor,
                         &self.offhand,
                         &self.equipment,
                     ),
+                    attachments: None,
                 })
             }
             Target::Guest(conn) => {
-                let g = self.command_guest(conn)?;
-                LivingBody::Player(PlayerBody {
-                    id: g.entity_id,
-                    uuid: None,
-                    health: PlayerHealthRead::Record {
-                        health: &g.health,
-                        body: g.motion.as_deref().map(|m| &m.health),
-                        saved_absorption: &g.saved_absorption,
-                    },
-                    attributes: g.motion.as_deref().map(|m| &m.attributes),
-                    effects: self.native_living_player_effects(target),
-                    equipment: player_equipment(
-                        &g.inventory,
-                        g.selected,
-                        &g.armor,
-                        &g.offhand,
-                        &g.equipment,
-                    ),
-                })
+                // The guest's hub record, the one read a hit's parked causer makes too; an acting
+                // guest's effects are the game's.
+                let mut body = PlayerBody::of_record(self.command_guest(conn)?);
+                body.effects = self.native_living_player_effects(target);
+                // The holder and its map are a hit's own loan; outside one the record names
+                // none, as before.
+                body.uuid = None;
+                body.attachments = None;
+                LivingBody::Player(body)
             }
             Target::Mob(id) => {
                 LivingBody::Mob(self.mobs.iter().find(|m| m.id == id && !m.removed)?)

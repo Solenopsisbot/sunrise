@@ -271,6 +271,7 @@ mod tests {
             sprite: sprite.map(Into::into),
             tint,
             world: Some(WorldFluid::default()),
+            bucket_item: None,
             measures: Default::default(),
         }
     }

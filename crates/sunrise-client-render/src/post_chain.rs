@@ -1323,7 +1323,7 @@ impl PostEffects {
             }
             // Bound only to the stages that read it: one only declared (an imported block the
             // shader doesn't use) binds nothing.
-            let stages = crate::core_shader::stages_reading(read, *binding);
+            let stages = sunrise_glsl::stages_reading(read, *binding);
             if stages.is_empty() {
                 continue;
             }
@@ -1380,7 +1380,7 @@ impl PostEffects {
             let slot = (p.inputs.iter())
                 .position(|i| i.sampler == input)
                 .ok_or_else(|| config(format!("no input for the sampler {name}")))?;
-            let stages = crate::core_shader::stages_reading(read, *texture);
+            let stages = sunrise_glsl::stages_reading(read, *texture);
             if stages.is_empty() {
                 continue;
             }

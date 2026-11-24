@@ -218,9 +218,8 @@ impl Game<'_> {
         }
     }
 
-    /// The camera part of `ServerPlayer.tick` for every guest, after the
-    /// `/spectate` requests commands queued.
-    pub(super) fn tick_guest_cameras(&mut self) {
+    /// Apply `/spectate` camera requests queued by commands and prune disconnected guests.
+    pub(super) fn apply_guest_camera_requests(&mut self) {
         for (conn, id) in std::mem::take(&mut self.cmds.camera_requests) {
             if let Some(gi) = self
                 .lan
@@ -230,43 +229,43 @@ impl Game<'_> {
                 self.guest_set_camera(gi, id);
             }
         }
-        let cameras: Vec<(u32, GuestCamera)> = self
-            .cmds
-            .guest_cameras
-            .iter()
-            .map(|(c, v)| (*c, *v))
-            .collect();
-        for (conn, camera) in cameras {
-            let Some(host) = self.lan.as_ref() else {
+        if let Some(host) = self.lan.as_ref() {
+            self.cmds
+                .guest_cameras
+                .retain(|conn, _| host.hub.guests.connection_index(*conn).is_some());
+        }
+    }
+
+    /// The camera part of `ServerPlayer.tick` for one guest `conn`.
+    pub(super) fn tick_guest_camera_one(&mut self, conn: u32) {
+        let Some(camera) = self.cmds.guest_cameras.get(&conn).copied() else {
+            return;
+        };
+        let Some(host) = self.lan.as_ref() else {
+            return;
+        };
+        let Some(gi) = host.hub.guests.connection_index(conn) else {
+            self.cmds.guest_cameras.remove(&conn);
+            return;
+        };
+        let g = &host.hub.guests[gi];
+        let state = self.camera_state(camera.id);
+        if camera_ends(
+            state.is_some(),
+            g.sneaking,
+            g.spectator(),
+            g.teleport_counter != camera.teleports,
+        ) {
+            self.guest_set_camera(gi, None);
+        } else if let Some((at, [yaw, pitch])) = state {
+            // absSnapTo; the level's chunk source follows the player.
+            let Some(host) = self.lan.as_mut() else {
                 return;
             };
-            let Some(gi) = host.hub.guests.iter().position(|g| g.conn == conn) else {
-                self.cmds.guest_cameras.remove(&conn);
-                continue;
-            };
-            // A mod canceled this player's ServerPlayer.tick: its camera stays as it is.
-            if self.player_tick_canceled(conn) {
-                continue;
-            }
-            let g = &host.hub.guests[gi];
-            let state = self.camera_state(camera.id);
-            if camera_ends(
-                state.is_some(),
-                g.sneaking,
-                g.spectator(),
-                g.teleport_counter != camera.teleports,
-            ) {
-                self.guest_set_camera(gi, None);
-            } else if let Some((at, [yaw, pitch])) = state {
-                // absSnapTo; the level's chunk source follows the player.
-                let Some(host) = self.lan.as_mut() else {
-                    return;
-                };
-                host.hub.guests.update(gi, |g| {
-                    g.position = at;
-                    (g.yaw, g.pitch) = (yaw, pitch);
-                });
-            }
+            host.hub.guests.update(gi, |g| {
+                g.position = at;
+                (g.yaw, g.pitch) = (yaw, pitch);
+            });
         }
     }
 }

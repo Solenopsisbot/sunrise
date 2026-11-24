@@ -321,6 +321,29 @@ impl Renderer {
                     &mesh.translucent_sources,
                 );
         }
+        // The normal stream beside the vertices, where the pack's per-section draws read one.
+        // Never beside compact records: no per-section pack draw reads them
+        // (`follow_packed_layout`).
+        let mut normal_bytes = 0;
+        if !packed {
+            let uploads = &mut self.section_uploads;
+            normal_bytes += self
+                .arena
+                .write_normals(encoder, uploads, (page, start), &mesh.solid);
+        }
+        normal_bytes += self
+            .translucent_arena
+            .as_mut()
+            .unwrap_or(&mut self.arena)
+            .write_normals(
+                encoder,
+                &mut self.section_uploads,
+                translucent_at,
+                &mesh.translucent,
+            );
+        // The stream's bytes count toward the submission threshold as the vertices' do.
+        self.uploaded_bytes += normal_bytes;
+        self.section_copy_bytes += normal_bytes;
         let translucent_arena = self.translucent_arena.as_ref().unwrap_or(&self.arena);
         let solid_bytes: &[u8] = if packed {
             bytemuck::cast_slice(&mesh.packed)
@@ -419,6 +442,19 @@ impl Renderer {
         page: &dyn Fn(&mut wgpu::RenderPass<'_>, u32),
     ) {
         self.draw_sections_with(pass, indirect, 0, first..first + count, false, page);
+    }
+    /// The normal stream of the arena page a run's `key` names (`draw_sections_paged`): the
+    /// translucent arena's past `flat::TRANSLUCENT_KEYS`, as far as its vertices are bound.
+    /// Only while the arenas keep one (`follow_arena_layout`).
+    pub(super) fn normals_binding(&self, key: u32) -> wgpu::BufferSlice<'_> {
+        let normals = match (
+            &self.translucent_arena,
+            key.checked_sub(flat::TRANSLUCENT_KEYS),
+        ) {
+            (Some(arena), Some(page)) => arena.normals_binding(page),
+            _ => self.arena.normals_binding(key),
+        };
+        normals.expect("every page has a normal stream while a pack reads it")
     }
     /// `draw_sections` through the solid pipelines that read the arena page themselves
     /// (`vs_section`): each page's group is bound as their group 1.
@@ -927,17 +963,27 @@ impl Renderer {
     /// the game meshes them again (`take_dropped_sections`).
     pub(super) fn follow_translucent_layout(&mut self) {
         let pack = self.pack_post.as_ref().and_then(|p| p.1.as_ref());
+        let pending = self.pack_pending().unwrap_or_default();
         let split = translucent_split(
             self.translucent_batching,
             self.flat.is_some() && self.flat_on,
             self.pack_reads_pages(),
-            pack.is_some_and(|p| p.has_terrain()),
+            // A pack still building draws what its programs will (`pack_pending`).
+            pending.terrain || pack.is_some_and(|p| p.has_terrain()),
             // One of Sunrise's own packs with `[shadow]` draws from the same lists (`shadow_view`).
-            pack.is_some_and(|p| p.has_shadow()) || self.native_shadow(),
+            pending.shadow || pack.is_some_and(|p| p.has_shadow()) || self.native_shadow(),
         );
         if split == self.translucent_arena.is_some() {
             return;
         }
+        log::info!(
+            "Sunrise: terrain laid out again: translucent quads {}",
+            if split {
+                "in an arena of their own"
+            } else {
+                "in the section arena"
+            }
+        );
         self.sections_dropped |=
             self.sections.len() > 0 || !self.lods.is_empty() || self.lod_pending.is_some();
         self.clear_sections(self.layout);
@@ -946,6 +992,7 @@ impl Renderer {
             std::mem::size_of::<TerrainVertex>() as u64,
             self.flat.is_some(),
             split,
+            self.arena.has_normals(),
         );
         if let (Some(flat), Some(arena)) = (&mut self.flat, &self.translucent_arena) {
             flat.set_translucent_page_vertices(arena.page_vertices());
@@ -963,38 +1010,92 @@ impl Renderer {
             self.graveyard.add(released);
         }
     }
+    /// What a `shaders/` pack being built (`load_shader_pack`) and not yet run
+    /// (`poll_shader_pack`) will draw from the game's sections (`PackLoading::draws_of`); `None`
+    /// with none. The layouts the sections are in (`follow_arena_layout`,
+    /// `follow_translucent_layout`, `follow_packed_layout`) take such a pack as present, drawing
+    /// that, with its terrain drawn as `pack_terrain_inputs` decided for it: the frames drawn
+    /// meanwhile keep the layout it will draw in rather than drop the sections for the frames
+    /// without it and again once it runs.
+    pub(super) fn pack_pending(&self) -> Option<PackDraws> {
+        self.pack_loading.as_ref().map(|l| l.draws)
+    }
+    /// Whether a `shaders/` pack, running or being built (`pack_pending`), has programs that
+    /// draw the game's sections (`PackPost::draws_sections`): a pack with none, one of
+    /// `composite` and `final` programs alone, reads no pages and no stream.
+    fn pack_draws_sections(&self) -> bool {
+        let pack = self.pack_post.as_ref().and_then(|p| p.1.as_ref());
+        self.pack_pending().is_some_and(|d| d.sections) || pack.is_some_and(|p| p.draws_sections())
+    }
     /// Whether a `shaders/` pack's terrain or shadow programs read the section arena's pages in
     /// per-section draws (`pack_atlas::TerrainDraws::Pages`).
     pub(super) fn pack_reads_pages(&self) -> bool {
-        let pack = self.pack_post.as_ref().and_then(|p| p.1.as_ref());
-        self.pack_terrain_draws() == pack_atlas::TerrainDraws::Pages
-            && pack.is_some_and(|p| p.has_terrain() || p.has_shadow())
+        self.pack_terrain_draws() == pack_atlas::TerrainDraws::Pages && self.pack_draws_sections()
+    }
+    /// Whether a `shaders/` pack's terrain or shadow programs read the normal stream in
+    /// per-section draws (`pack_atlas::TerrainDraws::Normals`).
+    pub(super) fn pack_reads_normals(&self) -> bool {
+        self.pack_terrain_draws() == pack_atlas::TerrainDraws::Normals && self.pack_draws_sections()
     }
     /// Makes the section arena's pages storage, or not, as `arena_storage` says for the shader
-    /// pack that runs, before a world frame draws them. A change drops every section and far
-    /// tile, as a new renderer has none: the game meshes them again (`take_dropped_sections`).
-    pub(super) fn follow_arena_storage(&mut self) {
+    /// pack that runs, and gives its pages and the translucent arena's a normal stream while
+    /// that pack's per-section draws read one (`pack_reads_normals`), before a world frame draws
+    /// them. A change drops every section and far tile, as a new renderer has none: the game
+    /// meshes them again (`take_dropped_sections`).
+    pub(super) fn follow_arena_layout(&mut self) {
         let storage = arena_storage(self.flat.is_some(), self.pack_reads_pages());
-        if storage == self.arena_storage {
+        let normals = self.pack_reads_normals();
+        let normals_changed = normals != self.arena.has_normals();
+        if storage == self.arena_storage && !normals_changed {
             return;
         }
+        log::info!(
+            "Sunrise: terrain laid out again: section pages {}, normal stream {}",
+            if storage {
+                "storage"
+            } else {
+                "vertex buffers alone"
+            },
+            if normals { "on" } else { "off" }
+        );
         self.sections_dropped |=
             self.sections.len() > 0 || !self.lods.is_empty() || self.lod_pending.is_some();
         self.clear_sections(self.layout);
+        // Flat draws read the new arena's quad sources as they did the old one's
+        // (`keep_pack_sources`).
+        let sources_read = self.arena.sources_read();
         self.arena = arena::Arena::new(
             &self.device,
             std::mem::size_of::<TerrainVertex>() as u64,
             1 << 20,
             storage,
-        );
+        )
+        .with_normals(normals);
+        if sources_read {
+            self.arena.read_sources(true);
+        }
         self.arena_storage = storage;
+        if normals_changed && self.translucent_arena.is_some() {
+            (self.sorted_indices, self.translucent_arena) = arena::Arena::translucent_arenas(
+                &self.device,
+                std::mem::size_of::<TerrainVertex>() as u64,
+                self.flat.is_some(),
+                true,
+                normals,
+            );
+            if let (Some(flat), Some(arena)) = (&mut self.flat, &self.translucent_arena) {
+                flat.set_translucent_page_vertices(arena.page_vertices());
+            }
+        }
     }
     /// Uploads solid quads in the compact layout (`packed_quads`) unless a pack reads the
     /// arena's vertices as `TerrainVertex`es: a `shaders/` pack's terrain and shadow
     /// programs outside flat draws (flat ones unpack the records, `pack_atlas::PULL_FLAT`).
     /// Leaving it drops every section and far tile for the game to mesh again.
     pub(super) fn follow_packed_layout(&mut self) {
-        let pack = self.pack_post.as_ref().and_then(|p| p.1.as_ref()).is_some();
+        // Any pack, a post-only one too, as once it runs; one still building counts.
+        let pack = self.pack_pending().is_some()
+            || self.pack_post.as_ref().and_then(|p| p.1.as_ref()).is_some();
         let want = self.flat.is_some() && (!pack || self.pack_terrain_flat) && self.packed_on;
         if want == self.packed_quads {
             return;

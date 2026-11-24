@@ -25,8 +25,22 @@ pub const MAX_INDEX: u64 = 16 << 20;
 pub const MAX_FILE: u64 = 64 << 20;
 /// The biggest native binary build ID, in bytes.
 pub const MAX_NATIVE_BUILD: usize = 128;
-/// Where files may be downloaded from: the registry's release assets.
-pub const FILE_HOST: &str = "https://github.com/horizon-rust/horizon-mods/releases/download/";
+
+// The GitHub API takes the repository slug; the index needs the full download prefix.
+macro_rules! registry_repo {
+    () => {
+        "sunrise-org/sunrise-mods"
+    };
+}
+
+/// The default GitHub repository for the registry's staging and published releases.
+pub const REGISTRY_REPO: &str = registry_repo!();
+/// The default base URL for mirrored packages and native binaries.
+pub const FILE_HOST: &str = concat!(
+    "https://github.com/",
+    registry_repo!(),
+    "/releases/download/"
+);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Index {

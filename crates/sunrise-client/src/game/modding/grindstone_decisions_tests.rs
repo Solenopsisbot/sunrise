@@ -864,15 +864,15 @@ fn place_only_take_awards_xp_and_event_before_replacing_inputs() {
             event: &mut GrindstonePlaceEvent<'_>,
         ) -> mod_api::Flow {
             let at = event.pos.map(f64::from);
-            let orb_xp: i64 = host
-                .experience_orbs(
-                    "minecraft:overworld",
-                    at.map(|v| v - 3.0),
-                    at.map(|v| v + 4.0),
-                )
-                .iter()
-                .map(|orb| i64::from(orb.value) * i64::from(orb.count))
-                .sum();
+            let mut orb_xp = 0;
+            let level = host.level("minecraft:overworld").unwrap();
+            let _ = level
+                .visit_experience_orbs(host, at.map(|v| v - 3.0), at.map(|v| v + 4.0), &mut |orb| {
+                    orb_xp +=
+                        i64::from(orb.value(host).unwrap()) * i64::from(orb.count(host).unwrap());
+                    core::ops::ControlFlow::Continue(())
+                })
+                .unwrap();
             self.seen.lock().unwrap().push((
                 event.inputs.top.map(mod_api::ItemStack::count),
                 event.inputs.bottom.map(mod_api::ItemStack::count),

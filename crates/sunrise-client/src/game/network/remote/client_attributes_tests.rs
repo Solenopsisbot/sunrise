@@ -7,6 +7,8 @@
 #[ignore = "daily"]
 fn update_attributes_answers_the_local_players_living_reads() {
     use crate::game::native_entity_refs::tests::with_client_game;
+    use mod_api::{AttributeOperation, EntityReadError};
+    use std::ops::ControlFlow;
     use sunrise_client::{mobs::Mob, motion::PlayerMotion};
     use sunrise_core::geometry::Vec3;
     use sunrise_protocol::{
@@ -55,7 +57,12 @@ fn update_attributes_answers_the_local_players_living_reads() {
         // Before the server says anything, the client's own map holds the
         // type's defaults, as a vanilla client's does before its sync.
         assert_eq!(living.attribute_value(game, health), Some(20.0));
-        assert_eq!(living.attribute_modifiers(game, health), Some(Vec::new()));
+        assert_eq!(
+            living.visit_attribute_modifiers(game, health, &mut |_| panic!(
+                "default modifier visited"
+            )),
+            Ok(ControlFlow::Continue(()))
+        );
 
         let registry_id = game.motion.attributes.id(health).unwrap().registry_id();
         let packet = C::UpdateAttributes(play::UpdateAttributes {
@@ -78,23 +85,43 @@ fn update_attributes_answers_the_local_players_living_reads() {
 
         assert_eq!(living.attribute_value(game, health), Some(35.0));
         assert_eq!(living.attribute_base(game, health), Some(30.0));
+        let mut modifiers = Vec::new();
         assert_eq!(
-            living.attribute_modifiers(game, health),
-            Some(vec![mod_api::AttributeModifier::new(
-                mod_api::Identifier::parse("test:bonus").unwrap(),
-                5.0,
-                mod_api::AttributeOperation::AddValue,
-            )])
+            living.visit_attribute_modifiers(game, health, &mut |m| {
+                modifiers.push((m.id.to_owned(), m.amount, m.operation));
+                ControlFlow::Continue(())
+            }),
+            Ok(ControlFlow::Continue(()))
         );
-        let listed = living.attributes(game).unwrap();
-        assert!(listed.contains(&mod_api::Identifier::parse(health).unwrap()));
+        assert_eq!(
+            modifiers,
+            [("test:bonus".to_owned(), 5.0, AttributeOperation::AddValue)]
+        );
+        assert_eq!(
+            living.visit_attributes(game, &mut |name| {
+                if name == health {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            }),
+            Ok(ControlFlow::Break(()))
+        );
 
         // The mob's attributes are the server's business: no client state,
         // no read.
         let mob = mod_api::LivingRef::new(game.entity(60).unwrap());
         assert_eq!(mob.attribute_value(game, health), None);
         assert_eq!(mob.attribute_base(game, health), None);
-        assert_eq!(mob.attribute_modifiers(game, health), None);
-        assert_eq!(mob.attributes(game), None);
+        assert_eq!(
+            mob.visit_attribute_modifiers(game, health, &mut |_| panic!(
+                "client mob modifier visited"
+            )),
+            Err(EntityReadError::Unavailable)
+        );
+        assert_eq!(
+            mob.visit_attributes(game, &mut |_| panic!("client mob attribute visited")),
+            Err(EntityReadError::Unavailable)
+        );
     });
 }

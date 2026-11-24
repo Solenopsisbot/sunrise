@@ -35,6 +35,7 @@ impl PlayerMotion {
             piston: Default::default(),
             yaw: 0.0,
             head_yaw: 0.0,
+            body_yaw: 0.0,
             jumping: false,
             no_jump_delay: 0,
             jump_trigger_time: 0,

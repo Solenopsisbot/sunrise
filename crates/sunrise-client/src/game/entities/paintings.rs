@@ -201,8 +201,7 @@ impl Game<'_> {
             (lo[1] + hi[1]) / 2.0,
             (lo[2] + hi[2]) / 2.0,
         ];
-        self.audio
-            .play("minecraft:entity.painting.place", Some(at), 1.0, 1.0);
+        self.play_audio("minecraft:entity.painting.place", Some(at), 1.0, 1.0);
         // HangingEntityItem.useOn: ENTITY_PLACE at the painting, by the player, before it is
         // added; ItemStack.useOn then counts the use.
         let ctx = self.player_context(None);
@@ -312,8 +311,7 @@ impl Game<'_> {
         {
             return;
         }
-        self.audio
-            .play("minecraft:entity.painting.break", Some(at), 1.0, 1.0);
+        self.play_audio("minecraft:entity.painting.break", Some(at), 1.0, 1.0);
         if creative {
             return;
         }

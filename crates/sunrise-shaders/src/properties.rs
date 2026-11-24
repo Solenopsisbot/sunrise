@@ -3,7 +3,8 @@
 //! continuing a value on the next line, and conditional directives evaluated with the
 //! standard and option macros (1.5 item 2). `#define` and `#undef` work in every one of them:
 //! a public pack defines a macro in its `shaders.properties` and tests it further down. The
-//! lines of custom uniforms and variables (`uniform.*`, `variable.*`) have those macros expanded.
+//! lines of custom uniforms and variables (`uniform.*`, `variable.*`) have those macros expanded,
+//! and so do the values of buffer and image sizes (`size.buffer.*`, `image.*`).
 //! No other escape is read: values are names, numbers and expressions. A later duplicate key
 //! replaces the earlier one, with a note.
 
@@ -79,6 +80,12 @@ impl Properties {
                     // file's own `#define`s, in the name too.
                     if key.starts_with("uniform.") || key.starts_with("variable.") {
                         key = macros.expand(&key).trim().to_owned();
+                        value = macros.expand(&value).trim().to_owned();
+                    }
+                    // A buffer's or an image's sizes may be macros the file defines above it
+                    // (spec 1.5 item 2, 6.1.2, 6.5): its value is expanded with the macros of its
+                    // line. The name stays as the pack wrote it.
+                    if key.starts_with("image.") || key.starts_with("size.buffer.") {
                         value = macros.expand(&value).trim().to_owned();
                     }
                     out.insert(Entry {

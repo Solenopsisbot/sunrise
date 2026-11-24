@@ -178,7 +178,7 @@ fn drain_sent_abilities(game: &Game<'_>, peer: &mut ConnReader) -> Vec<bool> {
 }
 
 fn run_local_tick(game: &mut Game<'_>) {
-    game.tick_local_player(Vec::new(), 7).unwrap();
+    game.tick_local_player(Vec::new(), 7, None).unwrap();
 }
 
 fn player_info_mode_name(game: &Game<'_>) -> Option<&'static str> {

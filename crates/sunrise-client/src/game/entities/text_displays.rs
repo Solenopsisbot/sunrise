@@ -967,38 +967,17 @@ impl Game<'_> {
             return;
         }
         let mut round = self.native_tick_round();
-        if !round.listening() {
+        if !round.told_listening() {
             for id in eligible {
                 self.count_client_tick(id as u32);
                 self.tick_and_file_display(id);
             }
             return;
         }
-        let mut alone = Vec::new();
-        let mut batch = Vec::new();
         for id in eligible {
-            let Some(display) = self.text_displays.get(&id) else {
+            let Some(kind) = self.text_displays.get(&id).map(|d| d.shows.kind()) else {
                 continue;
             };
-            if round.alone_kind(display.shows.kind()) {
-                alone.push((id, display.shows.kind()));
-            } else {
-                round.add(
-                    id as u32,
-                    super::native_ticks::TickKind::Fixed(display.shows.kind()),
-                );
-                batch.push(id);
-            }
-        }
-        self.native_tick_pre_batch(&mut round);
-        for id in batch {
-            let ticks = !round.canceled(id as u32);
-            self.count_told_client_tick(id as u32, ticks);
-            if ticks {
-                self.tick_and_file_display(id);
-            }
-        }
-        for (id, kind) in alone {
             // A passenger's ride visit counts it before its own Pre.
             let passenger = self.client_passenger(id as u32);
             if passenger {
@@ -1012,7 +991,6 @@ impl Game<'_> {
                 self.native_tick_post_one(&round, id as u32, kind);
             }
         }
-        self.native_tick_post_batch(round);
     }
     /// Active render `Camera` yaw and pitch (`DisplayRenderer.extractRenderState`), sharing the
     /// same camera source of truth as `particle_rotation` (`ThirdPersonFront` already baked in).
@@ -1020,9 +998,9 @@ impl Game<'_> {
         if self.studio.flying() {
             return [self.studio.freecam.yaw, self.studio.freecam.pitch];
         }
-        let (yaw, pitch) = self
-            .posed_rotation
-            .unwrap_or((self.view.y_rot, self.view.x_rot));
+        let (yaw, pitch, _) =
+            self.posed_rotation
+                .unwrap_or((self.view.y_rot, self.view.x_rot, 0.0));
         [yaw, pitch]
     }
     /// `DisplayRenderer.getBlockLightLevel` and `getSkyLightLevel`: the
@@ -1549,18 +1527,26 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn handle_teleport_keeps_display_easing() {
-        use crate::game::{commands::OtherEntity, native_entity_refs::tests::with_game};
+        use crate::game::{
+            commands::OtherEntity,
+            native_entity_refs::tests::{fixture_resident_column, with_game},
+        };
         use sunrise_core::geometry::Vec3;
-        use sunrise_core::nbt::{Compound, Tag};
+        use sunrise_core::nbt::Tag;
 
         with_game(|game| {
+            fixture_resident_column(&mut game.world, (0, 0));
+            let tag = Tag::compound([("teleport_duration", Tag::Int(4))]);
+            let display = game
+                .read_display_nbt("minecraft:text_display", &tag)
+                .map(std::sync::Arc::new);
             game.others.push(OtherEntity {
                 size_answer: None,
                 attachment_lifetime: Default::default(),
                 knot_check: None,
                 eye: None,
                 join: Default::default(),
-                item_transformation: None,
+                display,
                 interaction: None,
                 id: 12,
                 kind: "minecraft:text_display".into(),
@@ -1568,13 +1554,15 @@ mod tests {
                 yaw: 0.0,
                 pitch: 0.0,
             });
-            let mut tag = Compound::new();
-            tag.insert("teleport_duration".into(), Tag::Int(4));
-            game.persist.raw.insert(12, Tag::Compound(tag));
             let entity = game.entity(12).unwrap();
             assert!(entity.teleport_to(game, [8.0, 0.0, 0.0], None));
-            let metadata =
-                sunrise_client::text_display::display_data(&game.persist.raw[&12], false);
+            let mut metadata = Vec::new();
+            game.others[0].display.as_ref().unwrap().append_metadata(
+                None,
+                false,
+                |_| None,
+                &mut metadata,
+            );
             let mut client = RemoteTextDisplay::new(Shows::Text, [0.0; 3], 0.0);
             client.metadata(&metadata);
             client.move_to(entity.position(game).unwrap(), None);

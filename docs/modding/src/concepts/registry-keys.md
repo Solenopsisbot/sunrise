@@ -113,15 +113,17 @@ numeric widths and typed-array identity and can refuse values it cannot represen
 | `Suggestion` | A completion and its byte range in the input. |
 | `Block`, `Item` | Registration declarations; `None` in a component patch removes that component. |
 | `BlockEntityTypeDecl` | A block entity type declaration, not a resident entity. |
-| `GuiDraw` | A command buffer; an invalid operation refuses the buffer rather than drawing it in part. |
+| `GuiBlitRegion`, `GuiSpriteRegion` | In-process source regions for [canvas blits](../how-to/client/gui-paint.md#blits), not serialized draw commands. A refused call leaves earlier draws intact; return its `GuiDrawError` from the drawing callback to discard the group. |
 
 ## Fluids and effects
 
 Tank-only fluids have keys but no world state. For a fluid that flows, declare a world fluid with
 its block, flowing form and bucket supplied by the game. See [Content mods](../how-to/content-mods.md)
 for both declaration forms and [Block fluids](capabilities/block-fluids.md) for tank behaviour. A
-saved tank can retain an unresolved fluid's name without inventing a key or admitting it to vanilla
-storage. Active effects use `EffectKey`, not an enchantment effect-component name or a tag string.
+saved tank whose fluid's mod is absent retains its saved name as an `UnresolvedFluid`, without inventing a
+key or admitting it to vanilla storage: its stack's `key()` is `None`, `UnresolvedFluid::id()` borrows the
+name, and a payload sends the name, which the receiving game refuses when it has registered it. Active
+effects use `EffectKey`, not an enchantment effect-component name or a tag string.
 
 ## Where to go next
 

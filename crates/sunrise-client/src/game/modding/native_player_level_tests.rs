@@ -195,11 +195,11 @@ impl mod_api::Hooks for GiveJoin {
         if event.kind == "minecraft:item" && !event.loaded_from_disk {
             assert_eq!(event.dimension, NETHER);
             let item = host
-                .item_entity(host.entity(event.entity).unwrap())
+                .item_entity(host.entity(event.subject.id()).unwrap())
                 .unwrap();
             assert_eq!(item.pickup_delay(host), Some(0));
             assert_eq!(item.target(host), Some(13));
-            self.0.lock().unwrap().push(event.entity);
+            self.0.lock().unwrap().push(event.subject.id());
         }
         mod_api::Flow::Continue
     }

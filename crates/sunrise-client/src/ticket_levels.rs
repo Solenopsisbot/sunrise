@@ -411,6 +411,11 @@ impl Levels {
         self.get(x, z)
             .is_none_or(|(loading, _)| loading <= ENTITY_TICKING)
     }
+    /// `ChunkHolder.getFullStatus` is at least `FULL` (loading level `<= 33`).
+    #[inline]
+    pub fn loaded_full(&self, x: i32, z: i32) -> bool {
+        self.get(x, z).is_none_or(|(l, _)| l <= FULL)
+    }
     /// `ChunkHolder.getFullStatus` is block ticking or more: the chunk's
     /// ticking future can complete (its saved ticks unpack then).
     #[inline]
@@ -477,6 +482,7 @@ impl ChunkTickets {
             s.players.dedup();
             s.forced.sort_unstable();
             s.viewed.sort_unstable();
+            s.viewed.dedup();
             s.portal = self.portal.iter().map(|t| (t.chunk, t.level)).collect();
             s.portal.sort_unstable();
             s.spawn = self.spawn_areas().collect();

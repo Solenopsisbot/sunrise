@@ -232,8 +232,9 @@ impl Game<'_> {
     }
     /// The renderer a mod registered for `mob`'s type (`register_entity_renderers`), drawn in place
     /// of its model and its vanilla layers, from a draw at its feet, not turned: true when it
-    /// drew. False when none is registered for the type, and when it fails this frame (then it is
-    /// asked no more until resources reload): the type draws its own model.
+    /// drew. False when none is registered for the type, when it returns an `Err` for this draw
+    /// (it stays active for later draws), or when it has been disabled for the session after a
+    /// panic: the type draws its own model.
     pub(super) fn mod_living_renderer_geometry(
         &self,
         mob: &Mob,
@@ -338,6 +339,10 @@ impl Game<'_> {
             mob_pose(feet - camera, render.body_yaw),
             diffuse_lights(self.nether_lighting()),
             std::mem::take(out),
+        )
+        .with_quad_budget(
+            self.entity_quad_capacity(),
+            self.entity_batch_reserved_quads(),
         )
         .animated(self.animation_time());
         hook(&render, &mut draw);

@@ -199,9 +199,11 @@ impl sunrise_world::level::LevelAccess for DryLevel<'_> {
         {
             let source = match source {
                 // Block-use prediction already plays uncategorized sounds on Blocks.
-                None | Some(sunrise_world::level::LevelSoundSource::Blocks) => {
-                    mod_api::SoundSource::Blocks
-                }
+                None
+                | Some(
+                    sunrise_world::level::LevelSoundSource::Blocks
+                    | sunrise_world::level::LevelSoundSource::BlockPlacement { .. },
+                ) => mod_api::SoundSource::Blocks,
             };
             self.sounds.push((pos, sound, source, volume, pitch));
         }

@@ -86,7 +86,7 @@ fn every_accepted_hurt_counts_for_its_own_attacker() {
             game.mobs.push(Mob::new(id, kind.clone(), at, 0.0));
         }
         game.persist.uuids.insert(92, [0, 0, 0, 4]);
-        game.native_mobs_joined(0, false);
+        game.admit_new_mobs(0);
         game.player = Some(sunrise_client::motion::PlayerMotion::new(game.motion, at).unwrap());
         let player_hit = |game: &mut Game<'_>, uuid, amount| {
             bind_local_player(game, 300, uuid);
@@ -166,7 +166,7 @@ fn two_hits_of_a_mob_without_uuid_share_one() {
             target.no_gravity = true;
             game.mobs.push(target);
         }
-        game.native_mobs_joined(0, false);
+        game.admit_new_mobs(0);
         let uuid = game.persist.uuids[&90];
         game.tick_creature_entities().unwrap();
         assert_eq!(game.persist.uuids[&90], uuid);
@@ -196,7 +196,7 @@ fn hurt_gossip_belongs_to_the_hits_own_player() {
             .clone();
         let at = Vec3::new(1.0, 100.0, 1.0);
         game.mobs.push(Mob::new(91, kind, at, 0.0));
-        game.native_mobs_joined(0, false);
+        game.admit_new_mobs(0);
         game.player = Some(sunrise_client::motion::PlayerMotion::new(game.motion, at).unwrap());
         bind_local_player(game, 301, 9);
         game.lan_acting = Some(7);

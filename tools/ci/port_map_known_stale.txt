@@ -157,7 +157,6 @@ tools/port_map/game-003.tsv	ClockTimeMarker.occursAt	crates/sunrise-client/src/g
 tools/port_map/game-003.tsv	ClockTimeMarker.resolveTimeToMoveTo	crates/sunrise-client/src/game/interface/chat.rs::TimeMarker::resolve
 tools/port_map/game-003.tsv	ServerClockManager.getInstance	crates/sunrise-client/src/game/administration/commands/mod.rs::Game::command_clock_time
 tools/port_map/game-003.tsv	ServerPlayerGameMode.destroyAndAck	crates/sunrise-client/src/game/network/lan_actions/mod.rs::Game::lan_guest_packet
-tools/port_map/game-004.tsv	Display.setTransformation	crates/sunrise-client/src/game/modding/native_entities.rs::Game::native_set_display
 tools/port_map/game-004.tsv	InfestedMobEffect.spawnSilverfish	crates/sunrise-client/src/game/items/potions.rs::Game::infested_hurt
 tools/port_map/game-004.tsv	MobEffectInstance.onMobHurt	crates/sunrise-client/src/game/items/potions.rs::Game::infested_hurt
 tools/port_map/game-005.tsv	Entity.canCollideWith	crates/sunrise-client/src/game/mobs/ghasts.rs::Game::player_entity_collisions

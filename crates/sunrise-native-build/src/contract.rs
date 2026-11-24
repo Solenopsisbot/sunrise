@@ -324,7 +324,6 @@ fn code_links(
         .map(|(bundle, deps)| dependencies::Mod {
             id: &bundle.manifest.id,
             version: &bundle.manifest.version,
-            has_api: true,
             code: true,
             dependencies: deps,
         })
@@ -398,7 +397,11 @@ fn compile(
             say(question).is_ok() && answer(&mut **asked.borrow_mut())
         })
     };
-    let (binary, libraries) = prebuilt::compile(
+    let prebuilt::Built {
+        binary,
+        libraries,
+        catalog,
+    } = prebuilt::compile(
         &plan.toolchain,
         &plan.package,
         &crate::root().join("prebuilt-build"),
@@ -418,7 +421,6 @@ fn compile(
         false,
     )?
     .expect("build mode returns artifacts");
-    let catalog = crate::internals::Catalog::read(&plan.package.api)?;
     let mut internals = BTreeMap::new();
     for &index in &resolution.order {
         let manifest = &mods[index].manifest;

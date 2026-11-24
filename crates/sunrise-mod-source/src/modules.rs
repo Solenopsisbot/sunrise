@@ -2,13 +2,17 @@
 //! is compiled under, following `mod` declarations, `#[path]`s, inline modules and literal
 //! item-position `include!`s.
 
-use proc_macro2::{TokenStream, TokenTree};
-use quote::ToTokens;
+use proc_macro2::TokenStream;
+use quote::{ToTokens, quote};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-use syn::{Item, Meta, Token, parse::ParseStream, punctuated::Punctuated};
+use syn::{
+    Item, Meta, Token,
+    parse::{Parse, ParseStream, Parser},
+    punctuated::Punctuated,
+};
 
 /// A source file of a crate, with its module path and the `cfg`s it is compiled under.
 #[derive(Clone)]
@@ -28,60 +32,208 @@ pub struct ModuleVariant {
     pub inline: Vec<usize>,
 }
 
-/// The `cfg` conditions in `attrs`, including conditional `cfg` attributes, except test-only gates.
-pub fn conditions(attrs: &[syn::Attribute]) -> Vec<String> {
-    cfg_conditions(attrs)
-        .into_iter()
-        .filter(|condition| !disabled_without_tests(condition))
-        .collect()
+/// A normalized Rust cfg predicate. Both attribute extraction and stored module predicates use
+/// this parser, and emitted cfg attributes quote the same tree.
+#[derive(Clone)]
+pub struct Cfg {
+    predicate: Predicate,
+    // Guarded rows in the internal catalog are keyed by their written predicates. Preserve
+    // their spelling even when the emitter no longer needs the insignificant punctuation.
+    written: String,
 }
 
-/// The `cfg` conditions as predicates; a conditional attribute takes effect only under its guard.
-pub fn cfg_conditions(attrs: &[syn::Attribute]) -> Vec<String> {
+#[derive(Clone)]
+enum Predicate {
+    Bool(bool),
+    All(Vec<Cfg>),
+    Any(Vec<Cfg>),
+    Not(Box<Cfg>),
+    Atom(Meta),
+}
+
+impl Parse for Cfg {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        if input.peek(syn::LitBool) {
+            let value = input.parse::<syn::LitBool>()?.value;
+            return Ok(Self {
+                predicate: Predicate::Bool(value),
+                written: value.to_string(),
+            });
+        }
+        let meta: Meta = input.parse()?;
+        let written = meta.to_token_stream().to_string();
+        let predicate = match &meta {
+            Meta::List(list) if list.path.is_ident("all") || list.path.is_ident("any") => {
+                let args = list.parse_args_with(Punctuated::<Self, Token![,]>::parse_terminated)?;
+                if list.path.is_ident("all") {
+                    Predicate::All(args.into_iter().collect())
+                } else {
+                    Predicate::Any(args.into_iter().collect())
+                }
+            }
+            Meta::List(list) if list.path.is_ident("not") => {
+                Predicate::Not(Box::new(list.parse_args_with(cfg_arg)?))
+            }
+            _ => Predicate::Atom(meta),
+        };
+        Ok(Self { predicate, written })
+    }
+}
+
+impl ToTokens for Cfg {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        tokens.extend(match &self.predicate {
+            Predicate::Bool(value) => quote!(#value),
+            Predicate::All(args) => quote!(all(#(#args),*)),
+            Predicate::Any(args) => quote!(any(#(#args),*)),
+            Predicate::Not(arg) => quote!(not(#arg)),
+            Predicate::Atom(meta) => meta.to_token_stream(),
+        });
+    }
+}
+
+impl Cfg {
+    fn all_guards(guards: &[Self]) -> Self {
+        let text = guards
+            .iter()
+            .map(|guard| guard.written.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Self {
+            written: format!("all({text})"),
+            predicate: Predicate::All(guards.to_vec()),
+        }
+    }
+
+    /// Evaluate the predicate with the given cfg facts. An unknown atom matters only if neither
+    /// `all` nor `any` can decide without it.
+    pub fn evaluate(&self, mut atom: impl FnMut(&str) -> Option<bool>) -> Option<bool> {
+        fn eval(cfg: &Cfg, atom: &mut impl FnMut(&str) -> Option<bool>) -> Option<bool> {
+            match &cfg.predicate {
+                Predicate::Bool(value) => Some(*value),
+                Predicate::Not(arg) => eval(arg, atom).map(|value| !value),
+                Predicate::Atom(meta) => atom(&atom_key(meta)),
+                Predicate::All(args) | Predicate::Any(args) => {
+                    let all = matches!(&cfg.predicate, Predicate::All(_));
+                    let mut unknown = false;
+                    for arg in args {
+                        match eval(arg, atom) {
+                            Some(value) if value != all => return Some(value),
+                            Some(_) => {}
+                            None => unknown = true,
+                        }
+                    }
+                    (!unknown).then_some(all)
+                }
+            }
+        }
+        eval(self, &mut atom)
+    }
+
+    /// Whether the predicate is false without `test`, regardless of other build options.
+    pub fn disabled_without_tests(&self) -> bool {
+        self.evaluate(|atom| (atom == "test").then_some(false)) == Some(false)
+    }
+}
+
+/// Parse one predicate from a cfg attribute or a `not`, with Rust's optional trailing comma.
+fn cfg_arg(input: ParseStream<'_>) -> syn::Result<Cfg> {
+    let cfg = input.parse()?;
+    input.parse::<Option<Token![,]>>()?;
+    Ok(cfg)
+}
+
+/// The predicates imposed by `attrs`, including cfgs from arbitrarily nested `cfg_attr`s.
+/// A conditional attribute applies only if all the guards enclosing it hold.
+pub fn cfg_predicates(attrs: &[syn::Attribute]) -> Vec<Cfg> {
     let mut conditions = Vec::new();
     for attr in attrs {
         effective_attrs(&attr.meta, &mut Vec::new(), &mut |attr, guards| {
-            let predicate = if let Meta::List(list) = attr
-                && list.path.is_ident("cfg")
-                && let Ok(predicate) = list.parse_args_with(cfg_head)
-            {
-                predicate.to_string()
-            } else if attr.path().is_ident("test") || attr.path().is_ident("bench") {
-                "test".to_owned()
-            } else {
+            let Some(predicate) = attr_cfg(attr) else {
                 return;
             };
             conditions.push(if guards.is_empty() {
                 predicate
             } else {
-                format!("any(not(all({})), {predicate})", guards.join(", "))
+                let when = Cfg::all_guards(guards);
+                let skip = Cfg {
+                    written: format!("not({})", when.written),
+                    predicate: Predicate::Not(Box::new(when)),
+                };
+                Cfg {
+                    written: format!("any({}, {})", skip.written, predicate.written),
+                    predicate: Predicate::Any(vec![skip, predicate]),
+                }
             });
         });
     }
     conditions
 }
 
-// Read one predicate, including literal `true`/`false`, which are not `syn::Meta`.
-fn cfg_head(input: ParseStream<'_>) -> syn::Result<TokenStream> {
-    let mut predicate = TokenStream::new();
-    while !input.is_empty() && !input.peek(Token![,]) {
-        predicate.extend([input.parse::<TokenTree>()?]);
+fn attr_cfg(attr: &Meta) -> Option<Cfg> {
+    if let Meta::List(list) = attr
+        && list.path.is_ident("cfg")
+    {
+        list.parse_args_with(cfg_arg).ok()
+    } else if attr.path().is_ident("test") || attr.path().is_ident("bench") {
+        Some(Cfg {
+            predicate: Predicate::Atom(syn::parse_quote!(test)),
+            written: "test".into(),
+        })
+    } else {
+        None
     }
-    input.parse::<Option<Token![,]>>()?;
-    Ok(predicate)
 }
 
-fn effective_attrs(meta: &Meta, guards: &mut Vec<String>, f: &mut impl FnMut(&Meta, &[String])) {
+/// The attributes of an item in one resolved build, or `None` when that build does not contain it.
+/// Conditional attributes are expanded in their original order; resolved `cfg` gates are gone.
+/// Used when moving an item into a crate that does not share the original crate's cfgs.
+pub fn configured_attrs(
+    attrs: &[syn::Attribute],
+    atom: impl Fn(&str) -> bool,
+) -> Option<Vec<syn::Attribute>> {
+    let mut active = Vec::new();
+    for attr in attrs {
+        let mut exists = true;
+        effective_attrs(&attr.meta, &mut Vec::new(), &mut |meta, guards| {
+            if guards
+                .iter()
+                .all(|guard| guard.evaluate(|name| Some(atom(name))) == Some(true))
+            {
+                if let Some(predicate) = attr_cfg(meta) {
+                    exists &= predicate.evaluate(|name| Some(atom(name))) == Some(true);
+                } else if guards.is_empty() {
+                    active.push(attr.clone());
+                } else {
+                    active.push(syn::Attribute {
+                        meta: meta.clone(),
+                        ..attr.clone()
+                    });
+                }
+            }
+        });
+        if !exists {
+            return None;
+        }
+    }
+    Some(active)
+}
+
+fn effective_attrs(meta: &Meta, guards: &mut Vec<Cfg>, f: &mut impl FnMut(&Meta, &[Cfg])) {
     if let Meta::List(list) = meta
         && list.path.is_ident("cfg_attr")
         && let Ok((guard, attrs)) = list.parse_args_with(|input: ParseStream<'_>| {
-            Ok((
-                cfg_head(input)?,
-                Punctuated::<Meta, Token![,]>::parse_terminated(input)?,
-            ))
+            let guard = input.parse::<Cfg>()?;
+            let attrs = if input.is_empty() {
+                Punctuated::new()
+            } else {
+                input.parse::<Token![,]>()?;
+                Punctuated::<Meta, Token![,]>::parse_terminated(input)?
+            };
+            Ok((guard, attrs))
         })
     {
-        guards.push(guard.to_string());
+        guards.push(guard);
         for attr in &attrs {
             effective_attrs(attr, guards, f);
         }
@@ -91,54 +243,57 @@ fn effective_attrs(meta: &Meta, guards: &mut Vec<String>, f: &mut impl FnMut(&Me
     }
 }
 
-/// Evaluate a written cfg predicate when its atoms are known. An unknown atom matters only if
-/// neither `all` nor `any` can decide the result without it.
-pub fn evaluate_cfg(predicate: &str, mut atom: impl FnMut(&str) -> Option<bool>) -> Option<bool> {
-    fn eval(predicate: TokenStream, atom: &mut impl FnMut(&str) -> Option<bool>) -> Option<bool> {
-        if let Ok(literal) = syn::parse2::<syn::LitBool>(predicate.clone()) {
-            return Some(literal.value);
-        }
-        let meta = syn::parse2::<Meta>(predicate).ok()?;
-        if let Meta::List(list) = &meta {
-            let args = list
-                .parse_args_with(|input: ParseStream<'_>| {
-                    let mut args = Vec::new();
-                    while !input.is_empty() {
-                        args.push(cfg_head(input)?);
-                    }
-                    Ok(args)
-                })
-                .ok()?;
-            if list.path.is_ident("not") && args.len() == 1 {
-                return eval(args.into_iter().next()?, atom).map(|value| !value);
-            }
-            let all = list.path.is_ident("all");
-            if all || list.path.is_ident("any") {
-                let mut unknown = false;
-                for arg in args {
-                    match eval(arg, atom) {
-                        Some(value) if value != all => return Some(value),
-                        Some(_) => {}
-                        None => unknown = true,
-                    }
-                }
-                return (!unknown).then_some(all);
-            }
-        }
-        atom(&meta.to_token_stream().to_string())
-    }
-    eval(predicate.parse().ok()?, &mut atom)
+/// The `cfg` conditions in `attrs`, including conditional `cfg` attributes, except test-only gates.
+pub fn conditions(attrs: &[syn::Attribute]) -> Vec<String> {
+    cfg_predicates(attrs)
+        .into_iter()
+        .filter(|predicate| !predicate.disabled_without_tests())
+        .map(|predicate| predicate.written)
+        .collect()
 }
 
-fn disabled_without_tests(predicate: &str) -> bool {
-    evaluate_cfg(predicate, |atom| (atom == "test").then_some(false)) == Some(false)
+/// The normalized conditions in `attrs` as text, including test-only gates.
+pub fn cfg_conditions(attrs: &[syn::Attribute]) -> Vec<String> {
+    cfg_predicates(attrs)
+        .into_iter()
+        .map(|predicate| predicate.written)
+        .collect()
+}
+
+/// Read a single variable from rustc's printed cfg set in the form predicates look it up.
+pub fn cfg_atom(text: &str) -> syn::Result<String> {
+    let meta = syn::parse_str::<Meta>(text)?;
+    if matches!(meta, Meta::List(_)) {
+        return Err(syn::Error::new_spanned(meta, "expected a cfg atom"));
+    }
+    Ok(atom_key(&meta))
+}
+
+fn atom_key(meta: &Meta) -> String {
+    if let Meta::NameValue(entry) = meta
+        && let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(value),
+            ..
+        }) = &entry.value
+    {
+        let path = &entry.path;
+        let value = syn::LitStr::new(&value.value(), value.span());
+        quote!(#path = #value).to_string()
+    } else {
+        meta.to_token_stream().to_string()
+    }
+}
+
+/// Evaluate a written cfg predicate with the given cfg facts.
+pub fn evaluate_cfg(predicate: &str, atom: impl FnMut(&str) -> Option<bool>) -> Option<bool> {
+    cfg_arg.parse_str(predicate).ok()?.evaluate(atom)
 }
 
 /// Whether a node cannot be compiled with `test` off, including gates applied by `cfg_attr`.
 pub fn test_only(attrs: &[syn::Attribute]) -> bool {
-    cfg_conditions(attrs)
+    cfg_predicates(attrs)
         .iter()
-        .any(|cfg| disabled_without_tests(cfg))
+        .any(Cfg::disabled_without_tests)
 }
 
 /// An item-position standard `include!` of one literal path, with the attributes on the
@@ -413,9 +568,8 @@ impl Walker {
                         }) = &value.value
                     {
                         let guard = match guards {
-                            [] => "all()".to_owned(),
-                            [guard] => guard.clone(),
-                            _ => format!("all({})", guards.join(", ")),
+                            [guard] => guard.written.clone(),
+                            _ => Cfg::all_guards(guards).written,
                         };
                         paths.push((Some(path.value()), guard));
                     }

@@ -1,4 +1,5 @@
 //! Template pools, pool elements and JigsawPlacement.
+use mod_api::JigsawSpace;
 use serde_json::Value;
 use std::{
     cell::RefCell,
@@ -66,9 +67,6 @@ pub enum PoolElement {
         /// The piece's own terrain kernel in a structure that has one
         /// (`"sunrise:enhanced_terrain_adaptation"`).
         enhanced_terrain: Option<Arc<super::enhanced_terrain::Adaptation>>,
-        /// getGroundLevelDelta: 1, or Formations' `ground_level`
-        /// (`"sunrise:ground_level"`).
-        ground_level: i32,
     },
     Feature {
         feature: String,
@@ -204,13 +202,6 @@ impl PoolElement {
                         .get("sunrise:enhanced_terrain_adaptation")
                         .map(|a| super::enhanced_terrain::Adaptation::decode(a).map(Arc::new))
                         .transpose()?,
-                    ground_level: match value.get("sunrise:ground_level") {
-                        None => 1,
-                        Some(v) => v
-                            .as_u64()
-                            .and_then(|g| i32::try_from(g).ok())
-                            .ok_or(DecodeError::Field("sunrise:ground_level"))?,
-                    },
                 }
             }
             "minecraft:feature_pool_element" => Self::Feature {
@@ -390,7 +381,6 @@ impl PoolElement {
     }
     pub fn ground_level_delta(&self) -> i32 {
         match self {
-            Self::Single { ground_level, .. } => *ground_level,
             Self::Mod { element, .. } => element.ground_level_delta(),
             _ => 1,
         }
@@ -588,7 +578,17 @@ impl Pools {
                             // Once per pool: each worker decodes its own copy.
                             static WARNED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
                             if WARNED.lock().unwrap().insert(name.to_owned()) {
-                                log::warn!("Sunrise: template pool {name} is left out: {error}");
+                                let file = match name.split_once(':') {
+                                    Some((ns, path)) => {
+                                        format!("data/{ns}/worldgen/template_pool/{path}.json")
+                                    }
+                                    None => {
+                                        format!("data/minecraft/worldgen/template_pool/{name}.json")
+                                    }
+                                };
+                                log::warn!(
+                                    "Sunrise: template pool {name} ({file}) is left out: {error}"
+                                );
                             }
                             return None;
                         }
@@ -1080,22 +1080,9 @@ pub struct JigsawConfig<'a> {
     pub waterlogging: bool,
 }
 
-/// Free space for children: an inclusive container box minus placed boxes.
-#[derive(Debug)]
-pub(super) struct Free {
-    pub(super) container: BoundingBox,
-    pub(super) removed: Vec<BoundingBox>,
-}
-impl Free {
-    /// Whether every point of the (0.25-deflated) box lies in free space.
-    pub(super) fn fits(&self, b: &BoundingBox) -> bool {
-        (0..3).all(|i| b.min[i] >= self.container.min[i] && b.max[i] <= self.container.max[i])
-            && !self.removed.iter().any(|r| r.intersects(b))
-    }
-}
 struct PieceState {
     piece: usize,
-    free: Rc<RefCell<Free>>,
+    free: Rc<RefCell<JigsawSpace>>,
     depth: i32,
 }
 
@@ -1240,72 +1227,184 @@ pub fn lay_out_children(
         return ([cx, cy, cz], Vec::new());
     }
     let mut pieces = vec![center];
-    {
-        // Java's int arithmetic wraps; a mod type's reach and padding are its own.
-        let [h, v] = config.max_distance;
-        let low_y = cy
-            .wrapping_sub(v)
-            .max(context.min_y().wrapping_add(config.padding[0]));
-        let high_y = cy.wrapping_add(v).wrapping_add(1).min(
-            context
-                .max_y()
-                .wrapping_add(1)
-                .wrapping_sub(config.padding[1]),
-        );
-        let container = BoundingBox::new(
-            [cx.wrapping_sub(h), low_y, cz.wrapping_sub(h)],
-            [
-                cx.wrapping_add(h),
-                high_y.wrapping_sub(1),
-                cz.wrapping_add(h),
-            ],
-        );
-        add_children(
-            config,
-            context,
-            pools,
-            resources,
-            bindings,
-            random,
-            &mut pieces,
-            container,
-        );
-    }
-    ([cx, cy, cz], pieces)
-}
-
-/// The inner JigsawPlacement.addPieces: lays out the children of
-/// `pieces[0]`, a start piece already placed, to `config.max_depth`,
-/// within `container` (inclusive) less the start's box. A structure with
-/// its own start (Formations' pieced one) reaches the jigsaw layout here.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn add_children(
-    config: &JigsawConfig<'_>,
-    context: &mut impl JigsawContext,
-    pools: &Pools,
-    resources: &StructureResources,
-    bindings: &FeatureBlockBindings<'_>,
-    random: &mut impl RandomSource,
-    pieces: &mut Vec<PoolPiece>,
-    container: BoundingBox,
-) {
-    let free = Rc::new(RefCell::new(Free {
-        container,
-        removed: vec![pieces[0].bounding_box],
-    }));
+    // Java's int arithmetic wraps; a mod type's reach and padding are its own.
+    let [h, v] = config.max_distance;
+    let low_y = cy
+        .wrapping_sub(v)
+        .max(context.min_y().wrapping_add(config.padding[0]));
+    let high_y = cy.wrapping_add(v).wrapping_add(1).min(
+        context
+            .max_y()
+            .wrapping_add(1)
+            .wrapping_sub(config.padding[1]),
+    );
+    let container = BoundingBox::new(
+        [cx.wrapping_sub(h), low_y, cz.wrapping_sub(h)],
+        [
+            cx.wrapping_add(h),
+            high_y.wrapping_sub(1),
+            cz.wrapping_add(h),
+        ],
+    );
+    let mut space = JigsawSpace::new(container);
+    space.remove(pieces[0].bounding_box);
     let mut placer = Placer {
         config,
         pools,
         resources,
         bindings,
-        pieces,
+        pieces: &mut pieces,
         queue: BTreeMap::new(),
         counts: HashMap::new(),
     };
-    placer.children(0, free, 0, context, random);
+    placer.children(0, Rc::new(RefCell::new(space)), 0, context, random);
     while let Some(state) = placer.next() {
         placer.children(state.piece, state.free, state.depth, context, random);
     }
+    ([cx, cy, cz], pieces)
+}
+
+/// One target element tried on one jigsaw of `source`: the inner loops of
+/// `JigsawPlacement.Placer.tryPlacingChildren` for that element. Its rotations
+/// in `Rotation.getShuffled` order, in each its shuffled jigsaws, the
+/// expansion hack, `JigsawBlock.canAttach`, the child's height, and the
+/// check against `space`. `None`, with no draws, for the empty element, where
+/// vanilla's candidate loop stops. On the first fit the box leaves `space`, `source`
+/// gets its junction and the child is returned with its own. `pool` looks a
+/// pool up by a jigsaw's name, aliases applied; `base_height` keeps the
+/// `WORLD_SURFACE_WG` height under `jigsaw` once read, as vanilla does across
+/// one jigsaw's candidates.
+#[allow(clippy::too_many_arguments)]
+pub fn attach<C: JigsawContext>(
+    source: &mut PoolPiece,
+    jigsaw: &Jigsaw<'_>,
+    target: &Arc<PoolElement>,
+    space: &mut JigsawSpace,
+    use_expansion_hack: bool,
+    pool: &dyn Fn(&str) -> Option<Arc<Pool>>,
+    resources: &StructureResources,
+    base_height: &mut Option<i32>,
+    context: &mut C,
+    random: &mut impl RandomSource,
+) -> Option<PoolPiece> {
+    if matches!(target.as_ref(), PoolElement::Empty) {
+        return None;
+    }
+    let source_rigid = source.element.projection() == Projection::Rigid;
+    let source_y = source.bounding_box.min[1];
+    let source_ground = source.ground_level_delta;
+    let s = step(jigsaw.front);
+    let target_pos: [i32; 3] = std::array::from_fn(|i| jigsaw.pos[i].wrapping_add(s[i]));
+    let local_y = jigsaw.pos[1].wrapping_sub(source_y);
+    let surface = |base_height: &mut Option<i32>, context: &mut C| {
+        *base_height.get_or_insert_with(|| {
+            context.base_height(jigsaw.pos[0], jigsaw.pos[2], HeightmapType::WorldSurfaceWg)
+        })
+    };
+    let mut rotations = Rotation::ALL;
+    shuffle(&mut rotations, random);
+    for rotation in rotations {
+        let target_jigsaws = target.shuffled_jigsaws(resources, [0; 3], rotation, &mut *random);
+        let hack_box = target.bounding_box(resources, [0; 3], rotation);
+        let expand_to = if use_expansion_hack && hack_box.span()[1] <= 16 {
+            target_jigsaws
+                .iter()
+                .map(|tj| {
+                    let st = step(tj.front);
+                    if !hack_box.is_inside(std::array::from_fn(|i| tj.pos[i].wrapping_add(st[i]))) {
+                        return 0;
+                    }
+                    let child = pool(&tj.pool);
+                    let child_size = child.as_ref().map_or(0, |p| p.max_size(resources));
+                    let fallback_size = child
+                        .and_then(|p| pool(&p.fallback))
+                        .map_or(0, |p| p.max_size(resources));
+                    child_size.max(fallback_size)
+                })
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        for target_jigsaw in &target_jigsaws {
+            if !can_attach(jigsaw, target_jigsaw) {
+                continue;
+            }
+            let target_local = target_jigsaw.pos;
+            let raw_position: [i32; 3] =
+                std::array::from_fn(|i| target_pos[i].wrapping_sub(target_local[i]));
+            let raw_box = target.bounding_box(resources, raw_position, rotation);
+            let raw_y = raw_box.min[1];
+            let target_rigid = target.projection() == Projection::Rigid;
+            let target_local_y = target_local[1];
+            let delta_y = local_y
+                .wrapping_sub(target_local_y)
+                .wrapping_add(step(jigsaw.front)[1]);
+            let target_y = if source_rigid && target_rigid {
+                source_y.wrapping_add(delta_y)
+            } else {
+                surface(base_height, context).wrapping_sub(target_local_y)
+            };
+            let offset = target_y.wrapping_sub(raw_y);
+            let mut target_box = raw_box.moved([0, offset, 0]);
+            let target_position = [
+                raw_position[0],
+                raw_position[1].wrapping_add(offset),
+                raw_position[2],
+            ];
+            if expand_to > 0 {
+                let size = expand_to
+                    .wrapping_add(1)
+                    .max(target_box.max[1].wrapping_sub(target_box.min[1]));
+                target_box.max[1] = target_box.max[1].max(target_box.min[1].wrapping_add(size));
+            }
+            if !space.fits(&target_box) {
+                continue;
+            }
+            space.remove(target_box);
+            let target_ground = if target_rigid {
+                source_ground.wrapping_sub(delta_y)
+            } else {
+                target.ground_level_delta()
+            };
+            let junction_y = if source_rigid {
+                source_y.wrapping_add(local_y)
+            } else if target_rigid {
+                target_y.wrapping_add(target_local_y)
+            } else {
+                surface(base_height, context).wrapping_add(delta_y / 2)
+            };
+            source.junctions.push(Junction {
+                source_x: target_pos[0],
+                source_ground_y: junction_y.wrapping_sub(local_y).wrapping_add(source_ground),
+                source_z: target_pos[2],
+                delta_y,
+                dest_projection: target.projection(),
+            });
+            return Some(PoolPiece {
+                element: target.clone(),
+                position: target_position,
+                ground_level_delta: target_ground,
+                rotation,
+                bounding_box: target_box,
+                junctions: vec![Junction {
+                    source_x: jigsaw.pos[0],
+                    source_ground_y: junction_y
+                        .wrapping_sub(target_local_y)
+                        .wrapping_add(target_ground),
+                    source_z: jigsaw.pos[2],
+                    delta_y: delta_y.wrapping_neg(),
+                    dest_projection: if source_rigid {
+                        Projection::Rigid
+                    } else {
+                        Projection::TerrainMatching
+                    },
+                }],
+                waterlogging: source.waterlogging,
+            });
+        }
+    }
+    None
 }
 struct Placer<'a, 'p> {
     config: &'a JigsawConfig<'a>,
@@ -1327,50 +1426,41 @@ impl Placer<'_, '_> {
         }
         state
     }
-    fn pool(&self, name: &str) -> Option<Arc<Pool>> {
-        let name = self.config.aliases.get(name).map_or(name, String::as_str);
-        self.pools.get(name, self.resources, self.bindings)
-    }
     fn children(
         &mut self,
         source_index: usize,
-        context_free: Rc<RefCell<Free>>,
+        context_free: Rc<RefCell<JigsawSpace>>,
         depth: i32,
         context: &mut impl JigsawContext,
         random: &mut impl RandomSource,
     ) {
-        let (source_element, source_position, source_rotation, source_box, source_ground) = {
-            let s = &self.pieces[source_index];
-            (
-                s.element.clone(),
-                s.position,
-                s.rotation,
-                s.bounding_box,
-                s.ground_level_delta,
-            )
+        let (config, pools, resources, bindings) =
+            (self.config, self.pools, self.resources, self.bindings);
+        let pool = |name: &str| {
+            let name = config.aliases.get(name).map_or(name, String::as_str);
+            pools.get(name, resources, bindings)
         };
-        let source_rigid = source_element.projection() == Projection::Rigid;
-        let mut source_free: Option<Rc<RefCell<Free>>> = None;
-        let source_y = source_box.min[1];
-        let jigsaws = source_element.shuffled_jigsaws(
-            self.resources,
-            source_position,
-            source_rotation,
-            random,
+        let source = &self.pieces[source_index];
+        let (source_element, source_position, source_rotation, source_box) = (
+            source.element.clone(),
+            source.position,
+            source.rotation,
+            source.bounding_box,
         );
+        let mut source_free: Option<Rc<RefCell<JigsawSpace>>> = None;
+        let jigsaws =
+            source_element.shuffled_jigsaws(resources, source_position, source_rotation, random);
         'jigsaws: for jigsaw in jigsaws {
-            let direction = jigsaw.front;
-            let s = step(direction);
+            let s = step(jigsaw.front);
             let target_pos: [i32; 3] = std::array::from_fn(|i| jigsaw.pos[i].wrapping_add(s[i]));
-            let local_y = jigsaw.pos[1].wrapping_sub(source_y);
-            let mut base_height = i32::MIN;
-            let Some(target_pool) = self.pool(&jigsaw.pool) else {
+            let mut base_height = None;
+            let Some(target_pool) = pool(&jigsaw.pool) else {
                 continue;
             };
             if target_pool.templates.is_empty() && jigsaw.pool != "minecraft:empty" {
                 continue;
             }
-            let Some(fallback) = self.pool(&target_pool.fallback) else {
+            let Some(fallback) = pool(&target_pool.fallback) else {
                 continue;
             };
             if fallback.templates.is_empty() && target_pool.fallback != "minecraft:empty" {
@@ -1378,22 +1468,13 @@ impl Placer<'_, '_> {
             }
             let children_free = if source_box.is_inside(target_pos) {
                 source_free
-                    .get_or_insert_with(|| {
-                        Rc::new(RefCell::new(Free {
-                            container: source_box,
-                            removed: Vec::new(),
-                        }))
-                    })
+                    .get_or_insert_with(|| Rc::new(RefCell::new(JigsawSpace::new(source_box))))
                     .clone()
             } else {
                 context_free.clone()
             };
-            let mut candidates = Candidates::new(
-                &target_pool,
-                &fallback,
-                depth != self.config.max_depth,
-                random,
-            );
+            let mut candidates =
+                Candidates::new(&target_pool, &fallback, depth != config.max_depth, random);
             while let Some(Pick {
                 element: target,
                 name,
@@ -1402,142 +1483,35 @@ impl Placer<'_, '_> {
                 if matches!(target.as_ref(), PoolElement::Empty) {
                     break;
                 }
-                let mut rotations = Rotation::ALL;
-                shuffle(&mut rotations, random);
-                for rotation in rotations {
-                    let target_jigsaws =
-                        target.shuffled_jigsaws(self.resources, [0; 3], rotation, &mut *random);
-                    let hack_box = target.bounding_box(self.resources, [0; 3], rotation);
-                    let expand_to = if self.config.use_expansion_hack && hack_box.span()[1] <= 16 {
-                        target_jigsaws
-                            .iter()
-                            .map(|tj| {
-                                let st = step(tj.front);
-                                if !hack_box.is_inside(std::array::from_fn(|i| tj.pos[i] + st[i])) {
-                                    return 0;
-                                }
-                                let child = self.pool(&tj.pool);
-                                let child_size =
-                                    child.as_ref().map_or(0, |p| p.max_size(self.resources));
-                                let fallback_size = child
-                                    .and_then(|p| self.pool(&p.fallback))
-                                    .map_or(0, |p| p.max_size(self.resources));
-                                child_size.max(fallback_size)
-                            })
-                            .max()
-                            .unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    for target_jigsaw in &target_jigsaws {
-                        if !can_attach(&jigsaw, target_jigsaw) {
-                            continue;
-                        }
-                        let target_local = target_jigsaw.pos;
-                        let raw_position: [i32; 3] =
-                            std::array::from_fn(|i| target_pos[i].wrapping_sub(target_local[i]));
-                        let raw_box = target.bounding_box(self.resources, raw_position, rotation);
-                        let raw_y = raw_box.min[1];
-                        let target_rigid = target.projection() == Projection::Rigid;
-                        let target_local_y = target_local[1];
-                        let delta_y = local_y
-                            .wrapping_sub(target_local_y)
-                            .wrapping_add(step(jigsaw.front)[1]);
-                        let target_y = if source_rigid && target_rigid {
-                            source_y.wrapping_add(delta_y)
-                        } else {
-                            if base_height == i32::MIN {
-                                base_height = context.base_height(
-                                    jigsaw.pos[0],
-                                    jigsaw.pos[2],
-                                    HeightmapType::WorldSurfaceWg,
-                                );
-                            }
-                            base_height.wrapping_sub(target_local_y)
-                        };
-                        let offset = target_y.wrapping_sub(raw_y);
-                        let mut target_box = raw_box.moved([0, offset, 0]);
-                        let target_position = [
-                            raw_position[0],
-                            raw_position[1].wrapping_add(offset),
-                            raw_position[2],
-                        ];
-                        if expand_to > 0 {
-                            let size = expand_to
-                                .wrapping_add(1)
-                                .max(target_box.max[1].wrapping_sub(target_box.min[1]));
-                            target_box.max[1] =
-                                target_box.max[1].max(target_box.min[1].wrapping_add(size));
-                        }
-                        if !children_free.borrow().fits(&target_box) {
-                            continue;
-                        }
-                        children_free.borrow_mut().removed.push(target_box);
-                        let target_ground = if target_rigid {
-                            source_ground.wrapping_sub(delta_y)
-                        } else {
-                            target.ground_level_delta()
-                        };
-                        let junction_y = if source_rigid {
-                            source_y.wrapping_add(local_y)
-                        } else if target_rigid {
-                            target_y.wrapping_add(target_local_y)
-                        } else {
-                            if base_height == i32::MIN {
-                                base_height = context.base_height(
-                                    jigsaw.pos[0],
-                                    jigsaw.pos[2],
-                                    HeightmapType::WorldSurfaceWg,
-                                );
-                            }
-                            base_height.wrapping_add(delta_y / 2)
-                        };
-                        self.pieces[source_index].junctions.push(Junction {
-                            source_x: target_pos[0],
-                            source_ground_y: junction_y
-                                .wrapping_sub(local_y)
-                                .wrapping_add(source_ground),
-                            source_z: target_pos[2],
-                            delta_y,
-                            dest_projection: target.projection(),
-                        });
-                        self.pieces.push(PoolPiece {
-                            element: target.clone(),
-                            position: target_position,
-                            ground_level_delta: target_ground,
-                            rotation,
-                            bounding_box: target_box,
-                            junctions: vec![Junction {
-                                source_x: jigsaw.pos[0],
-                                source_ground_y: junction_y
-                                    .wrapping_sub(target_local_y)
-                                    .wrapping_add(target_ground),
-                                source_z: jigsaw.pos[2],
-                                delta_y: delta_y.wrapping_neg(),
-                                dest_projection: if source_rigid {
-                                    Projection::Rigid
-                                } else {
-                                    Projection::TerrainMatching
-                                },
-                            }],
-                            waterlogging: self.config.waterlogging,
-                        });
-                        if let Some(name) = name {
-                            *self.counts.entry(name).or_default() += 1;
-                        }
-                        if depth < self.config.max_depth {
-                            self.queue
-                                .entry(jigsaw.placement_priority)
-                                .or_default()
-                                .push_back(PieceState {
-                                    piece: self.pieces.len() - 1,
-                                    free: children_free.clone(),
-                                    depth: depth + 1,
-                                });
-                        }
-                        continue 'jigsaws;
-                    }
+                let Some(child) = attach(
+                    &mut self.pieces[source_index],
+                    &jigsaw,
+                    &target,
+                    &mut children_free.borrow_mut(),
+                    config.use_expansion_hack,
+                    &pool,
+                    resources,
+                    &mut base_height,
+                    context,
+                    random,
+                ) else {
+                    continue;
+                };
+                self.pieces.push(child);
+                if let Some(name) = name {
+                    *self.counts.entry(name).or_default() += 1;
                 }
+                if depth < config.max_depth {
+                    self.queue
+                        .entry(jigsaw.placement_priority)
+                        .or_default()
+                        .push_back(PieceState {
+                            piece: self.pieces.len() - 1,
+                            free: children_free.clone(),
+                            depth: depth + 1,
+                        });
+                }
+                continue 'jigsaws;
             }
         }
     }

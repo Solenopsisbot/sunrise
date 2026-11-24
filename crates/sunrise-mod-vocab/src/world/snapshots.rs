@@ -1,6 +1,5 @@
 //! Owned placement and loot data; none of these snapshots borrows an engine context.
 use crate::{BlockPos, Direction, ItemKey, PlayerRef};
-use sunrise_core::nbt::Tag;
 
 /// The placement rules a block placement follows: a player's (`BlockPlaceContext`) or a
 /// directional non-player context's (`DirectionalPlaceContext`). A placement-context rewrite can
@@ -177,9 +176,9 @@ impl PlacementPlacer {
 /// A loot function's intermediate item candidate, before inventory materialization.
 /// Counts can be non-positive while loot functions run; unlike `ItemStack`, this
 /// is a roll's intermediate data and does not represent an occupied inventory slot.
+// no wire: in-process loot candidate snapshot for explicit copy and replacement.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
 pub struct LootStack {
     /// Resolved candidate item.
     pub item: ItemKey,
@@ -206,9 +205,9 @@ pub struct LootStack {
 }
 
 /// A deferred exploration-map search requested by a loot function.
+// no wire: in-process deferred exploration-map request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
 pub struct ExplorationMap {
     /// Destination structure tag, without `#`.
     pub destination: String,
@@ -220,122 +219,6 @@ pub struct ExplorationMap {
     pub search_radius: i32,
     /// Whether to skip previously discovered structures.
     pub skip_existing_chunks: bool,
-}
-
-/// An owned view of the parameters supplied to a mod's loot kind.
-/// The game fills it only when that kind has subscribed listeners.
-#[derive(Clone, Debug, PartialEq)]
-#[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct LootContext {
-    /// Queried root id, written after all nested rolls, before global modifiers (#1270).
-    /// The first id wins; nested rolls never write it. Unset is `UNKNOWN_LOOT_TABLE`.
-    pub queried_table_id: String,
-    /// Stack whose data is queried, unchanged through nested rolls; absent in existing callers.
-    pub queried_stack: Option<crate::ItemStack>,
-    /// Entity named by the table, if any.
-    pub entity: Option<LootEntity>,
-    /// Killing damage, if any.
-    pub damage: Option<LootDamage>,
-    /// Player whose kill produced this roll, if any.
-    pub player: Option<LootEntity>,
-    /// Tool used for the roll, if any.
-    pub tool: Option<LootTool>,
-    /// Block identifier for a block-drop roll.
-    pub block: Option<String>,
-    /// Luck applied to this roll.
-    pub luck: f32,
-    /// Biome identifier, when available.
-    pub biome: Option<String>,
-    /// Zero in registered codec contexts; use `LootTypeContext::random` for actual roll draws.
-    pub seed: i64,
-    /// Origin, block entity and level facts at the moment of the roll.
-    pub place: Option<LootPlace>,
-}
-
-/// Tool facts supplied by the item engine to a loot roll.
-#[derive(Clone, Debug, PartialEq)]
-#[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct LootTool {
-    /// Resolved tool item.
-    pub item: ItemKey,
-    /// Enchantment identifiers and levels.
-    pub enchantments: Vec<(String, i32)>,
-}
-
-/// Entity predicate facts captured for a loot roll, not a live entity handle.
-#[derive(Clone, Debug, Default, PartialEq)]
-#[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct LootEntity {
-    /// Entity type identifier.
-    pub kind: String,
-    /// Whether the entity is living.
-    pub living: bool,
-    /// Whether the entity is on fire.
-    pub on_fire: bool,
-    /// Whether the entity is a baby.
-    pub baby: bool,
-    /// Its vehicle at the moment of the roll.
-    pub vehicle: Option<Box<LootEntity>>,
-    /// Cube mob size, if applicable.
-    pub cube_size: Option<i32>,
-    /// Sheep colour and sheared state, if applicable.
-    pub sheep: Option<(String, bool)>,
-    /// Raider captain state, if applicable.
-    pub captain: Option<bool>,
-    /// Frog variant identifier, if applicable.
-    pub frog_variant: Option<String>,
-    /// Chicken variant identifier, if applicable.
-    pub chicken_variant: Option<String>,
-    /// Charged creeper state.
-    pub powered: bool,
-    /// Equipment slot names and their intermediate loot candidates.
-    pub equipment: Vec<(String, LootStack)>,
-}
-
-/// Damage-source facts captured for a loot roll.
-#[derive(Clone, Debug, Default, PartialEq)]
-#[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct LootDamage {
-    /// Damage type identifier.
-    pub kind: String,
-    /// Attacker, such as a projectile's shooter.
-    pub source: Option<LootEntity>,
-    /// Direct attacker, such as the projectile itself.
-    pub direct: Option<LootEntity>,
-}
-
-/// Place facts captured around a loot roll.
-#[derive(Clone, Debug, Default, PartialEq)]
-#[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct LootPlace {
-    /// World-space origin.
-    pub origin: Option<[f64; 3]>,
-    /// Block entity saved before removal, with its full metadata.
-    pub block_entity: Option<Tag>,
-    /// Level facts, when available.
-    pub level: Option<LootLevel>,
-}
-
-/// Level facts captured around a loot roll.
-#[derive(Clone, Debug, Default, PartialEq)]
-#[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct LootLevel {
-    /// Dimension identifier, including custom dimensions.
-    pub dimension: String,
-    /// Elapsed game ticks.
-    pub game_time: i64,
-    /// Day time; the time of day is its remainder modulo 24,000.
-    pub day_time: i64,
-    /// Whether it is raining.
-    pub raining: bool,
-    /// Whether it is thundering.
-    pub thundering: bool,
 }
 
 impl LootStack {
@@ -354,30 +237,6 @@ impl LootStack {
             names: Vec::new(),
             components: Vec::new(),
         }
-    }
-}
-impl LootContext {
-    /// An empty facts snapshot. Registered codec contexts pass zero for `seed`.
-    pub fn new(seed: i64) -> Self {
-        Self {
-            queried_table_id: sunrise_core::UNKNOWN_LOOT_TABLE.into(),
-            queried_stack: None,
-            entity: None,
-            damage: None,
-            player: None,
-            tool: None,
-            block: None,
-            luck: 0.0,
-            biome: None,
-            seed,
-            place: None,
-        }
-    }
-}
-impl LootTool {
-    /// Tool facts for a resolved item.
-    pub fn new(item: ItemKey, enchantments: Vec<(String, i32)>) -> Self {
-        Self { item, enchantments }
     }
 }
 impl ExplorationMap {
@@ -402,6 +261,7 @@ impl ExplorationMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sunrise_core::nbt::Tag;
 
     #[test]
     fn loot_snapshot_retains_unknown_patch_removal_and_order() {

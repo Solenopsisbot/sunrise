@@ -161,11 +161,10 @@ impl Game<'_> {
             } else {
                 "minecraft:ui.toast.out"
             };
-            self.audio.play(event, None, 1.0, 1.0);
+            self.play_audio(event, None, 1.0, 1.0);
         }
         if challenge_sound {
-            self.audio
-                .play("minecraft:ui.toast.challenge_complete", None, 1.0, 1.0);
+            self.play_audio("minecraft:ui.toast.challenge_complete", None, 1.0, 1.0);
         }
         let atlas = &self.gui.atlas;
         for entry in &self.toast_manager.visible {

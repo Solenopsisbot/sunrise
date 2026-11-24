@@ -14,7 +14,7 @@ when empty or when its contents match both the fluid and components.
 
 | Game provider | Rules |
 | --- | --- |
-| Mod block tanks (`r.block_fluids(&block, tanks)` with `ModFluidTanks`) | Access depends on side. Saved tanks reject fluids with components. |
+| Mod block tanks (`r.block_fluids(&block, tanks)` with `ModFluidTanks`) | Access depends on side; face/input/output indices must be within `0..tanks.len()`. Capacities are kept as declared (zero-capacity tanks accept no fluid). Saved tanks reject fluids with components. |
 | Water cauldron | One bucket in three levels; insertion and extraction use whole levels. |
 | Lava cauldron | One bucket, inserted or extracted whole. |
 | Registered cauldron content | Uses the whole levels specified through `register_cauldron_fluid_content`. |
@@ -73,8 +73,8 @@ block's centre:
 
 | Operation | Game event | Fluid sound |
 | --- | --- | --- |
-| Fill the item | `minecraft:fluid_pickup` | `fluid_pickup_sound` |
-| Empty the item | `minecraft:fluid_place` | `fluid_empty_sound` |
+| Fill the item | `minecraft:fluid_pickup` | `FluidKey::pickup_sound` |
+| Empty the item | `minecraft:fluid_place` | `FluidKey::empty_sound` |
 
 A tank-only fluid emits the event without a sound.
 `fluid_util::interact_with_handler` performs the interaction against a handler you
@@ -150,13 +150,14 @@ and ticks scheduled through `LevelWriteHost` by a `place_liquid` Part. An abort 
 of them. If a fluid game-event listener opens another transaction during commit, it does not
 delay attachment retirement for block entities removed after the outermost close.
 
-`ItemsServerHost::dispense_with_remainder` likewise returns a detached active-slot
+`LevelRef::dispense_with_remainder` (resolve the dispenser's level with
+`host.level(event.dimension)`) likewise returns a detached active-slot
 remainder immediately, but any other slot it fills is provisional, and overflow drops, click
 and smoke wait for the outermost commit in the dispenser's level. Inserting the remainder into an empty slot notifies; growing
 a compatible stack does not. The detached active stack keeps its count until the dispenser
 writes its slot, using the effective stack-size component (one if absent). An inert Part or a
 refused reply leaves the slot untouched and sends no slot change notice.
 Where neither pickup nor placement moves anything, one unchanged container is dispensed as
-`DefaultDispenseItemBehavior` does. Where the helper returns `None` (for example, when a
+`DefaultDispenseItemBehavior` does (`LevelRef::dispense_default`). Where the helper returns `None` (for example, when a
 transaction is unavailable or stack validation fails), return `None` from the Part rather than
 calling `dispense_default` yourself.

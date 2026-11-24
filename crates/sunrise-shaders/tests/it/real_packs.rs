@@ -225,6 +225,7 @@ fn real_packs_read() {
                     index: "uint(@)".into(),
                 }),
                 interface_limits: RADV,
+                mod_programs: Vec::new(),
             };
                 let mut macros = macros.clone();
                 if std::env::var_os("SUBGROUPS").is_some() {

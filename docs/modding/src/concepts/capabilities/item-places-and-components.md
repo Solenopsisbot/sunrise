@@ -10,8 +10,9 @@ register a `PlaceProvider` with `r.place_provider` and use `ItemPlace::Mod`. `It
 `place.with_stack(host, |stack| stack.item())` reads the item at a nonempty place. The
 callback receives an `ItemStackView` for that call only. Read `item()`, `count()` and
 `damage()` there without copying a resident stack. If you only need to know whether
-the place is occupied, use `place.amount(host) != 0`. For components or an owned
-`ItemStack` beyond the callback, project it explicitly:
+the place is occupied, use `place.amount(host) != 0`. Read one stored component
+override with `stack.get(&component)`; it does not consult item defaults. To read
+the whole patch or keep an owned `ItemStack` beyond the callback, project it explicitly:
 
 ```rust,ignore
 match place.with_stack(host, |stack| stack.project()) {
@@ -29,7 +30,7 @@ in the same transaction.
 For a provider-backed or decoded place, the view lends the value produced for that read. A
 provider-backed menu slot reads its live backing, not the menu's display copy. A dropped
 item narrowed to an `ItemEntityRef` has its own
-[`with_stack`](../../how-to/world/block-entity-item-drops.md).
+[`with_stack`](../../how-to/world/block-entities.md#dropped-items-during-block-entity-ticks).
 
 ## Item capabilities
 
@@ -42,7 +43,11 @@ slots declared with `r.item_container(&item, provider)`, then items carrying
 at slot 0, moving the inserted stack to the front. Only slot 0 can be extracted; reads expose
 all contents in front-first order. An empty bundle exposes one empty insertion slot.
 A mod can return `Some(Box::new(BundleItems::new(place.clone())))` from its own
-`ITEM_ITEMS` provider for an item carrying `minecraft:bundle_contents`. All writes exchange
+`ITEM_ITEMS` provider for an item carrying `minecraft:bundle_contents`, or
+`Some(Box::new(BundleItems::with_config(place.clone(), BundleConfig::custom("mymod:pouch_contents", 4).with_filter_tag("mymod:runes"))))`
+for a registered custom bundle-like component storing a `Tag::List` of `ItemStack.CODEC` entries
+with its own Sunrise-specific capacity multiplier and optional item tag filter (non-list component
+payloads are refused without overwriting). All writes exchange
 one item through the place and roll back with the caller's transaction. `place.capability(host, &ITEM_ITEMS)` queries these providers in order.
 The registered `ItemContainerProvider::slots(&dyn Host)` callback returns `Option<u32>` dynamically;
 it is not called by registration-time coverage queries. `ITEM_ITEMS` covers the declared item type

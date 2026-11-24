@@ -294,9 +294,14 @@ fn fixture(dye: bool, test: impl FnOnce(&mut Game<'_>, &Arc<Seen>)) {
     });
 }
 fn setup(game: &mut Game<'_>, block: &str, level: Option<&str>, item: &str, count: u32) {
-    game.world
-        .chunks
-        .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
+    game.world.chunks.insert(
+        (0, 0),
+        Arc::new({
+            let mut chunk = sunrise_client::chunk::Chunk::empty(0, 0);
+            chunk.lit = true; // a FULL read of a hand-made column finds it ready
+            chunk
+        }),
+    );
     let state = sunrise_world::chunk::BlockState {
         name: block.into(),
         properties: level
@@ -710,7 +715,7 @@ fn cauldron_world_close_discards_callbacks_before_failed_preparation() {
         );
         game.native_lifecycle_world_closed();
         game.native_lifecycle
-            .begin_open(mod_api::Authority::IntegratedServer);
+            .begin_open(Some(mod_api::Authority::IntegratedServer));
         assert!(
             game.resolve_parts()
                 .unwrap_err()
@@ -1710,8 +1715,17 @@ fn cauldron_packet_pass_resumes_item_use_once_without_client_prediction() {
         };
         game.forced_hit = Some(hit);
         let client_swings = game.swings_started;
-        let hold = matches!(case.as_str(), "hold-drop" | "hold-release")
-            .then(|| game.hold_packets().unwrap());
+        let hold_call = || {
+            mod_platform::content::crash::enter_native_mod(mod_api::content::crash::ModCall {
+                id: "packet_cauldron",
+                hook: "client_tick",
+                part: None,
+            })
+        };
+        let hold = matches!(case.as_str(), "hold-drop" | "hold-release").then(|| {
+            let _owner = hold_call();
+            game.hold_packets().unwrap()
+        });
         game.remote_use(mod_api::InteractionAttempt::Press);
         // In the vanilla transport control, paper's air use passes, so the
         // off hand still gets its ordinary block turn even though it's empty.
@@ -1736,6 +1750,7 @@ fn cauldron_packet_pass_resumes_item_use_once_without_client_prediction() {
                 read_uses(game).is_empty(),
                 "held block use must not reach the peer"
             );
+            let _owner = hold_call();
             if case == "hold-drop" {
                 game.drop_held(hold).unwrap();
             } else {
