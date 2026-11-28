@@ -313,6 +313,8 @@ pub fn load_world_rest<P: RestPresentation + Sync>(
         threads
     );
     progress.set(8);
+    let behaviours = Arc::new(behaviours?);
+    sunrise_sim::vanillagen::set_shared_behaviours(root, registry, behaviours.clone());
     let world_rest = WorldRest {
         stations,
         items: Arc::new(items),
@@ -321,7 +323,7 @@ pub fn load_world_rest<P: RestPresentation + Sync>(
         providers,
         nether_environment,
         end_environment,
-        behaviours: Arc::new(behaviours?),
+        behaviours,
         mob_types,
         living_type_keys: sunrise_sim::health::LivingTypeKeys::resolve(),
         mob_data,
